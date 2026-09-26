@@ -1,0 +1,27 @@
+#pragma once
+
+// Порты шины Z80 глазами устройства: чем отвечать на чтение и кто узнаёт о
+// записи. Определяет порт.
+//
+// Ответ на чтение обязан лежать заранее: на плате его выдаёт автомат по
+// таблице, задолго до того, как обработчик узнает о самом чтении. Поэтому
+// "поставить ответ" и "чтение состоялось" - разные вызовы: первый готовит
+// байт, второй сообщает, что его забрали.
+//
+// Обработчики зовутся из прерывания шины: только то, что укладывается в
+// единицы микросекунд, без обращений к носителю и без журнала.
+
+#include <cstdint>
+
+namespace devices::hal {
+
+using PortWriteFn = void (*)(uint8_t port, uint8_t data);
+using PortReadDoneFn = void (*)(uint8_t port);
+
+// Байт, которым порт отвечает на следующее чтение.
+void z80_port_set_read(uint8_t port, uint8_t value);
+
+void z80_port_on_write(uint8_t port, PortWriteFn fn);
+void z80_port_on_read_done(uint8_t port, PortReadDoneFn fn);
+
+} // namespace devices::hal

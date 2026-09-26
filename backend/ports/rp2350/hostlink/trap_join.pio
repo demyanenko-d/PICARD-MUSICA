@@ -1,0 +1,57 @@
+; Склейщик трапа: адрес выборки -> адрес записи карты трапов.
+;
+; Живёт в блоке звука (pio2, база GPIO 16): пины шины ему нужны только
+; A8..A13, а они в окне базы. Адрес выборки приходит от rom_trap (pio0)
+; каналом DMA, запись карты читает следующий канал; в ней указатель на
+; слово варианта или ноль - пустой триггер, цепочка стоит.
+;
+; Карт две:
+;   ниже 0x2000 - по адресу: входы и выходы DivMMC - отдельные точки;
+;   0x2000-0x3FFF - по странице 256 байт: там трап одно окно 3D00-3DFF.
+;
+; Адрес ещё на шине: склейщик работает через ~80 нс от спада RD, а Z80
+; держит адрес выборки до конца M1 (~570 нс при 3.5 МГц).
+;
+;   X = база карты адресов >> 15, Y = база карты страниц >> 7 - ставит ядро
+;   до запуска, программа их не трогает.
+;   IN_BASE = A8 (GPIO 16), JMP_PIN = A13 (GPIO 21).
+
+.pio_version rp2350
+
+.program trap_join
+.wrap_target
+top:
+    pull block                  ; A0..A13 от rom_trap
+    jmp pin, page               ; A13: 0x2000-0x3FFF
+    mov isr, x
+    in osr, 13                  ; A0..A12
+    in null, 2                  ; по 4 байта на запись
+    push
+    jmp top
+page:
+    mov isr, y
+    in pins, 5                  ; A8..A12 - страница
+    in null, 2
+    push
+.wrap
+
+% c-sdk {
+#include "hardware/pio.h"
+static inline void trap_join_program_init(PIO pio, uint sm, uint offset, uint pin_a8, uint pin_a13,
+                                          uintptr_t addr_map, uintptr_t page_map) {
+    pio_sm_config c = trap_join_program_get_default_config(offset);
+    sm_config_set_in_pins(&c, pin_a8);
+    sm_config_set_jmp_pin(&c, pin_a13);
+    sm_config_set_in_shift(&c, /*shift_right=*/false, /*autopush=*/false, 32);
+    sm_config_set_out_shift(&c, /*shift_right=*/true, /*autopull=*/false, 32);
+    sm_config_set_clkdiv(&c, 1.0f);
+    pio_sm_init(pio, sm, offset, &c);
+    // Базы карт - в X и Y до запуска.
+    pio_sm_put_blocking(pio, sm, (uint32_t)(addr_map >> 15));
+    pio_sm_exec_wait_blocking(pio, sm, pio_encode_pull(false, false));
+    pio_sm_exec_wait_blocking(pio, sm, pio_encode_mov(pio_x, pio_osr));
+    pio_sm_put_blocking(pio, sm, (uint32_t)(page_map >> 7));
+    pio_sm_exec_wait_blocking(pio, sm, pio_encode_pull(false, false));
+    pio_sm_exec_wait_blocking(pio, sm, pio_encode_mov(pio_y, pio_osr));
+}
+%}

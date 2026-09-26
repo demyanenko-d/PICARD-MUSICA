@@ -1,0 +1,424 @@
+#include "player/live/session.h"
+
+#include <cinttypes>
+#include <cstdio>
+#include <cstring>
+
+#include "platform/log.h"
+#include "player/live/ay_tap.h"
+#include "platform/mono_time.h"
+#include "player/shared_state.h"
+#include "core/config.h"
+#include "core/formats/midi.h"
+#include "core/formats/midi_live.h"
+#include "player/live/live_requests.h"
+#include "core/memory/sample_cache_catalog.h"
+#include "core/memory/track_memory.h"
+#include "core/live_midi/ay_midi.h"
+#include "core/live_midi/live_stream.h"
+#include "core/live_midi/live_sysex.h"
+
+namespace player::live {
+
+namespace {
+
+using soundsinth::model::PatternCell;
+
+// Сколько сообщений подряд считать осмысленным потоком. Одно бывает от
+// случайной записи в порт A: игры дёргают его под шум и биппер.
+constexpr uint32_t kStartEvents = 3;
+
+// Приём: разбор отвода AY, очередь с упреждением, живая песня и заказы PCM.
+struct State {
+    soundsinth::formats::midi::LiveMidi live;
+    soundsinth::midi_in::LiveStream stream;
+    player::live::LiveRequestRing requests;
+    // Возврат записей сэмплов: рендер просит, подгрузка выбрасывает PCM и
+    // подтверждает. Подтверждать сразу нельзя - номер займёт другой сэмпл
+    // банка, PCM перепишется под играющим голосом.
+    player::live::LiveRequestRing retire_asked;
+    player::live::LiveRequestRing retire_done;
+    uint32_t retire_pending[(soundsinth::formats::midi::kLiveMaxSamples + 31u) / 32u] = {};
+    uint32_t retired = 0;
+    uint32_t retire_waiting = 0; // ждут, пока голоса их отпустят
+    soundsinth::midi_in::AyMidiInput input;
+    bool active = false;
+    uint32_t seen_events = 0;   // сообщений до включения режима
+    uint32_t started_ms = 0;
+    uint32_t loaded = 0;        // сэмплов прочитано из флеша за сеанс
+    uint32_t load_repeats = 0;  // заказов на уже резидентный сэмпл
+    uint32_t load_failed = 0;
+    uint32_t notes = 0;         // нот сыграно
+    soundsinth::midi_in::SysexTracker sysex;
+    // История записи сэмпла: что с ней случилось в последний раз и на какой
+    // строке. По ней разбирается молчащая нота - PCM не прочитан вовремя или
+    // уже выброшен. Строка живого режима равна тику, 10 мс.
+    enum RecState : uint8_t { kRecNothing = 0, kRecAsked = 1, kRecRead = 2, kRecDropped = 3 };
+    uint8_t rec_state[soundsinth::formats::midi::kLiveMaxSamples] = {};
+    uint16_t rec_row[soundsinth::formats::midi::kLiveMaxSamples] = {};
+    uint16_t ask_row[soundsinth::formats::midi::kLiveMaxSamples] = {};
+    // Очередь чтения: сколько заказов ждёт, сколько ждал самый терпеливый и
+    // во что обходится само чтение. Эти числа решают спор - опаздывает
+    // подготовка или последовательное чтение не успевает за форой.
+    uint32_t read_queue_peak = 0;
+    uint32_t read_wait_max_rows = 0, read_wait_sum_rows = 0, read_count = 0;
+    uint32_t read_us_max = 0, read_us_sum = 0;
+    uint32_t missing_seen = 0; // сколько молчащих нот уже разобрано
+    uint32_t missing_asked = 0, missing_read = 0, missing_dropped = 0, missing_unknown = 0;
+    uint32_t tap_peak = 0; // записей AY за один разбор - запас кольца отвода
+    // Цена живой строки внутри тика рендера.
+    uint32_t rows = 0;
+    uint32_t row_us_sum = 0;
+    uint32_t row_us_max = 0;
+    // Что делала самая дорогая строка.
+    uint32_t worst_built = 0, worst_evicted = 0, worst_records = 0, worst_retire = 0;
+};
+
+State s_state;
+
+// Заказ PCM из тика рендера: только положить номер в кольцо. Тянуть прогон
+// из флеша здесь нельзя - это миллисекунды под звуком.
+void on_request(void* user, uint16_t song_sample) {
+    auto* st = static_cast<State*>(user);
+    st->requests.push(song_sample);
+    if (song_sample < soundsinth::formats::midi::kLiveMaxSamples) {
+        st->rec_state[song_sample] = State::kRecAsked;
+        st->rec_row[song_sample] = static_cast<uint16_t>(st->rows);
+        st->ask_row[song_sample] = static_cast<uint16_t>(st->rows);
+    }
+    if (st->requests.pending() > st->read_queue_peak) st->read_queue_peak = st->requests.pending();
+}
+
+// Возврат записи просит рендер; выбросить PCM и подтвердить - за подгрузкой:
+// пока запись держит хоть один голос, её страницы трогать нельзя.
+void on_retire(void* user, uint16_t song_sample) {
+    static_cast<State*>(user)->retire_asked.push(song_sample);
+}
+
+// Держит ли сэмпл живой голос: карту публикует движок раз в тик.
+bool sample_in_use(uint16_t index) {
+    if (index >= shared::kSamplesInUseBits) return true; // чужих не видим - считаем занятыми
+    return (shared::g_samples_in_use[index / 32u].load(std::memory_order_acquire) & (1u << (index % 32u))) != 0;
+}
+
+// Отвод AY -> сообщения -> очередь с упреждением. Возвращает, сколько
+// сообщений разобрано; SysEx тоже считается - режим по нему и узнают, плееры
+// начинают со сброса GM или GS.
+uint32_t drain_tap(uint32_t now_ms, bool to_stream) {
+    uint32_t got = 0, writes = 0;
+    uint16_t write = 0;
+    soundsinth::midi_in::MidiEvent ev{};
+    while (ay_tap_pop(write)) {
+        ++writes;
+        const bool message = s_state.input.feed(write, ev);
+        if (s_state.input.sysex_ready()) {
+            ++got;
+            if (to_stream) {
+                s_state.sysex.apply(s_state.input.sysex(), s_state.input.sysex_len(), now_ms, s_state.stream);
+            }
+        }
+        if (!message) continue;
+        ++got;
+        if (!to_stream) continue;
+        uint8_t status = 0, d1 = 0, d2 = 0;
+        soundsinth::midi_in::midi_event_bytes(ev, status, d1, d2);
+        s_state.stream.push(now_ms, status, d1, d2);
+    }
+    // Сколько записей накопилось между разборами: запас кольца отвода видно
+    // только отсюда, а считать их у писателя нельзя - это обработчик шины.
+    if (writes > s_state.tap_peak) s_state.tap_peak = writes;
+    return got;
+}
+
+} // namespace
+
+bool active() { return s_state.active; }
+
+void* row_user() { return &s_state; }
+
+const PatternCell* live_row(void* user) {
+    auto* st = static_cast<State*>(user);
+    const uint32_t t0 = platform::mono_us();
+    // Что строка успела сделать - снимком до и после: по одному времени не
+    // видно, на что оно ушло.
+    const uint32_t built0 = st->live.instruments_built(), evicted0 = st->live.instruments_evicted();
+    const uint32_t records0 = st->live.records_allocated(), retire0 = st->live.retire_calls();
+    const uint32_t now = (platform::mono_us() / 1000u);
+    // Подтверждения возврата: PCM записи уже выброшен, номер свободен.
+    uint16_t done = 0;
+    while (st->retire_done.pop(done)) {
+        st->live.record_retired(done);
+    }
+    drain_tap(now, /*to_stream=*/true);
+    const PatternCell* row = st->stream.tick(now);
+    // Живая строка идёт внутри тика рендера, и её цена в max_tick_us не
+    // отделена от голосов. Считаем отдельно: строит инструменты и заводит
+    // записи сэмплов именно она.
+    const uint32_t dt = platform::mono_us() - t0;
+    st->row_us_sum += dt;
+    ++st->rows;
+    if (dt > st->row_us_max) {
+        st->row_us_max = dt;
+        st->worst_built = st->live.instruments_built() - built0;
+        st->worst_evicted = st->live.instruments_evicted() - evicted0;
+        st->worst_records = st->live.records_allocated() - records0;
+        st->worst_retire = st->live.retire_calls() - retire0;
+    }
+    return row;
+}
+
+bool stream_started(uint32_t now_ms) {
+    if (s_state.active) return false;
+    // Кладём в очередь сразу: события, по которым режим и распознан (обычно
+    // выбор банка и программы), нужны песне - иначе первые ноты звучат не тем
+    // или молчат.
+    s_state.seen_events += drain_tap(now_ms, /*to_stream=*/true);
+    return s_state.seen_events >= kStartEvents;
+}
+
+uint32_t silent_ms(uint32_t now_ms) { return s_state.active ? s_state.stream.silent_ms(now_ms) : 0; }
+
+bool begin(uint32_t now_ms) {
+    if (!shared::g_flash_bank.valid()) {
+        debug_log("live: банка во флеше нет, живой режим невозможен\n");
+        return false;
+    }
+    soundsinth::memory::track_memory_reset_for_new_track(shared::g_track_memory);
+    s_state.requests.clear();
+    s_state.retire_asked.clear();
+    s_state.retire_done.clear();
+    std::memset(s_state.retire_pending, 0, sizeof(s_state.retire_pending));
+    s_state.retired = 0;
+    s_state.retire_waiting = 0;
+    // Строка = тик: у живого потока сетки нет, и задержку ноты внутри строки
+    // выписывать некуда.
+    const char* err = s_state.live.begin(shared::g_song, shared::g_track_memory, shared::g_flash_bank,
+                                         /*ticks_per_row=*/1, SOUNDSINTH_LIVE_MIDI_TEMPO, &on_request, &on_retire,
+                                         &s_state);
+    if (err != nullptr) {
+        debug_logf("live: живая песня не собралась: %s\n", err);
+        return false;
+    }
+    s_state.stream.begin(&s_state.live, SOUNDSINTH_LIVE_MIDI_LOOKAHEAD_MS);
+    s_state.active = true;
+    s_state.started_ms = now_ms;
+    s_state.loaded = 0;
+    s_state.load_repeats = 0;
+    s_state.tap_peak = 0;
+    std::memset(s_state.rec_state, 0, sizeof(s_state.rec_state));
+    std::memset(s_state.rec_row, 0, sizeof(s_state.rec_row));
+    std::memset(s_state.ask_row, 0, sizeof(s_state.ask_row));
+    s_state.read_queue_peak = 0;
+    s_state.read_wait_max_rows = 0;
+    s_state.read_wait_sum_rows = 0;
+    s_state.read_count = 0;
+    s_state.read_us_max = 0;
+    s_state.read_us_sum = 0;
+    s_state.missing_seen = 0;
+    s_state.missing_asked = 0;
+    s_state.missing_read = 0;
+    s_state.missing_dropped = 0;
+    s_state.missing_unknown = 0;
+    s_state.rows = 0;
+    s_state.row_us_sum = 0;
+    s_state.row_us_max = 0;
+    s_state.worst_built = 0;
+    s_state.worst_evicted = 0;
+    s_state.worst_records = 0;
+    s_state.worst_retire = 0;
+    s_state.load_failed = 0;
+    s_state.notes = 0;
+    s_state.seen_events = 0;
+    s_state.sysex.begin();
+    debug_logf("live: режим включён, банк %s, фора %u мс\n", shared::g_flash_bank.header->name,
+               static_cast<unsigned>(SOUNDSINTH_LIVE_MIDI_LOOKAHEAD_MS));
+    return true;
+}
+
+void end() {
+    if (!s_state.active) return;
+    debug_logf("live: режим выключён, сэмплов из флеша %" PRIu32 " (повторов %" PRIu32 ", отказов %" PRIu32
+               "), событий потеряно %" PRIu32 ", заказов потеряно %" PRIu32 "\n",
+               s_state.loaded, s_state.load_repeats, s_state.load_failed, s_state.stream.lost(),
+               s_state.requests.lost());
+    s_state.active = false;
+    s_state.seen_events = 0;
+}
+
+bool serve_requests() {
+    if (!s_state.active) return false;
+    bool worked = false;
+    // Просьбы вернуть запись: копим, пока сэмпл держат голоса.
+    uint16_t leaving = 0;
+    while (s_state.retire_asked.pop(leaving)) {
+        if (leaving < soundsinth::formats::midi::kLiveMaxSamples) {
+            s_state.retire_pending[leaving / 32u] |= 1u << (leaving % 32u);
+            ++s_state.retire_waiting;
+        }
+    }
+    for (uint16_t r = 0; r < soundsinth::formats::midi::kLiveMaxSamples; ++r) {
+        if ((s_state.retire_pending[r / 32u] & (1u << (r % 32u))) == 0) continue;
+        if (sample_in_use(r)) continue; // голос ещё читает страницы
+        if (auto* entry = soundsinth::memory::sample_cache_find(shared::g_track_memory.sample_cache, r)) {
+            soundsinth::memory::sample_cache_evict(shared::g_track_memory.sample_cache, shared::g_track_memory.psram,
+                                                   entry);
+        }
+        s_state.retire_pending[r / 32u] &= ~(1u << (r % 32u));
+        --s_state.retire_waiting;
+        ++s_state.retired;
+        s_state.rec_state[r] = State::kRecDropped;
+        s_state.rec_row[r] = static_cast<uint16_t>(s_state.rows);
+        s_state.retire_done.push(r);
+        worked = true;
+    }
+    uint16_t index = 0;
+    while (s_state.requests.pop(index)) {
+        // Заказ приходит на каждую ноту, а сэмпл чаще всего уже лежит: считаем
+        // это отдельно, иначе по логу не видно, сколько флеша прочитано на
+        // самом деле.
+        if (soundsinth::memory::sample_cache_find(shared::g_track_memory.sample_cache, index) != nullptr) {
+            ++s_state.load_repeats;
+            continue;
+        }
+        const uint32_t t0 = platform::mono_us();
+        const bool done = soundsinth::formats::midi::load_sample_from_bank(shared::g_track_memory,
+                                                                          shared::g_flash_bank, shared::g_song, index);
+        const uint32_t dt = platform::mono_us() - t0;
+        if (done) {
+            ++s_state.loaded;
+            s_state.read_us_sum += dt;
+            ++s_state.read_count;
+            if (dt > s_state.read_us_max) s_state.read_us_max = dt;
+            if (index < soundsinth::formats::midi::kLiveMaxSamples) {
+                s_state.rec_state[index] = State::kRecRead;
+                s_state.rec_row[index] = static_cast<uint16_t>(s_state.rows);
+                // Сколько заказ пролежал в очереди: строка живого режима - тик,
+                // 10 мс, так что это прямо сравнимо с форой.
+                const uint16_t waited =
+                    static_cast<uint16_t>(static_cast<uint16_t>(s_state.rows) - s_state.ask_row[index]);
+                s_state.read_wait_sum_rows += waited;
+                if (waited > s_state.read_wait_max_rows) s_state.read_wait_max_rows = waited;
+            }
+        } else {
+            ++s_state.load_failed;
+        }
+        // Один сэмпл за проход: чтение прогона - миллисекунды, а между ними
+        // цикл обслуживает шину. Остальные заказы ждут в кольце.
+        return true;
+    }
+    return worked;
+}
+
+void note_missing(const soundsinth::engine::TrackerEngine& engine) {
+    if (!s_state.active) return;
+    const uint32_t total = engine.triggers_without_sample();
+    if (total == s_state.missing_seen) return;
+    // Кольцо движка короткое: пачку длиннее него разберём с конца, остальное
+    // сосчитаем неизвестными - по крайней мере число сойдётся.
+    uint32_t from = s_state.missing_seen;
+    if (total - from > soundsinth::engine::TrackerEngine::kMissingRing) {
+        s_state.missing_unknown += total - from - soundsinth::engine::TrackerEngine::kMissingRing;
+        from = total - soundsinth::engine::TrackerEngine::kMissingRing;
+    }
+    for (uint32_t n = from; n != total; ++n) {
+        const uint16_t rec = engine.missing_sample(n);
+        if (rec >= soundsinth::formats::midi::kLiveMaxSamples) {
+            ++s_state.missing_unknown;
+            continue;
+        }
+        const uint8_t what = s_state.rec_state[rec];
+        const uint16_t ago = static_cast<uint16_t>(static_cast<uint16_t>(s_state.rows) - s_state.rec_row[rec]);
+        const char* name = "не заказана";
+        switch (what) {
+            case State::kRecAsked:
+                name = "заказана, не прочитана";
+                ++s_state.missing_asked;
+                break;
+            case State::kRecRead:
+                name = "прочитана";
+                ++s_state.missing_read;
+                break;
+            case State::kRecDropped:
+                name = "выброшена";
+                ++s_state.missing_dropped;
+                break;
+            default: ++s_state.missing_unknown; break;
+        }
+        // Первые несколько разбираем поимённо, дальше только счётчиками: нот
+        // бывает десятки, а кольцо лога невелико.
+        if (n < 8) {
+            debug_logf("live: молчит нота, запись %u - %s %u строк назад\n", static_cast<unsigned>(rec), name,
+                       static_cast<unsigned>(ago));
+        }
+    }
+    s_state.missing_seen = total;
+}
+
+void log_stats() {
+    if (!s_state.active) return;
+    const uint32_t now = (platform::mono_us() / 1000u);
+    const soundsinth::formats::midi::LoadStats& st = s_state.live.stats();
+    // Свой буфер: строка длиннее 192 байт буфера debug_logf. Размер - по
+    // худшему случаю: текст 260 байт и двенадцать чисел по десять цифр.
+    char line[384];
+    snprintf(line, sizeof(line),
+             "live: %" PRIu32 " с, сэмплов из флеша %" PRIu32 " (повторов %" PRIu32 ", отказов %" PRIu32
+             "), инструментов %u, вытеснено %" PRIu32 ", в очереди %" PRIu32 ", потеряно событий %" PRIu32
+             "/заказов %" PRIu32 ", записей отдано %" PRIu32 " (ждут %" PRIu32 "), тишина %" PRIu32 " мс\n",
+             (now - s_state.started_ms) / 1000u, s_state.loaded, s_state.load_repeats, s_state.load_failed,
+             static_cast<unsigned>(shared::g_song.instrument_count), s_state.live.instruments_evicted(),
+             s_state.stream.pending(), s_state.stream.lost(), s_state.requests.lost(), s_state.retired,
+             s_state.retire_waiting, s_state.stream.silent_ms(now));
+    debug_log(line);
+    // Потери раскладки: из-за них нота не звучит или звучит не тем.
+    snprintf(line, sizeof(line),
+             "live: нот без зоны %" PRIu32 ", сверх потолка %" PRIu32 ", кража канала %" PRIu32
+             ", снятие без задержки %" PRIu32 ", вибрато %" PRIu32 ", инструмент не встал %" PRIu32
+             ", слой без записи %" PRIu32 "\n",
+             st.notes_no_zone, st.notes_over_cap, st.steals, st.off_delay_lost, st.vib_lost,
+             s_state.live.instruments_failed(), s_state.live.samples_capped());
+    debug_log(line);
+    debug_logf("live: отвод AY - пик за разбор %" PRIu32 " записей из %u, потеряно %" PRIu32 "; реверберация %s\n",
+               s_state.tap_peak, static_cast<unsigned>(kAyTapRing), ay_tap_lost(),
+               s_state.live.reverb_used() ? "звучит" : "молчит (нет CC91)");
+    // Живая строка внутри тика рендера: её цена растёт с числом инструментов,
+    // а не с числом голосов - в max_tick_us это не видно.
+    snprintf(line, sizeof(line),
+             "live: строка - пик %" PRIu32 " мкс, средне %" PRIu32 " мкс за %" PRIu32 " строк; keymap %" PRIu32
+             ", отдача записей %" PRIu32 " раз (keymap %" PRIu32 ", записей %" PRIu32 ")\n",
+             s_state.row_us_max, s_state.rows ? s_state.row_us_sum / s_state.rows : 0u, s_state.rows,
+             s_state.live.keymap_visits(), s_state.live.retire_calls(), s_state.live.retire_keymap_visits(),
+             s_state.live.retire_record_visits());
+    debug_log(line);
+    debug_logf("live: в худшей строке - инструментов %" PRIu32 " (вытеснено %" PRIu32 "), записей %" PRIu32
+               ", отдач %" PRIu32 "; подготовка отложена %" PRIu32 " раз\n",
+               s_state.worst_built, s_state.worst_evicted, s_state.worst_records, s_state.worst_retire,
+               s_state.stream.deferred());
+    // Молчащая нота: заведено не заранее, а на её же тике - PCM заказать
+    // поздно; либо запись отдали, пока нота на неё ехала.
+    debug_logf("live: мимо упреждения - инструментов %" PRIu32 ", записей %" PRIu32 "; отдано свежих записей %" PRIu32
+               "\n",
+               s_state.live.instruments_late(), s_state.live.records_late(), s_state.live.records_retired_recent());
+    // Спор двух причин: подготовка отстаёт или чтение не успевает за форой.
+    snprintf(line, sizeof(line),
+             "live: упреждение - запас ноты мин %" PRIu32 " мс, впритык %" PRIu32 " раз; очередь чтения пик %" PRIu32
+             ", заказ ждал макс %" PRIu32 " строк (средне %" PRIu32 "), чтение макс %" PRIu32 " мкс (средне %" PRIu32
+             ")\n",
+             s_state.stream.prefetch_lead_min_ms() == 0xFFFFFFFFu ? 0u : s_state.stream.prefetch_lead_min_ms(),
+             s_state.stream.prefetch_tight(), s_state.read_queue_peak, s_state.read_wait_max_rows,
+             s_state.read_count ? s_state.read_wait_sum_rows / s_state.read_count : 0u, s_state.read_us_max,
+             s_state.read_count ? s_state.read_us_sum / s_state.read_count : 0u);
+    debug_log(line);
+    if (s_state.missing_seen != 0) {
+        debug_logf("live: молчащих нот %" PRIu32 " - запись заказана но не прочитана %" PRIu32 ", прочитана %" PRIu32
+                   ", выброшена %" PRIu32 ", не заказана %" PRIu32 "\n",
+                   s_state.missing_seen, s_state.missing_asked, s_state.missing_read, s_state.missing_dropped,
+                   s_state.missing_unknown);
+    }
+    if (s_state.sysex.drum_changes() != 0 || s_state.sysex.volume_changes() != 0) {
+        debug_logf("live: SysEx - ударность канала %" PRIu32 ", общая громкость %" PRIu32 "\n",
+                   s_state.sysex.drum_changes(), s_state.sysex.volume_changes());
+    }
+}
+
+} // namespace player::live

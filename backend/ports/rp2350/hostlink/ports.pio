@@ -1,0 +1,215 @@
+; Автоматы цикла ввода-вывода и rom_serve.
+;
+; Раздел по сигналу: цикл порта отмечен IORQ, цикл памяти - MREQ, они
+; взаимно исключены: автоматы двух файлов не срабатывают на одном цикле.
+; Исключение - bus_wr: ловит записи и в порт, и в память.
+;
+; rom_serve здесь, хотя обслуживает и память: он один выставляет байт, а
+; пины D0..D7 и BUFF_OE_N привязаны к блоку pio1 (привязка у PIO блочная).
+; Детекторы только читают уровни, вход PIO работает по чужим пинам.
+;
+; Путь портов один на оба положения перемычки.
+;
+;   port_detect    детектор чтения порта, считает &porttab[порт] и отдаёт
+;                  цепочке DMA
+;   bus_wr         захват записи в порт и - в режиме DivMMC - в память ниже
+;                  0x4000, будит ядро
+;   rom_serve      автомат выдачи байта: выставляет байт и открывает буфер
+;
+; "Порт не наш" решается без отдельной ступени: таблица портов хранит
+; адреса ячеек ответа, ноль уходит в триггерный регистр канала выдачи
+; ответа порта, а запись нуля в триггер канал не запускает (s_porttab).
+
+.pio_version rp2350
+
+; Номера управляющих линий Z80 в wait gpio - числа в инструкциях.
+; bus_setup.cpp сверяет их с PIN_* (bus.h).
+.define public Z80_WR_N_GPIO 4
+.define public Z80_IORQ_N_GPIO 6
+
+; Таблицы портов выровнены на 1 << PORT_TABLE_BASE_SHIFT: X = база >> сдвиг,
+; адрес записи - in x, (32 - сдвиг) / in pins, 8 / in null, 2. Выравнивание
+; массивов в bus.cpp берётся отсюда же.
+.define public PORT_TABLE_BASE_SHIFT 10
+
+; Сколько подряд подтверждений нужно, чтобы признать событие на шине.
+; Итерация цикла подтверждения port_detect - 3 инструкции, 10 нс при 300
+; МГц.
+;
+; 5 подтверждений - около 60 нс непрерывной проверки, иголке столько не
+; продержаться. 15 (около 160 нс на каждом из двух мест - в начале и в
+; конце цикла) отнимают время у цикла с обоих концов.
+.define PORT_CONFIRM 5
+
+; Пауза между двумя проверками снятия IORQ_N. Иголка короче неё
+; отфильтровывается.
+.define IORQ_SETTLE 15
+
+; ---
+.program port_detect
+
+.wrap_target
+ppoll:
+    set y, PORT_CONFIRM
+pconfirm:
+    wait 0 gpio Z80_IORQ_N_GPIO ; IORQ_N низкий
+    jmp pin, ppoll              ; RD_N высокий: запись или подтверждение
+                                ; прерывания (там IORQ низкий, а RD высокий)
+    jmp y--, pconfirm
+
+    ; ISR = porttab_base | (порт << 2) = &porttab[порт]
+    ;
+    ; ISR не чистится: push обнуляет его сам, а отбой по jmp pin выше идёт до
+    ; первого in.
+    in x, (32 - PORT_TABLE_BASE_SHIFT)
+    in pins, 8                  ; A0..A7 - номер порта
+    in null, 2                  ; по 4 байта на запись
+    push
+
+    ; Снятие IORQ_N - двумя проверками с выдержкой: иголка
+    ; короче выдержки невидима, повторного разбора цикла нет.
+    wait 1 gpio Z80_IORQ_N_GPIO [IORQ_SETTLE]
+    wait 1 gpio Z80_IORQ_N_GPIO
+.wrap
+
+% c-sdk {
+static inline void port_detect_program_init(PIO pio, uint sm, uint offset, uint pin_rd_n,
+                                            uint pin_a0, uintptr_t table_base) {
+    pio_sm_config c = port_detect_program_get_default_config(offset);
+    sm_config_set_in_pins(&c, pin_a0);
+    sm_config_set_jmp_pin(&c, pin_rd_n);
+    sm_config_set_in_shift(&c, /*shift_right=*/false, /*autopush=*/false, 32);
+    sm_config_set_out_shift(&c, /*shift_right=*/false, /*autopull=*/false, 32);
+    sm_config_set_clkdiv(&c, 1.0f);
+    pio_sm_init(pio, sm, offset, &c);
+
+    // X = porttab_base >> PORT_TABLE_BASE_SHIFT, до запуска, вне основного цикла.
+    pio_sm_put_blocking(pio, sm, (uint32_t)(table_base >> PORT_TABLE_BASE_SHIFT));
+    pio_sm_exec_wait_blocking(pio, sm, pio_encode_pull(false, false));
+    pio_sm_exec_wait_blocking(pio, sm, pio_encode_mov(pio_x, pio_osr));
+}
+%}
+
+; --- Запись: один автомат на записи в память и в порты ---
+;
+; Нужен для ОЗУ DivMMC на 0x2000-0x3FFF (без захвата записи страница
+; мертва) и порта 0xE3, которым DivMMC управляют.
+;
+; Ждать спада WR, а не MREQ: на спаде MREQ (середина T1) WR ещё высокий,
+; цикл записи был бы пропущен; к спаду WR (середина T2) годны и адрес, и
+; данные.
+;
+; in pins, 32 от GPIO 0 снимает весь порт ввода одной инструкцией: MREQ
+; (бит 7), IORQ (бит 6), адрес (8..23), данные (24..31). "Память или
+; порт" решает обработчик одной проверкой бита.
+;
+; push noblock: не успело ядро - запись теряется, но шина не задерживается
+; (задержка сломала бы чтение по тем же линиям).
+;
+;   IN_BASE = 0 (весь порт ввода)
+.program bus_wr
+
+.wrap_target
+    ; Признак "порт или память" - из снимка: jmp pin по IORQ через 103 нс
+    ; после спада WR пропускает записи otir, у него фазы IORQ и WR разведены
+    ; иначе, чем у out (n),a.
+    ;
+    ; mov osr, pins снимает всё разом, IORQ берётся из того же слова, что
+    ; адрес и данные.
+    wait 0 gpio Z80_WR_N_GPIO [31] ; WR_N низкий: идёт запись, и выдержка
+    mov osr, pins
+    out null, 6                 ; до IORQ (GPIO 6, IN_BASE = 0)
+    out y, 1                    ; Y = IORQ_N
+    jmp !y, take                ; ноль: порт, взять безусловно
+public mem:                     ; без эмуляции памяти здесь jmp done (bus_setup)
+    out null, 15                ; иначе память: до разряда A14 (6+1+15 = 22)
+    out y, 2                    ; Y = A14,A15
+    jmp y--, done               ; не ноль: выше 0x3FFF, ОЗУ машины
+take:
+    in pins, 32                 ; IORQ, адрес и данные разом
+    push noblock
+    irq set 0                   ; будим обработчик на ядре
+public done:
+    wait 1 gpio Z80_WR_N_GPIO   ; конец записи
+.wrap
+
+% c-sdk {
+static inline void bus_wr_program_init(PIO pio, uint sm, uint offset) {
+    pio_sm_config c = bus_wr_program_get_default_config(offset);
+    sm_config_set_in_pins(&c, 0);            // весь порт ввода
+    // jmp_pin не нужен: признак порта и отсев адреса берутся из снимка
+    // mov osr, pins.
+    sm_config_set_in_shift(&c, /*shift_right=*/false, /*autopush=*/false, 32);
+    // OUT сдвигает вправо: при IN_BASE = 0 разряд слова равен номеру GPIO.
+    sm_config_set_out_shift(&c, /*shift_right=*/true, /*autopull=*/false, 32);
+    // Приёмная очередь вдвое глубже: передающая не нужна, объединение
+    // бесплатно и удваивает запас на задержку входа в обработчик.
+    sm_config_set_fifo_join(&c, PIO_FIFO_JOIN_RX);
+    sm_config_set_clkdiv(&c, 1.0f);
+    pio_sm_init(pio, sm, offset, &c);
+}
+%}
+
+; --- rom_serve: положить байт на шину и держать до конца цикла ---
+;
+;   OUT_BASE  = D0 (GPIO 24), 8 бит
+;   SIDE_SET  = BUFF_OE_N (GPIO 2): 0 - МК на шину, 1 - шина к МК
+;   JMP_PIN   = RD_N (GPIO 5)
+;
+; Страницы лежат сырыми байтами, а не готовыми словами: иначе страница
+; стоила бы 32 КБ вместо 8, и шестнадцать страниц DivMMC в SRAM не
+; поместились бы. Направление автомат ставит сам (mov pindirs, !null).
+;
+; side_set опциональный: у простаивающего pull его нет, OE_N держит
+; последнее выставленное значение.
+.program rom_serve
+
+.side_set 1 opt
+
+    ; Байт опоздал: цикл чтения кончился раньше, чем байт дошёл по цепочке
+    ; DMA. На шину он не выходит - иначе плата заняла бы шину в следующем
+    ; цикле Z80, и если это выборка команды из ОЗУ, процессор исполнил бы
+    ; наш байт вместо своего. Отметка - слово в RX FIFO, его забирает и
+    ; считает ядро (rom_emu_serve_late_poll); noblock: полное FIFO теряет
+    ; отметку, а не останавливает автомат. Сюда только по jmp pin ниже,
+    ; старт автомата - с pull (rom_serve_program_init).
+late:
+    push noblock
+.wrap_target
+    pull block                  ; OSR = 0x000000BB, байт из страницы
+    jmp pin, late               ; RD_N уже высокий: цикл кончился
+    mov pins, osr               ; байт в выходной регистр (пины ещё входы)
+    mov pindirs, !null  side 0  ; D0..D7 на выход и буфер открыт, атомарно
+
+    ; Конец цикла - подтверждение, а не одна проверка: иголка на RD_N
+    ; выглядела бы как "Z80 защёлкнул", данные снялись бы, а он читал бы
+    ; неподведённую шину (так ловились порты). Пока идёт подтверждение,
+    ; данные выставлены.
+rd_end:
+    set y, PORT_CONFIRM
+rd_confirm:
+    jmp pin, rd_high            ; RD_N высокий: засчитать
+    jmp rd_end                  ; просел: счётчик заново
+rd_high:
+    jmp y--, rd_confirm
+
+    mov pindirs, null   side 1  ; D0..D7 на вход и буфер закрыт
+.wrap
+
+% c-sdk {
+#include "hardware/pio.h"
+
+// Выдатчик.
+static inline void rom_serve_program_init(PIO pio, uint sm, uint offset, uint pin_oe_n,
+                                          uint pin_rd_n, uint pin_d0) {
+    pio_sm_config c = rom_serve_program_get_default_config(offset);
+    sm_config_set_out_pins(&c, pin_d0, 8);   // и карта для mov pins
+    sm_config_set_sideset_pins(&c, pin_oe_n);
+    sm_config_set_jmp_pin(&c, pin_rd_n);
+    sm_config_set_out_shift(&c, /*shift_right=*/false, /*autopull=*/false, 32);
+    sm_config_set_clkdiv(&c, 1.0f);
+    // Старт с pull, а не с первой команды программы: первая - отметка
+    // опоздания, иначе при запуске она легла бы ложной.
+    pio_sm_init(pio, sm, offset + rom_serve_wrap_target, &c);
+}
+%}

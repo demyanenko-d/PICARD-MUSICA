@@ -1,0 +1,13 @@
+SGM-V2.01
+=========
+
+Банк release/banks/SGM.ssb получен конвертацией SGM-V2.01.sf2 препроцессором
+sf2bake. Сведения об авторстве из чанка INFO исходного файла:
+
+    INAM  SGM-V2.01
+    IENG  Shan
+    ICOP  David Shan 2002-2007
+    ICRD  Apr 14, 2003
+    ICMT  http://www.geocities.jp/shansoundfont/
+          pkshan@sinaman,com
+    IPRD  SBAWE32

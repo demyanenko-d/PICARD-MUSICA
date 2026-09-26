@@ -1,0 +1,16 @@
+Timbres of Heaven (XGM) 4.00(G)
+===============================
+
+Банк release/banks/Timbres-of-Heaven.ssb получен конвертацией
+"Timbres of Heaven (XGM) 4.00(G).sf2" препроцессором sf2bake.
+
+Лицензия: GNU GPL 2.0.
+
+Сведения об авторстве из чанка INFO исходного файла:
+
+    INAM  Timbres of Heaven (XGM) 4.00(G).sf2
+    ICOP  GNU-GPL 2.0
+    IENG  Don Allen (don64738@gmail.com)
+    ISFT  Don Allen
+    IPRD  Don64738
+    ICRD  11/18/2021

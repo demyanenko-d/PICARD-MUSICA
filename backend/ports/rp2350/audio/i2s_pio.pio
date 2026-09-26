@@ -1,0 +1,43 @@
+;
+; Copyright (c) 2020 Raspberry Pi (Trading) Ltd.
+;
+; SPDX-License-Identifier: BSD-3-Clause
+;
+
+; Autopull must be enabled, with threshold set to 16.
+; Since I2S is MSB-first, shift direction should be to left, so each FIFO
+; entry is taken from its upper half:
+;
+; | 31   :   16 | 15   :    0 |
+; |   sample    |   ignored   |
+;
+; One channel per FIFO entry, in memory order: the DAC feed writes halfwords
+; and a narrow write to a peripheral register is replicated across the bus,
+; so both halves carry the sample. The first entry of a frame is the left
+; channel and goes out while WS = 0, as the I2S frame requires; packing both
+; channels into one 32-bit word would send the right one first.
+;
+; Data is output at 1 bit per clock. Use clock divider to adjust frequency.
+; Fractional divider will probably be needed to get correct bit clock period,
+; but for common sysclk freqs this should still give a constant word select period.
+;
+; One output pin is used for the data output.
+; Two side-set pins are used. Bit 0 is clock, bit 1 is word select.
+
+.program i2s_out
+.side_set 2
+
+                    ;        /--- LRCLK
+                    ;        |/-- BCLK
+bitloop_left:           ;        ||
+    out pins, 1       side 0b00
+    jmp x-- bitloop_left  side 0b01
+    out pins, 1       side 0b10
+    set x, 14         side 0b11
+
+bitloop_right:
+    out pins, 1       side 0b10
+    jmp x-- bitloop_right  side 0b11
+    out pins, 1       side 0b00
+public entry_point:
+    set x, 14         side 0b01

@@ -23,20 +23,40 @@ namespace hal = devices::hal;
 // ассоциативный: при одном писателе и быстром носителе выигрыш меньше
 // цены лишнего состояния, промах стоит около 200 мкс.
 //
-// Кэш общий для обоих клиентов: прочитанное хостом достаётся коду на МК,
-// и наоборот. Поэтому он здесь, а не в эмуляторе.
+// Кэш общий для обоих клиентов, поэтому он здесь, а не в эмуляторе. Но
+// носитель у строки свой: когда хосту досталась флешка, а плате карта,
+// один и тот же номер сектора значит на них разное.
 
 constexpr uint32_t kLines = kCacheSectors;
 
 struct CacheLine {
-    uint32_t lba = 0;
-    bool     valid = false;
-    uint8_t  data[kSectorBytes] = {};
+    uint32_t    lba = 0;
+    hal::Medium medium = hal::Medium::Card;
+    bool        valid = false;
+    uint8_t     data[kSectorBytes] = {};
 };
 
 CacheLine s_cache[kLines];
 
 CacheLine& line_for(uint32_t lba) { return s_cache[lba % kLines]; }
+
+// Носитель клиента. У платы он один и тот же всегда; хосту флешка
+// достаётся, как только её воткнули, и отбирается, когда вынули.
+//
+// Смена на ходу - дело пользователя, а не наше: машина в этот момент
+// думает, что карта у неё та же. Поэтому переход пишется в журнал -
+// иначе развалившаяся файловая система выглядела бы беспричинной.
+hal::Medium s_host_medium = hal::Medium::Card;
+
+hal::Medium SOUNDSINTH_HOT_PATH(medium_for)(Client who) {
+    if (who == Client::Board) return hal::Medium::Card;
+    const hal::Medium now = hal::media_present(hal::Medium::Usb) ? hal::Medium::Usb : hal::Medium::Card;
+    if (now != s_host_medium) {
+        s_host_medium = now;
+        debug_logf("storage: машине отдана %s\n", now == hal::Medium::Usb ? "флешка" : "карта");
+    }
+    return now;
+}
 
 // Пропуск хоста вперёд (storage_set_host_yield). s_yielding - повторно не
 // входить: хост читает обычным путём, но крюк мог бы позвать фоновое.
@@ -50,10 +70,11 @@ void cache_drop_all() {
 
 // Положить сектор в кэш. Строка одна на класс номеров, чужой сектор
 // вытесняется.
-void SOUNDSINTH_HOT_PATH(cache_put)(uint32_t lba, const uint8_t* data) {
+void SOUNDSINTH_HOT_PATH(cache_put)(uint32_t lba, hal::Medium m, const uint8_t* data) {
     CacheLine& ln = line_for(lba);
     std::memcpy(ln.data, data, kSectorBytes);
     ln.lba = lba;
+    ln.medium = m;
     ln.valid = true;
 }
 
@@ -68,16 +89,17 @@ bool storage_init() {
     return hal::media_init();
 }
 
-bool storage_present() { return hal::media_present(); }
+bool storage_present(Client who) { return hal::media_present(medium_for(who)); }
 
-uint32_t storage_sector_count() { return hal::media_sector_count(); }
+uint32_t storage_sector_count(Client who) { return hal::media_sector_count(medium_for(who)); }
 
 namespace {
 bool SOUNDSINTH_HOT_PATH(read_sector)(uint32_t lba, uint8_t* dst, bool background) {
-    if (dst == nullptr || !hal::media_present()) return false;
+    const hal::Medium m = medium_for(background ? Client::Board : Client::Host);
+    if (dst == nullptr || !hal::media_present(m)) return false;
 
     const CacheLine& ln = line_for(lba);
-    if (ln.valid && ln.lba == lba) {
+    if (ln.valid && ln.lba == lba && ln.medium == m) {
         std::memcpy(dst, ln.data, kSectorBytes);
         return true;
     }
@@ -90,8 +112,8 @@ bool SOUNDSINTH_HOT_PATH(read_sector)(uint32_t lba, uint8_t* dst, bool backgroun
         s_host_yield(s_host_yield_user);
         s_yielding = false;
     }
-    if (!hal::media_read(lba, dst)) return false;
-    cache_put(lba, dst);
+    if (!hal::media_read(m, lba, dst)) return false;
+    cache_put(lba, m, dst);
     return true;
 }
 } // namespace
@@ -110,19 +132,21 @@ void storage_set_host_yield(void (*fn)(void*), void* user) {
 }
 
 bool storage_write(uint32_t lba, const uint8_t* src) {
-    if (src == nullptr || !hal::media_present()) return false;
+    // Пишет только хост: код платы носитель не меняет.
+    const hal::Medium m = medium_for(Client::Host);
+    if (src == nullptr || !hal::media_present(m)) return false;
 
-    if (!hal::media_write(lba, src)) {
+    if (!hal::media_write(m, lba, src)) {
         // Что на носителе после неудачной записи - неизвестно, строка
         // выбрасывается: лучше перечитать.
         CacheLine& ln = line_for(lba);
-        if (ln.lba == lba) ln.valid = false;
+        if (ln.lba == lba && ln.medium == m) ln.valid = false;
         return false;
     }
 
     // Строка обновляется, а не выбрасывается: хост почти всегда
     // перечитывает только что записанное.
-    cache_put(lba, src);
+    cache_put(lba, m, src);
     return true;
 }
 
@@ -175,7 +199,7 @@ bool storage_boot_check(uint8_t* sector) {
     debug_logf("boot: storage_init %s", ok ? "PASS" : "FAIL");
     if (!ok) return false;
     const bool rd = sector != nullptr && storage_read(0, sector);
-    debug_logf(" (%" PRIu32 " MB, sector 0 %s)", storage_sector_count() / kSectorsPerMb,
+    debug_logf(" (%" PRIu32 " MB, sector 0 %s)", storage_sector_count(Client::Board) / kSectorsPerMb,
                !rd ? "unreadable"
                    : ((sector[kMbrSignature] == 0x55 && sector[kMbrSignature + 1] == 0xaa) ? "0x55AA"
                                                                                            : "no signature"));

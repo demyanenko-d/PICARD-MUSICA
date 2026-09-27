@@ -230,6 +230,11 @@ bool begin(uint32_t now_ms) {
     s_state.notes = 0;
     s_state.seen_events = 0;
     s_state.sysex.begin();
+    // Признак "трек доиграл" остался бы от файла, который живой режим снёс,
+    // а снимает его только загрузка следующего - и живой сеанс молчал бы с
+    // первой секунды: выход гасится затуханием по этому признаку.
+    shared::g_song_ended.store(false, std::memory_order_relaxed);
+    shared::g_playback_finished.store(false, std::memory_order_relaxed);
     debug_logf("live: режим включён, банк %s, фора %u мс\n", shared::g_flash_bank.header->name,
                static_cast<unsigned>(SOUNDSINTH_LIVE_MIDI_LOOKAHEAD_MS));
     return true;

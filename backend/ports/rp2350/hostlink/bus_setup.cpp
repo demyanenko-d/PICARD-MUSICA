@@ -114,16 +114,19 @@ void setup_data_channel(uint ch, volatile void* txf, dma_channel_transfer_size_t
 //
 // Выдающего запускает сама запись адреса в его al3_read_addr_trig. Ноль в
 // триггерный регистр канал не запускает, но в read_addr записывается.
-void setup_chain(uint ch_addr, uint ch_data, const volatile void* rxf, volatile void* txf, uint dreq,
-                 dma_channel_transfer_size_t data_size) {
+void setup_addr_channel(uint ch_addr, volatile void* dest, const volatile void* rxf, uint dreq) {
     dma_channel_config_t dc = dma_channel_get_default_config(ch_addr);
     channel_config_set_dreq(&dc, dreq);
     channel_config_set_high_priority(&dc, true);
     channel_config_set_read_increment(&dc, false);
     channel_config_set_write_increment(&dc, false);
     channel_config_set_transfer_data_size(&dc, DMA_SIZE_32);
-    dma_channel_configure(ch_addr, &dc, &dma_hw->ch[ch_data].al3_read_addr_trig, rxf,
-                          dma_encode_transfer_count_with_self_trigger(1), false);
+    dma_channel_configure(ch_addr, &dc, dest, rxf, dma_encode_transfer_count_with_self_trigger(1), false);
+}
+
+void setup_chain(uint ch_addr, uint ch_data, const volatile void* rxf, volatile void* txf, uint dreq,
+                 dma_channel_transfer_size_t data_size) {
+    setup_addr_channel(ch_addr, &dma_hw->ch[ch_data].al3_read_addr_trig, rxf, dreq);
     setup_data_channel(ch_data, txf, data_size);
     dma_channel_start(ch_addr);
 }
@@ -249,29 +252,48 @@ void setup_ports() {
     port_detect_program_init(PIO_WATCH, SM_PORT_DETECT, off_det, PIN_RD_N, PIN_A0,
                              reinterpret_cast<uintptr_t>(s_porttab));
 
+    // Склейщик - в блоке звука: из шины ему нужны только A8..A15, а они в
+    // окне базы GPIO 16, которую ставит i2s_sink_set_block_base до этого
+    // места. Запускает склейщик очередь, а не шина, линии управления ему не
+    // нужны - в блоках с базой 0 места под программу не осталось.
+    const uint off_join = pio_add_program(PIO_AUDIO, &port_join_program);
+    s_sm_port_join = static_cast<int>(pio_claim_unused_sm(PIO_AUDIO, true));
+    const uint join_sm = static_cast<uint>(s_sm_port_join);
+    port_join_program_init(PIO_AUDIO, join_sm, off_join, PIN_A8);
+
     s_dma_port_addr = dma_claim_unused_channel(true);
     s_dma_port_ptr = dma_claim_unused_channel(true);
-    s_dma_port_data = dma_claim_unused_channel(true);
+    s_dma_port_join = dma_claim_unused_channel(true);
 
-    // Уровень 1: детектор дал &porttab[порт]; оттуда читается указатель и
-    // кладётся в триггерный регистр канала выдачи ответа. Нулевой указатель
-    // его не запускает (s_porttab).
-    setup_chain(s_dma_port_addr, s_dma_port_ptr, &PIO_WATCH->rxf[SM_PORT_DETECT],
-                &dma_hw->ch[s_dma_port_data].al3_read_addr_trig, pio_get_dreq(PIO_WATCH, SM_PORT_DETECT, false),
-                DMA_SIZE_32);
+    // Канал выдачи байта - общий с чтением памяти: циклы MREQ и IORQ у Z80
+    // взаимно исключены, и обе цепочки уже льют в одну очередь rom_serve.
+    // Без перемычки чтения памяти нет, канал берётся свой.
+    if (s_dma_byte_data < 0) {
+        s_dma_byte_data = dma_claim_unused_channel(true);
+        setup_data_channel(s_dma_byte_data, &PIO_SERVE->txf[SM_SERVE], DMA_SIZE_8);
+    }
 
-    // Уровень 2 - канал выдачи ответа. Источник ему ставит и его же запускает запись в
-    // al3_read_addr_trig, поэтому ни цепочки, ни своего DREQ нет: к моменту
-    // записи данные готовы.
-    setup_data_channel(s_dma_port_data, &PIO_SERVE->txf[SM_SERVE], DMA_SIZE_32);
+    // Уровень 1: детектор дал &porttab[порт]; оттуда читается запись и
+    // уходит склейщику. Нулевую он отбрасывает сам - так решается "порт не
+    // наш".
+    setup_chain(s_dma_port_addr, s_dma_port_ptr, &PIO_WATCH->rxf[SM_PORT_DETECT], &PIO_AUDIO->txf[join_sm],
+                pio_get_dreq(PIO_WATCH, SM_PORT_DETECT, false), DMA_SIZE_32);
 
-    // Сигнал о состоявшемся чтении - по завершению переноса у канала выдачи
-    // ответа. Фильтр "только наши порты" даёт железо: канал запускается,
-    // только когда указатель не нулевой. Инструкций PIO не стоит.
+    // Уровень 2: склейщик дал адрес ячейки, запись в триггерный регистр
+    // запускает выдачу байта.
+    setup_addr_channel(s_dma_port_join, &dma_hw->ch[s_dma_byte_data].al3_read_addr_trig, &PIO_AUDIO->rxf[join_sm],
+                       pio_get_dreq(PIO_AUDIO, join_sm, false));
+    dma_channel_start(s_dma_port_join);
+    pio_sm_set_enabled(PIO_AUDIO, join_sm, true);
+
+    // Сигнал о состоявшемся чтении - по завершению переноса у канала
+    // адреса. Фильтр "только наши порты" даёт железо: склейщик отдаёт адрес,
+    // только когда запись не нулевая. Канал выдачи байта для этого не
+    // годится: с перемычкой он отвечает и на чтения памяти.
     //
     // Своя линия DMA_IRQ: линию звука занимает драйвер I2S
     // (irq_set_exclusive_handler, приоритет планировщика).
-    dma_irqn_set_channel_enabled(DMA_IRQ_INDEX_PORT_RD, s_dma_port_data, true);
+    dma_irqn_set_channel_enabled(DMA_IRQ_INDEX_PORT_RD, s_dma_port_join, true);
     irq_set_exclusive_handler(DMA_IRQ_NUM(DMA_IRQ_INDEX_PORT_RD), port_rd_isr);
     // Самый низкий из трёх: следующее чтение порта карты Z80 сделает не
     // раньше чем через несколько команд.
@@ -290,8 +312,9 @@ namespace {
 // линию на землю) - это короткое замыкание. /NMI у Z80 срабатывает по
 // фронту и защёлкивается в процессоре, держать линию вверху не нужно.
 //
-// Защёлка выхода в нуле: переключение направления в выход притянуло бы
-// линию вниз (запрос NMI). Сейчас NMI подаёт только кнопка.
+// Защёлка выхода в нуле: переключение направления в выход притягивает
+// линию вниз, и это и есть запрос NMI. Так его подаёт клавиатура; кнопка
+// замыкает ту же линию сама.
 //
 // Буфер ввода включён: Errata E9 не грозит, линия подтянута машиной.
 void nmi_line_to_input() {

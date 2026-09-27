@@ -8,6 +8,11 @@ add_library(soundsinth_devices STATIC
     storage/diskio.cpp
     zcontroller/zcontroller.cpp
     gs/gs_device.cpp
+    hid/keyboard.cpp
+    hid/mouse.cpp
+    hid/joystick.cpp
+    hid/usb_map.cpp
+    hid/report_map.cpp
 )
 
 # Корень включений - родительский каталог, как у ядра: пути вида
@@ -16,6 +21,9 @@ target_include_directories(soundsinth_devices PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}
 target_link_libraries(soundsinth_devices PUBLIC platform)
 # FatFs - ради переходника diskio: файловую систему на карте читает он.
 target_link_libraries(soundsinth_devices PRIVATE fatfs)
+# Разборщик дескрипторов HID: им слой hid узнаёт, где у устройства оси,
+# шляпка и кнопки. PUBLIC - его типы видны в заголовках hid.
+target_link_libraries(soundsinth_devices PUBLIC hidparser)
 # Цикл объявлен явно: ff.c зовёт disk_* из diskio.cpp, а статические
 # библиотеки компоновщик просматривает по одному разу слева направо -
 # без этого переходник в сборку не попадает вовсе.

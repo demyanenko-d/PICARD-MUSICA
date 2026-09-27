@@ -15,10 +15,11 @@
 #include "player/hal/host_link.h"
 #include "platform/hot_path.h"
 #include "platform/mono_time.h"
+#include "platform/usb_host.h"
 #include "player/live/session.h"
 #include "player/shared_state.h"
 #include "devices/sd/card_protocol.h" // sd_card_set_wait_service
-#include "devices/sd/spi_emu.h" // sd_spi_task, sd_spi_owner_steals
+#include "devices/sd/spi_emu.h" // sd_spi_task
 #include "devices/storage/storage.h" // storage_set_host_yield
 
 #include "player/config.h"
@@ -99,9 +100,9 @@ SOUNDSINTH_NOINLINE void report_load_failure(SessionOrchestrator& orch) {
         std::snprintf(buf + off, static_cast<size_t>(cap - off),
                       "  protocol (сессия): not understood %" PRIu32 ", gave up %" PRIu32 ", unknown %" PRIu32
                       ", lost byte %" PRIu32 ", short done %" PRIu32 ", arg/data/done overflows %" PRIu32 "/%" PRIu32
-                      "/%" PRIu32 ", sd steals %" PRIu32 "\n",
+                      "/%" PRIu32 "\n",
                       c.naks, c.nak_giveups, c.unknown, c.data_short, c.short_done, c.arg_overflow, c.data_overflow,
-                      c.done_overflow, devices::sd::sd_spi_owner_steals());
+                      c.done_overflow);
     }
     debug_log(buf);
 }
@@ -780,6 +781,9 @@ void session_orchestrator_run(SessionOrchestrator& orch) {
     shared::g_bank.serve = &serve_without_wait;
     devices::storage::storage_set_host_yield(&yield_storage_to_host, nullptr);
     devices::sd::sd_card_set_wait_service(&serve_bus_while_card_waits, nullptr);
+    // То же для флешки: её сектор идёт миллисекунды, и всё это время машина
+    // ждёт ответа на шине.
+    platform::usb_host_set_wait_service(&serve_bus_while_card_waits, nullptr);
 
     debug_log("session_orchestrator_run: entering event loop\n");
 
@@ -816,6 +820,9 @@ void session_orchestrator_run(SessionOrchestrator& orch) {
         // Пока не вызвано, хост на чтении сектора ждёт, поэтому - в самом частом
         // месте цикла. Во всех сборках: карту читает и DivMMC.
         devices::sd::sd_spi_task();
+        // Виток USB-хоста: другого планировщика на этом ядре нет. Стек
+        // разбирает уже принятое и возвращается; на ПК это пустышка.
+        platform::usb_host_task();
         // Управление от хоста: прерывание его только накопило.
         switch (orch.protocol.take_transport_request()) {
             case player::protocol::TransportOp::PauseToggle: {
@@ -841,10 +848,17 @@ void session_orchestrator_run(SessionOrchestrator& orch) {
             // разово Ended. Конец - g_song_ended (вырожденный файл) или отыграна
             // длительность прохода: без второго трек крутится по кругу, плагин не
             // уходит дальше.
+            //
+            // В живом режиме конца не бывает: поток идёт, пока играют. Длина
+            // здесь осталась от файла, который живой режим снёс, а кадры уже
+            // считает живой движок - сравнивать их не с чем. Без этой
+            // оговорки живой сеанс, переваливший за длительность прошлого
+            // файла, объявлялся доигравшим и гасил себе выход насовсем:
+            // признак снимает только загрузка следующего трека.
             const uint32_t played = shared::g_playback_frames.load(std::memory_order_relaxed);
             const bool song_ended = shared::g_song_ended.load(std::memory_order_relaxed);
-            const bool finished =
-                song_ended || (orch.load_result.total_frames > 0 && played >= orch.load_result.total_frames);
+            const bool finished = !player::live::active() &&
+                (song_ended || (orch.load_result.total_frames > 0 && played >= orch.load_result.total_frames));
             if (finished) {
                 // Сначала заглушить выход, потом сообщить: секвенсор уже ушёл на
                 // restart_position и играет трек второй раз, начало слышно поверх

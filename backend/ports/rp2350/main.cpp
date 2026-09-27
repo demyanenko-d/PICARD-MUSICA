@@ -59,6 +59,7 @@
 #include "hostlink/divmmc.h"
 #include "player/gs/bridge.h"
 #include "hostlink/hostlink.h"
+#include "usb/usb_host.h"
 #include "psram/psram_driver.h"
 #include "psram/psram_pins.h"
 #include "player/shared_state.h"
@@ -460,6 +461,10 @@ int main() {
         // 0x63/0x67) - во всех сборках и в обоих положениях перемычки.
         // Регистрация портов после инициализации шины, как у остальных.
         player::gs::init();
+        // USB-хост - последним: прерывание регистрируется на вызывающем
+        // ядре, и приоритет ему ставится ниже всех шинных. Виток крутит
+        // цикл сеанса.
+        rp2350::usb::host_init();
         debug_log("core1: bus PIO/DMA/IRQ ready, entering session_orchestrator_run\n");
         player::session_orchestrator_run(s_orch);
     });

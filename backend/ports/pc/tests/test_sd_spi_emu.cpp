@@ -33,6 +33,8 @@ devices::hal::PortReadDoneFn g_port_rd_done[256];
 // Порты Z80 теста (devices/hal/z80_ports.h): таблица ответов и обработчики
 // в обычных массивах, тест дёргает их сам.
 void devices::hal::z80_port_set_read(uint8_t port, uint8_t value) { g_port_rd[port] = value; }
+void devices::hal::z80_port_set_read_page(uint8_t, const uint8_t*) {}
+void devices::hal::z80_port_clear_read(uint8_t port) { g_port_rd[port] = 0xFF; }
 void devices::hal::z80_port_on_write(uint8_t port, PortWriteFn fn) { g_port_wr[port] = fn; }
 void devices::hal::z80_port_on_read_done(uint8_t port, PortReadDoneFn fn) { g_port_rd_done[port] = fn; }
 
@@ -51,8 +53,8 @@ uint32_t g_hook_lba = 0xFFFFFFFFu;
 
 namespace devices::storage {
 bool storage_init() { return true; }
-bool storage_present() { return true; }
-uint32_t storage_sector_count() { return kDiskSectors; }
+bool storage_present(Client) { return true; }
+uint32_t storage_sector_count(Client) { return kDiskSectors; }
 bool storage_read(uint32_t lba, uint8_t* dst) {
     if (lba >= kDiskSectors || lba == g_fail_read_lba) return false;
     if (lba == g_hook_lba && g_read_hook) {
@@ -391,36 +393,45 @@ void test_ocr_and_status_like_real_card() {
     sel(false);
 }
 
-// (в) Арбитр и (д) единственный писатель: Z-Controller выбрал карту и ушёл;
-// чужой байт при занятой шине - 0xFF; через 150 мс DivMMC отнимает шину;
-// писатель - один (Z-Controller уже писал), CMD24 второго - 0x40, носитель
-// не тронут.
-void test_arbiter_and_single_writer() {
-    std::printf("test_sd_emu_arbiter_and_single_writer\n");
+// (в) Автоматы развязаны и (д) единственный писатель: Z-Controller
+// выбрал карту и ушёл, не сняв выбор; DivMMC всё это время работает как ни
+// в чём не бывало - у него свой автомат. Писатель при этом один:
+// Z-Controller уже писал, CMD24 второго - 0x40, носитель не тронут.
+void test_split_cards_and_single_writer() {
+    std::printf("test_sd_emu_split_cards_and_single_writer\n");
     fresh_card();
-    CHECK_EQ(write_block(50, 0x11), 0x05);   // писатель - Z-Controller
+    CHECK_EQ(write_block(50, 0x11), 0x05); // писатель - Z-Controller
+
+    // Z-Controller выбрал карту и бросил посреди разговора.
     sel(true);
     x(0xFF);
+
+    // DivMMC поднимает свою карту с нуля: CMD0 отвечает 0x01, как
+    // настоящая после включения.
     devices::sd::sd_spi_select(SdOwner::DivMmc, true);
-    CHECK_EQ(devices::sd::sd_spi_byte(SdOwner::DivMmc, 0xFF), 0xFF);
-    // Снятие выбора чужим владельца не меняет: обмен Z-Controller идёт.
-    devices::sd::sd_spi_select(SdOwner::DivMmc, false);
-    CHECK_EQ(cmd(13, 0), 0x00);
-    x(0xFF);
-    const uint32_t steals_before = devices::sd::sd_spi_owner_steals();
-    g_test_time_us += 150000;
-    devices::sd::sd_spi_select(SdOwner::DivMmc, true);
-    CHECK_EQ(devices::sd::sd_spi_owner_steals(), steals_before + 1u);
-    devices::sd::sd_spi_byte(SdOwner::DivMmc, 0xFF);
+    uint8_t f0[6] = {0x40 | 0, 0, 0, 0, 0, 0};
+    f0[5] = devices::sd::crc7(f0, 5);
+    for (int i = 0; i < 6; ++i) devices::sd::sd_spi_byte(SdOwner::DivMmc, f0[i]);
+    uint8_t r = 0xFF;
+    for (int i = 0; i < 10 && (r & 0x80); ++i) r = devices::sd::sd_spi_byte(SdOwner::DivMmc, 0xFF);
+    std::printf("  CMD0 второй стороны при брошенном чужом обмене -> 0x%02X\n", r);
+    CHECK_EQ(r, 0x01);
+
+    // Ни ожидания, ни отъёма: соседа для этой стороны просто нет.
     uint8_t f[6] = {0x40 | 24, 0, 0, 0x03, 0x00, 0};
     f[5] = devices::sd::crc7(f, 5);
     for (int i = 0; i < 6; ++i) devices::sd::sd_spi_byte(SdOwner::DivMmc, f[i]);
-    uint8_t r = 0xFF;
+    r = 0xFF;
     for (int i = 0; i < 10 && (r & 0x80); ++i) r = devices::sd::sd_spi_byte(SdOwner::DivMmc, 0xFF);
     std::printf("  CMD24 второго писателя -> 0x%02X, записей %u\n", r, g_writes);
     CHECK_EQ(r, 0x40);
     CHECK_EQ(g_writes, 1u);
     devices::sd::sd_spi_select(SdOwner::DivMmc, false);
+
+    // А брошенный обмен Z-Controller цел: его фаза не тронута, команда
+    // проходит как обычно.
+    CHECK_EQ(cmd(13, 0), 0x00);
+    sel(false);
 }
 
 // --- Хост через порты Z-Controller, как драйвер sd.s ---
@@ -795,7 +806,7 @@ void run_sd_spi_emu_tests() {
     test_late_sector();
     test_media_read_failure();
     test_ocr_and_status_like_real_card();
-    test_arbiter_and_single_writer();
+    test_split_cards_and_single_writer();
     test_zcontroller_ports();
     test_card_driver();
 }

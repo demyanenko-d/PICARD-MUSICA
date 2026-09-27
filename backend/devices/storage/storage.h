@@ -35,8 +35,18 @@ inline constexpr uint32_t kCacheSectors = SOUNDSINTH_STORAGE_CACHE_SECTORS;
 // повторный вызов сбросит кэш и переинициализирует карту.
 bool storage_init();
 
-bool storage_present();
-uint32_t storage_sector_count();
+// Кто спрашивает. Носителей два, и достаются они разным клиентам:
+//
+//   Host  - эмуляторы карты для Z80 (DivMMC, Z-Controller). Им отдаётся
+//           флешка, если она воткнута, иначе карта;
+//   Board - код платы: банк .mid и файловая система. Ему всегда карта.
+//
+// Разделение задано назначением, а не старшинством: банк живёт на карте, а
+// флешка нужна машине как её "SD-карта".
+enum class Client : uint8_t { Host, Board };
+
+bool storage_present(Client who);
+uint32_t storage_sector_count(Client who);
 
 // Прочитать сектор, из кэша или с носителя. false - носителя нет или он
 // не ответил.

@@ -67,6 +67,8 @@ add_executable(soundsinth_tests
     test_gs_device.cpp
     test_ay_midi.cpp
     test_debug_ring.cpp
+    test_hid.cpp
+    test_hid_parser.cpp
     third_party/libxmp_itsex.cpp
 )
 target_link_libraries(soundsinth_tests PRIVATE platform_pc libxmp::xmp_static)

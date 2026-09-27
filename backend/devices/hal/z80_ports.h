@@ -21,6 +21,16 @@ using PortReadDoneFn = void (*)(uint8_t port);
 // Байт, которым порт отвечает на следующее чтение.
 void z80_port_set_read(uint8_t port, uint8_t value);
 
+// Страница ответов на 256 байт: байт выбирает старшая половина адреса.
+// Нужна портам, у которых ответ от неё зависит, - клавиатуре и мыши.
+// Выравнивание страницы - 256 байт. Плата запоминает адрес, поэтому
+// устройство переписывает страницу когда угодно, отдельно об этом не
+// сообщая.
+void z80_port_set_read_page(uint8_t port, const uint8_t* page);
+
+// Порт больше не наш: на чтение отвечает машина.
+void z80_port_clear_read(uint8_t port);
+
 void z80_port_on_write(uint8_t port, PortWriteFn fn);
 void z80_port_on_read_done(uint8_t port, PortReadDoneFn fn);
 

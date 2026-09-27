@@ -60,6 +60,15 @@ set(SOUNDSINTH_I2S_PHASE_TEST 0 CACHE STRING "Узор для замера фа�
 add_compile_definitions(SOUNDSINTH_RP2350_I2S_PHASE_TEST=${SOUNDSINTH_I2S_PHASE_TEST})
 
 
+# Слой ОС для TinyUSB. Умолчание сборки SDK - OPT_OS_PICO, а там очередь
+# событий хоста заперта critical_section_t, то есть
+# save_and_disable_interrupts(): PRIMASK гасит ВСЕ прерывания ядра, включая
+# шинные. Они подняты выше порога BASEPRI планировщика намеренно, и PRIMASK
+# этот замысел обходит. OPT_OS_NONE запирает очередь только запретом
+# прерывания USB. Переменную читает hw/bsp/rp2040/family.cmake, поэтому
+# ставится до pico_sdk_init().
+set(TINYUSB_OPT_OS OPT_OS_NONE)
+
 # Initialise the Raspberry Pi Pico SDK
 pico_sdk_init()
 
@@ -86,6 +95,9 @@ FetchContent_MakeAvailable(freertos_kernel)
 # FatFs тем же арбитром и кэшем секторов, что у DivMMC и Z-Controller.
 add_subdirectory(backend/platform)
 add_subdirectory(backend/lib/fatfs)
+# Разборщик дескрипторов HID (LUFA): нужен слою устройств для клавиатуры,
+# мыши и геймпадов. Кучи не трогает.
+add_subdirectory(backend/lib/hidparser)
 add_subdirectory(backend/core)
 add_subdirectory(backend/devices)
 add_subdirectory(backend/player)
@@ -189,6 +201,7 @@ add_executable(soundsinth_firmware
     backend/ports/rp2350/hal/spi.cpp
     backend/ports/rp2350/hal/media.cpp
     backend/ports/rp2350/hal/audio_out.cpp
+    backend/ports/rp2350/hal/host_signals.cpp
     backend/ports/rp2350/log.cpp
 )
 target_include_directories(soundsinth_firmware PRIVATE
@@ -240,7 +253,19 @@ target_link_libraries(soundsinth_firmware
     hardware_pio
     hardware_spi   # spi_pins.cpp: реализация devices/hal/spi.h
     platform_rp2350
+    # USB-хост на встроенном контроллере. Каналов DMA не занимает: байты
+    # между буфером и памятью USB возит сам контроллер.
+    tinyusb_host
 )
+
+# Исходники хоста - в исполняемом файле, а не в platform_rp2350: TinyUSB
+# раздаёт свои .c через INTERFACE-цель, и собираться они должны там же, где
+# лежит tusb_config.h.
+target_sources(soundsinth_firmware PRIVATE
+    backend/ports/rp2350/usb/usb_host.cpp
+    backend/ports/rp2350/usb/usb_msc.cpp
+)
+target_include_directories(soundsinth_firmware PRIVATE backend/ports/rp2350/usb)
 
 # pico-sdk называет векторы исключений isr_svcall/isr_pendsv/isr_systick,
 # FreeRTOS-порт (GCC/ARM_CM33_NTZ) - SVC_Handler/PendSV_Handler/

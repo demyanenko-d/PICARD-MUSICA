@@ -195,9 +195,11 @@ static_assert(sizeof(uint32_t) * PAGE_TAB_HALVES * PAGES_PER_TABLE == 1u << PAGE
 alignas(2u << PAGE_TABLE_BASE_SHIFT) uint32_t s_pagetabs[PAGE_TAB_VARIANTS][PAGE_TAB_HALVES][PAGES_PER_TABLE];
 uint32_t s_page_variant = 0;
 
-// Адрес ячейки s_portval[порт] для наших портов, ноль для чужих: запись
-// нуля в триггер канал DMA не запускает, буфер закрыт. Выровнена на 1024:
-// адрес собирается склейкой (in x,22 / in pins,8 / in null,2).
+// Откуда брать байт ответа на порт, ноль - порт не наш. Младший разряд
+// записи - маршрут склейщика: ноль значит готовый адрес ячейки (он чётный),
+// единица - база страницы на 256 байт, сдвинутая вправо на 8. Таблица
+// выровнена на 1024: адрес записи собирается склейкой в детекторе
+// (in x,22 / in pins,8 / in null,2).
 alignas(1u << PORT_TABLE_BASE_SHIFT) uint32_t s_porttab[256];
 
 // Ячейки ответов, отдельно от таблицы: значение пишется сюда, разрешение
@@ -206,7 +208,8 @@ uint32_t s_portval[256];
 
 int s_dma_port_addr = -1; // rxf детектора портов -> read_addr следующего
 int s_dma_port_ptr = -1; // porttab[порт] -> al3_read_addr_trig канала выдачи ответа
-int s_dma_port_data = -1; // *указатель -> txf rom_serve (на нуле не стартует)
+int s_dma_port_join = -1; // rxf склейщика -> al3_read_addr_trig канала выдачи байта
+int s_sm_port_join = -1;  // склейщик ячейки ответа, в блоке звука
 
 int s_dma_tab_addr = -1; // rxf детектора -> read_addr следующего
 int s_dma_tab_data = -1; // pagetab[регион] -> txf rom_join
@@ -302,7 +305,7 @@ void __not_in_flash_func(bus_wr_isr)() {
 // Прерывание включает setup_ports, после divmmc_reset: состояние карты к
 // первому чтению готово.
 void __not_in_flash_func(port_rd_isr)() {
-    dma_irqn_acknowledge_channel(DMA_IRQ_INDEX_PORT_RD, s_dma_port_data);
+    dma_irqn_acknowledge_channel(DMA_IRQ_INDEX_PORT_RD, s_dma_port_join);
     // Порт восстанавливается из канала указателей: там адрес записи таблицы,
     // по которой только что читали. Таблица выровнена на 1024, младшие десять
     // бит - номер порта, умноженный на четыре.
@@ -426,8 +429,22 @@ void __not_in_flash_func(rom_emu_set_port)(uint8_t port, uint8_t value) {
     s_porttab[port] = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(&s_portval[port]));
 }
 
-// Снимается указатель: обнуление ячейки порт не отключило бы, канал выдачи
-// ответа выстрелил бы и отдал ноль.
+// Страница ответов: байт выбирает старшая половина адреса. Нужна портам, у
+// которых ответ от неё зависит, - клавиатура объединяет строки по нулевым
+// разрядам, у мыши три порта делят младший байт. Страница живёт у
+// устройства и меняется им же; здесь только разрешение отвечать.
+void rom_emu_set_port_page(uint8_t port, const uint8_t* page) {
+    const uint32_t base = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(page));
+    // Выравнивание обязательно: склейщик не складывает, а дописывает
+    // младший байт адреса, и страница со сдвигом отвечала бы чужими байтами.
+    if ((base & 0xFFu) != 0u) {
+        panic("port page 0x%02x not aligned: 0x%08x", port, static_cast<unsigned>(base));
+    }
+    s_porttab[port] = ((base >> 8) << 1) | 1u;
+}
+
+// Снимается запись: обнуление ячейки порт не отключило бы, склейщик отдал
+// бы адрес, а канал выдачи - ноль.
 void rom_emu_clear_port(uint8_t port) {
     s_porttab[port] = 0u;
 }

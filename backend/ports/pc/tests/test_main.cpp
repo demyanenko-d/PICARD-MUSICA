@@ -38,6 +38,8 @@ void run_psram_pattern_alloc_tests();
 void run_gs_device_tests();
 void run_ay_midi_tests();
 void run_debug_ring_tests();
+void run_hid_tests();
+void run_hid_parser_tests();
 void run_sd_spi_emu_tests();
 void run_sequencer_tests();
 void run_sequencer_libxmp_tests();
@@ -81,6 +83,8 @@ int main() {
     run_gs_device_tests();
     run_ay_midi_tests();
     run_debug_ring_tests();
+    run_hid_tests();
+    run_hid_parser_tests();
     run_sd_spi_emu_tests();
     run_sequencer_tests();
     run_sequencer_libxmp_tests();

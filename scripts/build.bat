@@ -74,12 +74,38 @@ REM  ordinary SWD flash leaves an already-written bank alone.
 REM
 REM  No bank baked yet: the release still builds, just without it, and the
 REM  board says so on boot. Bake it: node scripts\tools\bake_banks.js
+REM  The bank goes in with picotool, the SDK's own tool, and not by hand.
+REM  The bootrom takes only blocks whose payload is exactly 256 bytes and
+REM  drops a short one without a word: the tail never reaches flash, the
+REM  received count falls one short of the declared one, and the board does
+REM  not reboot after the copy -- the drive just stays mounted. picotool
+REM  pads the last block; uf2_check.js makes sure of it afterwards.
 if not exist "%BANKS%\GeneralUser-GS.ssb" (
     echo    no banks\GeneralUser-GS.ssb -- release ships WITHOUT the bank, .mid will not play
-) else (
-    node "%~dp0tools\uf2_embed_bank.js" "%PICARD%\soundsinth_zcontroller.uf2" "%BANKS%\GeneralUser-GS.ssb" "%PICARD%\soundsinth_zcontroller.uf2" || goto :fail
-    node "%~dp0tools\uf2_embed_bank.js" "%PICARD%\soundsinth_plain.uf2" "%BANKS%\GeneralUser-GS.ssb" "%PICARD%\soundsinth_plain.uf2" || goto :fail
+    goto :banks_done
 )
+
+set "PICOTOOL="
+set "PD=%USERPROFILE%\.pico-sdk\picotool"
+for /f "delims=" %%D in ('dir /b /o:n "%PD%" 2^>nul') do (
+    if exist "%PD%\%%D\picotool\picotool.exe" set "PICOTOOL=%PD%\%%D\picotool\picotool.exe"
+)
+if not defined PICOTOOL ( echo *** picotool.exe not found under %PD% & goto :fail )
+
+REM  0x10100000 = XIP base + SOUNDSINTH_BANK_FLASH_OFFSET, same as flash_bank.cmd.
+"%PICOTOOL%" uf2 convert "%BANKS%\GeneralUser-GS.ssb" -t bin "%PICARD%\bank.uf2" -o 0x10100000 --family rp2350-arm-s || goto :fail
+
+"%PICOTOOL%" uf2 combine "%PICARD%\soundsinth_zcontroller.uf2" "%PICARD%\bank.uf2" "%PICARD%\merged.uf2" --family rp2350-arm-s --abs-block || goto :fail
+move /y "%PICARD%\merged.uf2" "%PICARD%\soundsinth_zcontroller.uf2" >nul || goto :fail
+
+"%PICOTOOL%" uf2 combine "%PICARD%\soundsinth_plain.uf2" "%PICARD%\bank.uf2" "%PICARD%\merged.uf2" --family rp2350-arm-s --abs-block || goto :fail
+move /y "%PICARD%\merged.uf2" "%PICARD%\soundsinth_plain.uf2" >nul || goto :fail
+
+del /q "%PICARD%\bank.uf2"
+
+node "%~dp0tools\uf2_check.js" "%PICARD%\soundsinth_zcontroller.uf2" || goto :fail
+node "%~dp0tools\uf2_check.js" "%PICARD%\soundsinth_plain.uf2" || goto :fail
+:banks_done
 
 REM  [7/8] Licences for the banks that are present.
 REM

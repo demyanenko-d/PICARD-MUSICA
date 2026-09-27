@@ -15,7 +15,7 @@
 extern "C" {
 
 DSTATUS disk_status(BYTE pdrv) {
-    return (pdrv == 0 && devices::storage::storage_present()) ? 0 : STA_NOINIT;
+    return (pdrv == 0 && devices::storage::storage_present(devices::storage::Client::Board)) ? 0 : STA_NOINIT;
 }
 
 DSTATUS disk_initialize(BYTE pdrv) {
@@ -25,7 +25,7 @@ DSTATUS disk_initialize(BYTE pdrv) {
 }
 
 DRESULT disk_read(BYTE pdrv, BYTE* buff, LBA_t sector, UINT count) {
-    if (pdrv != 0 || !devices::storage::storage_present()) return RES_NOTRDY;
+    if (pdrv != 0 || !devices::storage::storage_present(devices::storage::Client::Board)) return RES_NOTRDY;
     for (UINT i = 0; i < count; ++i) {
         // Фоновый клиент: заказы хоста арбитр пропускает вперёд сам.
         if (!devices::storage::storage_read_background(static_cast<uint32_t>(sector) + i,
@@ -45,7 +45,7 @@ DRESULT disk_ioctl(BYTE pdrv, BYTE cmd, void* buff) {
     switch (cmd) {
         case CTRL_SYNC: return RES_OK;
         case GET_SECTOR_COUNT:
-            *static_cast<LBA_t*>(buff) = devices::storage::storage_sector_count();
+            *static_cast<LBA_t*>(buff) = devices::storage::storage_sector_count(devices::storage::Client::Board);
             return RES_OK;
         case GET_SECTOR_SIZE:
             *static_cast<WORD*>(buff) = devices::storage::kSectorBytes;

@@ -33,6 +33,7 @@
 #include "stack_paint.h"
 #include "devices/sd/card_protocol.h"
 #include "hostlink/bus.h"
+#include "usb/usb_host.h"
 #include "devices/sd/spi_emu.h"
 #include "devices/storage/storage.h"
 
@@ -194,6 +195,7 @@ void log_task(void* /*arg*/) {
             // Ноль - счёт опозданий выдачи байта полный.
             debug_logf("шина: очередь опозданий полна %" PRIu32 "\n", bus::bus_measurements().serve_late_full);
             devices::storage::storage_log_health();
+            rp2350::usb::host_log_health();
             player::live::ay_tap_log_stats();
         }
         devices::sd::sd_spi_log_trace_if_new();

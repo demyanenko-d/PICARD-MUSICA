@@ -40,7 +40,7 @@ bool bank_sd_open(soundsinth::bank::Bank& out) {
     namespace bank = soundsinth::bank;
     namespace memory = soundsinth::memory;
 
-    if (!devices::storage::storage_present()) return false;
+    if (!devices::storage::storage_present(devices::storage::Client::Board)) return false;
 
     // Том монтируется сразу (второй аргумент 1): отложенное монтирование
     // перенесло бы отказ в первое чтение, а решение "флеш или карта"

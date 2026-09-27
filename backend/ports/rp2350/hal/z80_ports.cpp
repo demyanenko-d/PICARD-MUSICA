@@ -13,6 +13,10 @@
 SOUNDSINTH_HOT_PATH_ATTR("z80_port_set_read")
 void devices::hal::z80_port_set_read(uint8_t port, uint8_t value) { bus::z80_bus_pio_set_rd(port, value); }
 
+void devices::hal::z80_port_set_read_page(uint8_t port, const uint8_t* page) { bus::rom_emu_set_port_page(port, page); }
+
+void devices::hal::z80_port_clear_read(uint8_t port) { bus::rom_emu_clear_port(port); }
+
 void devices::hal::z80_port_on_write(uint8_t port, PortWriteFn fn) {
     bus::z80_bus_pio_register_wr(port, reinterpret_cast<bus::PortWriteFn>(fn));
 }

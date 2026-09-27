@@ -73,7 +73,7 @@ void zcontroller_init(bool emulator_up) {
     // "карта на месте". Остальные единицы, как у рабочего контроллера на
     // этой плате. Известный драйвер смотрит
     // только бит 1, но чужой софт может смотреть и другие.
-    hal::z80_port_set_read(kPortCtrl, devices::storage::storage_present() ? kCtrlCardPresent : kCtrlNoCard);
+    hal::z80_port_set_read(kPortCtrl, devices::storage::storage_present(devices::storage::Client::Host) ? kCtrlCardPresent : kCtrlNoCard);
 
     // До первого обмена защёлка пуста - отдаётся то же, что невыбранная
     // карта.

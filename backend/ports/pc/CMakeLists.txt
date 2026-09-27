@@ -44,6 +44,7 @@ option(SOUNDSINTH_BUILD_TESTS  "Build unit tests" OFF)
 # требует явный binary_dir для таких случаев.
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../../platform    ${CMAKE_BINARY_DIR}/platform)
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../../lib/fatfs   ${CMAKE_BINARY_DIR}/lib_fatfs)
+add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../../lib/hidparser ${CMAKE_BINARY_DIR}/lib_hidparser)
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../../core       ${CMAKE_BINARY_DIR}/core)
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../../devices     ${CMAKE_BINARY_DIR}/devices)
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../../player      ${CMAKE_BINARY_DIR}/player)
@@ -89,6 +90,7 @@ add_library(platform_pc STATIC
     wav_writer.cpp
     fatfs_diskio.cpp
     fatfs_byte_source.cpp
+    usb_host_stub.cpp
 )
 
 target_include_directories(platform_pc PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/..)

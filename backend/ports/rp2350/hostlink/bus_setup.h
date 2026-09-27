@@ -116,12 +116,14 @@ extern int s_dma_tab_data;
 extern int s_dma_byte_addr;
 extern int s_dma_byte_data;
 
-// Порты: таблица указателей и три канала. Нулевой указатель в триггере
-// канала выдачи ответа его не запускает - так решается "порт не наш".
+// Порты: таблица записей, склейщик ячейки ответа и три канала. Нулевую
+// запись склейщик отбрасывает - так решается "порт не наш". Байт выдаёт
+// канал чтения памяти: он общий, циклы памяти и портов не пересекаются.
 extern uint32_t s_porttab[256];
 extern int s_dma_port_addr;
 extern int s_dma_port_ptr;
-extern int s_dma_port_data;
+extern int s_dma_port_join;
+extern int s_sm_port_join;
 
 // Трапы: карты, слова варианта, склейщик в pio2 и четыре канала.
 inline uint32_t* const s_trap_addr_map = reinterpret_cast<uint32_t*>(kTrapAddrMapAt);

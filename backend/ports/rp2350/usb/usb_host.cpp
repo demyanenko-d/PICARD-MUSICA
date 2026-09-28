@@ -7,6 +7,7 @@
 #include "usb_host.h"
 
 #include <cinttypes>
+#include <iterator>
 
 #include "tusb.h"
 
@@ -130,6 +131,7 @@ uint8_t s_last_joy = 0;
 int32_t s_mouse_dx = 0;
 int32_t s_mouse_dy = 0;
 uint32_t s_mouse_reports = 0;
+uint32_t s_mouse_foreign = 0; // отчёты с чужим номером: осей в них нет
 uint8_t s_mouse_buttons = 0;
 uint32_t s_mouse_logged_us = 0;
 constexpr uint32_t kMousePeriodUs = 500u * 1000u;
@@ -178,21 +180,72 @@ void log_keyboard(uint8_t dev_addr, uint8_t idx, const uint8_t* report, uint16_t
                n ? keys : "нет");
 }
 
-void log_mouse(const uint8_t* report, uint16_t len) {
-    if (len < 3) return;
-    s_mouse_dx += static_cast<int8_t>(report[1]);
-    s_mouse_dy += static_cast<int8_t>(report[2]);
-    s_mouse_buttons = report[0];
+// Поля берутся по карте: у отчёта с номером первый байт - номер, и
+// загрузочные смещения к нему неприменимы.
+void log_mouse(const devices::hid::ReportMap& map, const uint8_t* report, uint16_t len) {
+    int32_t dx = 0;
+    int32_t dy = 0;
+    const bool got_x = devices::hid::report_field_read(map.axis[static_cast<uint8_t>(devices::hid::Axis::X)], report,
+                                                       len, dx);
+    const bool got_y = devices::hid::report_field_read(map.axis[static_cast<uint8_t>(devices::hid::Axis::Y)], report,
+                                                       len, dy);
+    if (got_x) s_mouse_dx += dx;
+    if (got_y) s_mouse_dy += dy;
+    // Отчёт не того номера - он не про мышь.
+    if (!got_x && !got_y) ++s_mouse_foreign;
+    uint8_t b = 0;
+    for (uint8_t i = 0; i < map.button_count && i < 8u; ++i) {
+        if (devices::hid::report_button_read(map.button[i], report, len)) b |= static_cast<uint8_t>(1u << i);
+    }
+    s_mouse_buttons = b;
     ++s_mouse_reports;
 
     const uint32_t now = platform::mono_us();
     if (now - s_mouse_logged_us < kMousePeriodUs) return;
     s_mouse_logged_us = now;
-    debug_logf("usb: мышь - отчётов %" PRIu32 ", смещение %+" PRId32 " %+" PRId32 ", кнопки 0x%02X\n",
-               s_mouse_reports, s_mouse_dx, s_mouse_dy, s_mouse_buttons);
+    debug_logf("usb: мышь - отчётов %" PRIu32 " (чужих %" PRIu32 "), смещение %+" PRId32 " %+" PRId32
+               ", кнопки 0x%02X, ZX x=%u y=%u к=0x%02X\n",
+               s_mouse_reports, s_mouse_foreign, s_mouse_dx, s_mouse_dy, s_mouse_buttons,
+               devices::hid::mouse_page()[devices::hid::kMouseHiX], devices::hid::mouse_page()[devices::hid::kMouseHiY],
+               devices::hid::mouse_page()[devices::hid::kMouseHiButtons]);
     s_mouse_reports = 0;
+    s_mouse_foreign = 0;
     s_mouse_dx = 0;
     s_mouse_dy = 0;
+}
+
+// Дескриптор байтами, один раз при подключении. Буфер строки 192 Б,
+// отсюда 24 байта в строку.
+void dump_descriptor(const uint8_t* desc, uint16_t len) {
+    char line[80];
+    for (uint16_t off = 0; off < len; off += 24u) {
+        const uint16_t n = (len - off) < 24u ? static_cast<uint16_t>(len - off) : 24u;
+        for (uint16_t i = 0; i < n; ++i) {
+            static const char kHex[] = "0123456789ABCDEF";
+            line[i * 3u] = kHex[desc[off + i] >> 4];
+            line[i * 3u + 1u] = kHex[desc[off + i] & 0x0Fu];
+            line[i * 3u + 2u] = ' ';
+        }
+        line[n * 3u] = '\0';
+        debug_logf("usb:   дкр %03u: %s\n", off, line);
+    }
+}
+
+// Разобранная карта: где у устройства оси и кнопки. Один раз, при
+// подключении.
+void dump_report_map(const devices::hid::ReportMap& map) {
+    static const char* const kAxisName[] = {"X", "Y", "Z", "Rx", "Ry", "Rz", "Slider", "Dial", "Wheel"};
+    // Имя на каждую ось: без этого лишняя ось читает за концом массива.
+    static_assert(std::size(kAxisName) == devices::hid::kAxisCount, "имя на каждую ось");
+    for (uint8_t i = 0; i < devices::hid::kAxisCount; ++i) {
+        const devices::hid::Field& f = map.axis[i];
+        if (!f.present()) continue;
+        debug_logf("usb:   ось %s - отчёт %u, разряд %u, ширина %u, границы %" PRId32 "..%" PRId32 "\n", kAxisName[i],
+                   f.report_id, f.bit_offset, f.bit_size, f.logical_min, f.logical_max);
+    }
+    for (uint8_t i = 0; i < map.button_count && i < 4u; ++i) {
+        debug_logf("usb:   кнопка %u - отчёт %u, разряд %u\n", i, map.button[i].report_id, map.button[i].bit_offset);
+    }
 }
 
 void log_joystick() {
@@ -422,6 +475,8 @@ void tuh_hid_mount_cb(uint8_t dev_addr, uint8_t idx, const uint8_t* desc, uint16
     debug_logf("usb: дескриптор %u Б %s | оси %u, шляпка %u, кнопок %u, номера отчётов %u\n", desc_len,
                parsed ? "разобран" : "НЕ РАЗОБРАН", map.has_axes() ? 1u : 0u, map.hat.present() ? 1u : 0u,
                map.button_count, map.uses_report_ids ? 1u : 0u);
+    rp2350::usb::dump_descriptor(desc, desc_len);
+    rp2350::usb::dump_report_map(map);
 
     // Первый заказ отчёта: дальше каждый следующий заказывается из
     // обработчика принятого, иначе поток прекратится после первого.
@@ -479,7 +534,7 @@ void tuh_hid_report_received_cb(uint8_t dev_addr, uint8_t idx, const uint8_t* re
             break;
         case Role::Mouse:
             devices::hid::usb_map_mouse(rp2350::usb::map_of(dev_addr, idx), report, len);
-            rp2350::usb::log_mouse(report, len);
+            rp2350::usb::log_mouse(rp2350::usb::map_of(dev_addr, idx), report, len);
             break;
         case Role::Gamepad:
             devices::hid::usb_map_gamepad(rp2350::usb::map_of(dev_addr, idx), report, len);

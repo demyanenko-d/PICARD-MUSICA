@@ -13,6 +13,9 @@
 //
 // Координаты - свободно бегущие восьмиразрядные счётчики, чтение их не
 // меняет: программа сама следит за переполнением. Y растёт вверх.
+//
+// В порте кнопок младшая половина - кнопки, старшая - четырёхразрядный
+// счётчик колеса, шаг на щелчок. Разряд 3 не занят.
 
 #include <cstdint>
 
@@ -23,15 +26,19 @@ inline constexpr uint8_t kMouseHiButtons = 0xFA;
 inline constexpr uint8_t kMouseHiX = 0xFB;
 inline constexpr uint8_t kMouseHiY = 0xFF;
 
-// Разряды кнопок, ноль - нажата; старшие не используются и подняты.
-inline constexpr uint8_t kMouseButtonRight = 0x01;
-inline constexpr uint8_t kMouseButtonLeft = 0x02;
+// Ноль - нажата.
+inline constexpr uint8_t kMouseButtonLeft = 0x01;
+inline constexpr uint8_t kMouseButtonRight = 0x02;
 inline constexpr uint8_t kMouseButtonMiddle = 0x04;
 inline constexpr uint8_t kMouseButtonsIdle = 0xFF;
+inline constexpr uint8_t kMouseWheelMask = 0xF0;
+inline constexpr uint8_t kMouseWheelStep = 0x10;
 
 void mouse_reset();
 void mouse_move(int8_t dx, int8_t dy);
 void mouse_set_buttons(uint8_t mask); // разряды kMouseButton*, ноль - нажата
+// Щелчки колеса, счётчик переполняется.
+void mouse_wheel(int8_t clicks);
 
 const uint8_t* mouse_page();
 

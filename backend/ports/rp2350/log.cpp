@@ -197,6 +197,12 @@ void log_task(void* /*arg*/) {
             devices::storage::storage_log_health();
             rp2350::usb::host_log_health();
             player::live::ay_tap_log_stats();
+            // Банка во флеше нет: .mid не играет ни файлом, ни живым потоком.
+            // Строка повторяется в каждом разборе - строку загрузки застаёт
+            // не всякий, а причина отказа у неё одна на все проявления.
+            if (!shared::g_flash_bank.valid()) {
+                debug_log("ВНИМАНИЕ: банка во флеше нет - MIDI не играет, залить bank.uf2\n");
+            }
         }
         devices::sd::sd_spi_log_trace_if_new();
 

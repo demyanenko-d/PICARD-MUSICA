@@ -12,15 +12,26 @@ alignas(256) uint8_t s_page[256];
 uint8_t s_x = 0;
 uint8_t s_y = 0;
 
+// Кнопки и колесо делят байт, поэтому хранятся врозь и сводятся при
+// записи: иначе одно затирало бы другое.
+uint8_t s_buttons = kMouseButtonsIdle;
+uint8_t s_wheel = kMouseWheelMask; // до первого щелчка байт как неподведённая шина
+
+void publish_buttons() {
+    s_page[kMouseHiButtons] = static_cast<uint8_t>((s_buttons & ~kMouseWheelMask) | (s_wheel & kMouseWheelMask));
+}
+
 } // namespace
 
 void mouse_reset() {
     for (uint8_t& b : s_page) b = 0xFF;
     s_x = 0;
     s_y = 0;
+    s_buttons = kMouseButtonsIdle;
+    s_wheel = kMouseWheelMask;
     s_page[kMouseHiX] = s_x;
     s_page[kMouseHiY] = s_y;
-    s_page[kMouseHiButtons] = kMouseButtonsIdle;
+    publish_buttons();
 }
 
 void mouse_move(int8_t dx, int8_t dy) {
@@ -32,7 +43,14 @@ void mouse_move(int8_t dx, int8_t dy) {
 }
 
 void mouse_set_buttons(uint8_t mask) {
-    s_page[kMouseHiButtons] = mask;
+    s_buttons = mask;
+    publish_buttons();
+}
+
+void mouse_wheel(int8_t clicks) {
+    if (clicks == 0) return;
+    s_wheel = static_cast<uint8_t>(s_wheel + static_cast<uint8_t>(clicks) * kMouseWheelStep);
+    publish_buttons();
 }
 
 const uint8_t* mouse_page() {

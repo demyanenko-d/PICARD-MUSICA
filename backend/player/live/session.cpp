@@ -44,6 +44,7 @@ struct State {
     soundsinth::midi_in::AyMidiInput input;
     bool active = false;
     uint32_t seen_events = 0;   // сообщений до включения режима
+    bool no_bank_reported = false; // об отсутствии банка сказано
     uint32_t started_ms = 0;
     uint32_t loaded = 0;        // сэмплов прочитано из флеша за сеанс
     uint32_t load_repeats = 0;  // заказов на уже резидентный сэмпл
@@ -169,6 +170,18 @@ const PatternCell* live_row(void* user) {
 
 bool stream_started(uint32_t now_ms) {
     if (s_state.active) return false;
+    // Банк во флеше живому режиму нужен весь: сэмплы он тянет только
+    // оттуда, а появиться на ходу банк не может. Отвод всё равно
+    // разбирается, иначе кольцо переполнялось бы, а строка печатается
+    // один раз - проход цепочки идёт раз в несколько миллисекунд.
+    if (!shared::g_flash_bank.valid()) {
+        drain_tap(now_ms, /*to_stream=*/false);
+        if (!s_state.no_bank_reported) {
+            s_state.no_bank_reported = true;
+            debug_log("live: банка во флеше нет, живой MIDI недоступен\n");
+        }
+        return false;
+    }
     // Кладём в очередь сразу: события, по которым режим и распознан (обычно
     // выбор банка и программы), нужны песне - иначе первые ноты звучат не тем
     // или молчат.

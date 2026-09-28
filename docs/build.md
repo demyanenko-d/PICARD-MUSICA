@@ -62,14 +62,14 @@ scripts\build.bat
 release/
   UNIMOD.$C  UNIMOD.sna  UMPLAYER.WMF   программы для Спектрума
   readme.txt
-  picard/    два .uf2                    прошивки платы
+  picard/    три .uf2                    две прошивки платы и банк
   banks/     три .ssb и лицензии к ним   банки инструментов
 SD/WC/UMPLAYER.WMF                       тот же плагин на карте
 build/sd.img                             образ SD-карты из SD/
 ```
 
 Банки в `banks/` кладёт не сборка, а `node scripts/tools/bake_banks.js` — сборка
-только вшивает GeneralUser в образы и добавляет лицензии.
+только делает из GeneralUser образ `bank.uf2` и добавляет лицензии.
 
 ### Перед первой сборкой: исходники банков
 
@@ -79,8 +79,8 @@ build/sd.img                             образ SD-карты из SD/
 выпечку. Откуда брать — [docs/banks.md](banks.md).
 
 Без этого шага сборка проходит, но релиз выходит без банков, а `.mid` не
-играет: в прошивку нечего вшивать. Об этом она говорит строкой
-`no banks\GeneralUser-GS.ssb`.
+играет: образ `bank.uf2` не из чего собрать. Об этом сборка говорит
+строкой `no banks\GeneralUser-GS.ssb`.
 
 ## Сборка по частям
 

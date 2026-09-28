@@ -115,11 +115,31 @@ void mouse_tests() {
     CHECK_EQ(mouse_page()[kMouseHiX], 251);
     CHECK_EQ(mouse_page()[kMouseHiY], 7);
 
+    // Разряды: 0 левая, 1 правая, 2 средняя; ноль - нажата.
     mouse_set_buttons(static_cast<uint8_t>(kMouseButtonsIdle & ~kMouseButtonLeft));
-    CHECK_EQ(mouse_page()[kMouseHiButtons], 0xFD);
+    CHECK_EQ(mouse_page()[kMouseHiButtons], 0xFE);
     // Кнопки лежат отдельно от координат.
     CHECK_EQ(mouse_page()[kMouseHiX], 251);
 
+    mouse_set_buttons(static_cast<uint8_t>(kMouseButtonsIdle & ~kMouseButtonRight));
+    CHECK_EQ(mouse_page()[kMouseHiButtons], 0xFD);
+
+    mouse_set_buttons(kMouseButtonsIdle);
+    CHECK_EQ(mouse_page()[kMouseHiButtons], 0xFF);
+
+    // Колесо - старшая половина байта. До первого щелчка она в единицах,
+    // поэтому шаг вверх её обнуляет.
+    mouse_wheel(1);
+    CHECK_EQ(mouse_page()[kMouseHiButtons], 0x0F);
+    mouse_wheel(-1);
+    CHECK_EQ(mouse_page()[kMouseHiButtons], 0xFF);
+    mouse_wheel(-1);
+    CHECK_EQ(mouse_page()[kMouseHiButtons], 0xEF);
+    // Нажатие и щелчок не затирают друг друга.
+    mouse_set_buttons(static_cast<uint8_t>(kMouseButtonsIdle & ~kMouseButtonMiddle));
+    CHECK_EQ(mouse_page()[kMouseHiButtons], 0xEB);
+    mouse_wheel(1);
+    CHECK_EQ(mouse_page()[kMouseHiButtons], 0xFB);
     mouse_set_buttons(kMouseButtonsIdle);
     CHECK_EQ(mouse_page()[kMouseHiButtons], 0xFF);
 

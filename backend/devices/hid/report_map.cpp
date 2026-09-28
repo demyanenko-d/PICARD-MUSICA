@@ -14,7 +14,7 @@ constexpr uint16_t kPageButton = 0x09;
 
 // Назначения Generic Desktop.
 constexpr uint16_t kUsageX = 0x30;
-constexpr uint16_t kUsageDial = 0x37;
+constexpr uint16_t kUsageWheel = 0x38; // колесо мыши - последняя ось
 constexpr uint16_t kUsageHat = 0x39;
 
 // Таблица предметов нужна только на время разбора, поэтому она одна на
@@ -124,7 +124,7 @@ bool report_map_build(const uint8_t* desc, uint16_t len, ReportMap& out) {
             if (!out.hat.present()) fill(out.hat, it);
             continue;
         }
-        if (usage < kUsageX || usage > kUsageDial) continue;
+        if (usage < kUsageX || usage > kUsageWheel) continue;
         Field& f = out.axis[usage - kUsageX];
         // Первое вхождение и выигрывает: у пультов ту же ось иногда
         // объявляют второй раз в другом отчёте.
@@ -187,5 +187,5 @@ extern "C" bool CALLBACK_HIDParser_FilterHIDReportItem(HID_ReportItem_t* const i
     if (page == 0x09 || page == 0x07) return true; // кнопки и клавиши
     if (page != 0x01) return false;                // не Generic Desktop
     const uint16_t usage = item->Attributes.Usage.Usage;
-    return (usage >= 0x30 && usage <= 0x37) || usage == 0x39; // оси и шляпка
+    return (usage >= 0x30 && usage <= 0x38) || usage == 0x39; // оси, колесо и шляпка
 }

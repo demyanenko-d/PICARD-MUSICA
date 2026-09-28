@@ -17,8 +17,8 @@ namespace devices::hid {
 
 inline constexpr uint8_t kMaxButtons = 16;
 
-// Оси в порядке назначений Generic Desktop 0x30..0x37.
-enum class Axis : uint8_t { X, Y, Z, Rx, Ry, Rz, Slider, Dial, Count };
+// Оси в порядке назначений Generic Desktop 0x30..0x38.
+enum class Axis : uint8_t { X, Y, Z, Rx, Ry, Rz, Slider, Dial, Wheel, Count };
 
 inline constexpr uint8_t kAxisCount = static_cast<uint8_t>(Axis::Count);
 

@@ -29,8 +29,7 @@ struct Combo {
 };
 
 // Таблица вдвое длиннее числа кодов: вторая половина - то же с нажатым
-// ЛЕВЫМ Shift. Так отображается не клавиша, а набранный знак, и верхний
-// регистр берётся сам, без ручных комбинаций на каждый случай.
+// ЛЕВЫМ Shift, то есть отображается набранный знак, а не клавиша.
 constexpr uint16_t kShifted = 0x100;
 
 constexpr std::array<Combo, 512> build_keymap() {
@@ -137,9 +136,7 @@ constexpr std::array<Combo, 512> build_keymap() {
 
     // --- Верхний регистр: то же с левым Shift ---
     //
-    // Знаки взяты по раскладке US: что напечатано на верхней грани
-    // клавиши, то и набирается. Без этой половины знаки верхнего регистра
-    // недостижимы вовсе.
+    // Знаки по раскладке US: что напечатано на верхней грани клавиши.
     m[kShifted | 0x1E] = {kSymShift, zx(3, 0)}; // ! - SS+1
     m[kShifted | 0x1F] = {kSymShift, zx(3, 1)}; // @ - SS+2
     m[kShifted | 0x20] = {kSymShift, zx(3, 2)}; // # - SS+3
@@ -199,12 +196,8 @@ struct Signals {
 
 Signals s_signals = {false, false, false, false, false};
 
-// Пока не видели отчёта без сигнальных клавиш, ни один сигнал не подаётся.
-//
-// Полный сброс перезапускает плату, состояние не переживает перезапуск, и
-// клавиатура перечисляется заново. Держи пользователь тройку до конца -
-// первый же отчёт после подъёма подал бы сброс снова, и так по кругу.
-// Поэтому сигнал взводится только отпусканием.
+// Сигнал взводится отпусканием: полный сброс перезапускает плату, и
+// зажатая тройка иначе сбрасывала бы её по кругу.
 bool s_signals_armed = false;
 
 // Полный сброс - тройкой, как на ПК: одной клавишей такое не вешают.
@@ -292,9 +285,8 @@ void press_modifier(uint8_t rows[kKeyboardRows], uint8_t usage) {
     }
 }
 
-// Левый Shift, которому не нашлось верхнего знака, становится CAPS SHIFT:
-// выходит заглавная буква, как и ждёшь. С SYMBOL SHIFT он не складывается
-// - это уже набранный знак.
+// Левый Shift, которому не нашлось верхнего знака, становится CAPS SHIFT.
+// С SYMBOL SHIFT он не складывается - это уже набранный знак.
 void finish_shift(uint8_t rows[kKeyboardRows], bool shifted) {
     if (shifted && !pressed(rows, kSymShift)) press(rows, kCapsShift);
 }
@@ -305,10 +297,9 @@ void finish_shift(uint8_t rows[kKeyboardRows], bool shifted) {
 bool keyboard_from_map(const ReportMap& map, const uint8_t* report, uint16_t len) {
     const KeyboardMap& k = map.keyboard;
     if (!k.present()) return false;
-    // Обычная клавиатура читается загрузочной раскладкой: она задана
-    // спецификацией и у всех одна. Дескриптор нужен только тем, кто шлёт
-    // отчёты с номерами - к таким загрузочная раскладка неприменима, там
-    // первый байт номер, а не модификаторы.
+    // Загрузочная раскладка задана спецификацией и у всех одна. Дескриптор
+    // нужен только тем, кто шлёт отчёты с номерами: там первый байт номер,
+    // а не модификаторы.
     if (!map.uses_report_ids) return false;
 
     uint8_t rows[kKeyboardRows];
@@ -396,11 +387,9 @@ ModifierRoles usb_map_modifiers() {
 }
 
 void usb_map_keyboard_release_all() {
-    // Клавиатуру выдернули с зажатой F11 - следующее нажатие обязано
-    // сработать, иначе сигнал пропадёт до перезагрузки.
+    // Устройство отключено: состояние сигнальных клавиш снимается, а
+    // подать сигнал снова сможет только отпускание.
     s_signals = Signals{false, false, false, false, false};
-    // Подключат снова - сигнал подаст только отпускание: иначе зажатая
-    // тройка при перечислении сбрасывала бы плату по кругу.
     s_signals_armed = false;
     keyboard_reset();
 }
@@ -431,6 +420,12 @@ void usb_map_mouse(const ReportMap& map, const uint8_t* report, uint16_t len) {
     // Y у Kempston растёт вверх, у USB вниз. Приращение обрезается байтом:
     // счётчик у Kempston восьмиразрядный.
     mouse_move(clamp_i8(dx), clamp_i8(-dy));
+
+    // Колесо - в старшую половину порта кнопок.
+    int32_t wheel = 0;
+    if (report_field_read(map.axis[static_cast<uint8_t>(Axis::Wheel)], report, len, wheel)) {
+        mouse_wheel(clamp_i8(wheel));
+    }
 }
 
 namespace {

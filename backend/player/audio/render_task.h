@@ -1,6 +1,9 @@
+// SPDX-License-Identifier: MIT
 #pragma once
 
 #include <atomic>
+
+#include <cstdint>
 
 #include "platform/os.h"
 #include "player/audio/buffer_pool.h"
@@ -9,6 +12,10 @@
 namespace player::audio {
 
 // Задача, которая рендерит bus в pool до stop().
+//
+// Сама задача ОС заводится один раз на всю работу прошивки и между треками
+// стоит на семафоре: объект живёт трек, задача - дольше. Иначе повторный
+// запуск приходился бы на ещё не снятую задачу.
 class RenderTask {
 public:
     // busy_us_counter - необязательный счётчик микросекунд, когда ядро считало
@@ -20,7 +27,7 @@ public:
     RenderTask(soundsinth::mixbus::MixBus& bus, BufferPool& pool, std::atomic<uint32_t>* busy_us_counter = nullptr);
     ~RenderTask();
 
-    RenderTask(const RenderTask&) = delete;
+    RenderTask(const RenderTask&)            = delete;
     RenderTask& operator=(const RenderTask&) = delete;
 
     // Блокирует вызывающего до полной остановки задачи. Потребитель
@@ -38,12 +45,9 @@ public:
     // Сколько байт стека задачи не тронуто за её жизнь; верно после stop().
     uint32_t stack_unused_bytes() const { return stack_unused_bytes_; }
 
-    // Заминка вывода видна только как "рендер не успел", а причин несколько.
-    // Разделяются этими: самая долгая отрисовка буфера и самый большой
-    // промежуток между двумя готовыми буферами, для которого запоминается
-    // ожидание свободного буфера и сама отрисовка. Остаток промежутка сверх
-    // них - ожидание места в очереди готовых (рендер убежал вперёд, это
-    // передышка) плюс то, что задача ждала ядра; порознь они пока не видны.
+    // Заминка вывода видна только как "рендер не успел". Разделяют причины:
+    // самая долгая отрисовка буфера и самый большой промежуток между
+    // готовыми буферами.
     uint32_t worst_render_us() const { return worst_render_us_.load(std::memory_order_relaxed); }
     uint32_t worst_gap_us() const { return worst_gap_us_.load(std::memory_order_relaxed); }
     // Отрисовка, что шла в самом большом промежутке: по ней видно, сколько из
@@ -57,13 +61,11 @@ public:
     uint32_t worst_gap_push_us() const { return worst_gap_push_us_.load(std::memory_order_relaxed); }
 
 private:
-    static void task_fn(void* self_untyped);
+    static void task_fn(void* unused);
     void run();
 
     soundsinth::mixbus::MixBus& bus_;
     BufferPool& pool_;
-    platform::Semaphore* stop_requested_;
-    platform::Semaphore* done_;
     std::atomic<uint32_t>* busy_us_counter_ = nullptr;
     // Пишет задача рендера, читает задача лога - отсюда atomic.
     std::atomic<uint32_t> worst_render_us_{0};
@@ -73,7 +75,7 @@ private:
     std::atomic<uint32_t> worst_gap_push_us_{0};
     // Пишет задача перед сигналом done_, читает остановивший после stop().
     uint32_t stack_unused_bytes_ = 0;
-    bool stopped_ = false;
+    bool stopped_                = false;
 };
 
 } // namespace player::audio

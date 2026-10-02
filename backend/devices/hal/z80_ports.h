@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 #pragma once
 
 // Порты шины Z80 глазами устройства: чем отвечать на чтение и кто узнаёт о
@@ -15,7 +16,7 @@
 
 namespace devices::hal {
 
-using PortWriteFn = void (*)(uint8_t port, uint8_t data);
+using PortWriteFn    = void (*)(uint8_t port, uint8_t data);
 using PortReadDoneFn = void (*)(uint8_t port);
 
 // Байт, которым порт отвечает на следующее чтение.

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 #pragma once
 
 // Диспетчер эффектов: разбор строки и потиковые эффекты поверх секвенсора.
@@ -15,8 +16,7 @@ namespace soundsinth::engine {
 
 // NNA (только IT): зовётся перед тем, как Note-Trigger перезапишет канал
 // новой нотой, пока в нём старый голос.
-using NnaTriggerCallback = void (*)(void* user, uint8_t channel, uint16_t new_instrument_1based,
-                                    uint16_t new_sample_index, uint8_t new_resolved_note);
+using NnaTriggerCallback = void (*)(void* user, uint8_t channel, uint16_t new_instrument_1based, uint16_t new_sample_index, uint8_t new_resolved_note);
 
 struct DispatchContext {
     ChannelState* channels = nullptr;
@@ -34,7 +34,7 @@ struct DispatchContext {
 
     // NNA: nna_user - указатель вызывающего, не DispatchContext*. Оба поля
     // nullptr - NNA нет.
-    void* nna_user = nullptr;
+    void* nna_user                         = nullptr;
     NnaTriggerCallback on_note_trigger_nna = nullptr;
 };
 
@@ -68,10 +68,8 @@ void dispatch_delayed_notes(DispatchContext* ctx, uint16_t tick_in_row, uint8_t 
 // NoteCut). У файла это tick_in_row != 0. У живого MIDI строка равна тику, и
 // такой тик не наступает никогда - ему нужен свой ответ, а не выдуманный
 // номер тика: по номеру сверяются отложенные ноты и фаза арпеджио.
-void apply_continuous_effects(PlayState& ps, ChannelState* channels, uint8_t channel_count,
-                               soundsinth::model::QuirkFlags quirks,
-                               soundsinth::model::FrequencyModel frequency_model, uint32_t envelope_time_step_q8,
-                               bool tick_slides);
+void apply_continuous_effects(PlayState& ps, ChannelState* channels, uint8_t channel_count, soundsinth::model::QuirkFlags quirks,
+                              soundsinth::model::FrequencyModel frequency_model, uint32_t envelope_time_step_q8, bool tick_slides);
 
 // Огибающие громкости, панорамы, питча, фильтра и затухание одного канала;
 // её же зовут для хвостов NNA. amiga_pitch: тик огибающей питча идёт,
@@ -81,8 +79,7 @@ void apply_continuous_effects(PlayState& ps, ChannelState* channels, uint8_t cha
 // огибающей громкости включает затухание), kQuirkItSilentEnvelopeEndStops
 // (голос снимается за нулевой последней точкой). envelope_time_step_q8:
 // тиков огибающих на тик, Q8.8 (у .mid default_tempo / текущий темп).
-void advance_envelope_and_fadeout(ChannelState& cs, bool amiga_pitch, soundsinth::model::QuirkFlags quirks,
-                                  uint32_t envelope_time_step_q8);
+void advance_envelope_and_fadeout(ChannelState& cs, bool amiga_pitch, soundsinth::model::QuirkFlags quirks, uint32_t envelope_time_step_q8);
 
 // Звучащая высота при glissando (ChannelState::glissando_porta): period
 // или linear_pitch канала, прижатые к ноте сетки полутонов. Сетка сдвинута

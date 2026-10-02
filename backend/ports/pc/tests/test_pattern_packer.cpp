@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 #include "testing.h"
 
 #include <cstdio>
@@ -19,9 +20,9 @@ namespace {
 
 PatternCell make_cell(uint8_t note, uint8_t instrument, Effect fx = Effect::None, uint8_t fx_param = 0) {
     PatternCell c;
-    c.note = note;
-    c.instrument = instrument;
-    c.effect.type = fx;
+    c.note         = note;
+    c.instrument   = instrument;
+    c.effect.type  = fx;
     c.effect.param = fx_param;
     return c;
 }
@@ -29,20 +30,20 @@ PatternCell make_cell(uint8_t note, uint8_t instrument, Effect fx = Effect::None
 void test_roundtrip_exact() {
     std::printf("test_pattern_packer_roundtrip_exact\n");
 
-    constexpr uint16_t kRowCount = 6;
+    constexpr uint16_t kRowCount    = 6;
     constexpr uint8_t kChannelCount = 4;
 
     // Строится вручную, включая повторяющиеся ячейки (проверка
     // дедупликации словаря) и полностью пустые строки/каналы (проверка
     // битовой маски).
     std::vector<std::vector<PatternCell>> rows(kRowCount, std::vector<PatternCell>(kChannelCount));
-    rows[0][0] = make_cell(36, 1);                                    // C-3, инструмент 1
+    rows[0][0] = make_cell(36, 1); // C-3, инструмент 1
     rows[0][2] = make_cell(48, 2, Effect::SetVolume, 40);
     // rows[1] - полностью пустая строка
-    rows[2][0] = make_cell(36, 1);                                    // та же ячейка, что rows[0][0] - должна переиспользовать словарную запись
+    rows[2][0] = make_cell(36, 1); // та же ячейка, что rows[0][0] - должна переиспользовать словарную запись
     rows[2][1] = make_cell(40, 1, Effect::PortaUp, 5);
     rows[3][3] = make_cell(soundsinth::model::kNoteNone, 0, Effect::NoteCut, 0); // без ноты, только эффект - всё равно активная ячейка
-    rows[4][0] = make_cell(36, 1);                                    // третье использование той же ячейки
+    rows[4][0] = make_cell(36, 1);                                               // третье использование той же ячейки
     rows[5][1] = make_cell(60, 3, Effect::Vibrato, 0x84);
 
     uint8_t buffer[soundsinth::memory::kPatternPackBufferBytes] = {};
@@ -63,7 +64,7 @@ void test_roundtrip_exact() {
         reader.read_row(r, decoded.data());
         for (uint8_t ch = 0; ch < kChannelCount; ++ch) {
             const PatternCell& expected = rows[r][ch];
-            const PatternCell& got = decoded[ch];
+            const PatternCell& got      = decoded[ch];
             CHECK_EQ(got.note, expected.note);
             CHECK_EQ(got.instrument, expected.instrument);
             CHECK(got.effect.type == expected.effect.type);
@@ -82,18 +83,19 @@ void test_roundtrip_exact() {
 void test_empty_rows_share_one_body_and_high_channels_roundtrip() {
     std::printf("test_pattern_packer_empty_rows_share_one_body\n");
 
-    constexpr uint16_t kRowCount = 64;
+    constexpr uint16_t kRowCount    = 64;
     constexpr uint8_t kChannelCount = 40;
     std::vector<std::vector<PatternCell>> rows(kRowCount, std::vector<PatternCell>(kChannelCount));
     for (uint16_t r = 0; r < kRowCount; r += 4) {
         rows[r][r % kChannelCount] = make_cell(static_cast<uint8_t>(24 + r), 1);
-        rows[r][39] = make_cell(60, 2, Effect::SetVolume, static_cast<uint8_t>(r));
-        rows[r][32] = make_cell(soundsinth::model::kNoteNone, 0, Effect::NoteCut, 1);
+        rows[r][39]                = make_cell(60, 2, Effect::SetVolume, static_cast<uint8_t>(r));
+        rows[r][32]                = make_cell(soundsinth::model::kNoteNone, 0, Effect::NoteCut, 1);
     }
 
     uint8_t buffer[soundsinth::memory::kPatternPackBufferBytes] = {};
     patterns::PatternPacker packer(buffer, sizeof(buffer), kRowCount, kChannelCount);
-    for (uint16_t r = 0; r < kRowCount; ++r) CHECK(packer.add_row(rows[r].data()));
+    for (uint16_t r = 0; r < kRowCount; ++r)
+        CHECK(packer.add_row(rows[r].data()));
 
     memory::PsramStore psram;
     memory::psram_create(psram);
@@ -101,7 +103,7 @@ void test_empty_rows_share_one_body_and_high_channels_roundtrip() {
     CHECK(offset != memory::kPatternAllocFailed);
     const uint8_t* block = memory::psram_pattern_ptr(psram, offset);
 
-    auto row_offset = [&](uint16_t r) { return static_cast<uint16_t>(block[2 + r * 2] | (block[3 + r * 2] << 8)); };
+    auto row_offset           = [&](uint16_t r) { return static_cast<uint16_t>(block[2 + r * 2] | (block[3 + r * 2] << 8)); };
     const uint16_t empty_body = row_offset(1);
     for (uint16_t r = 0; r < kRowCount; ++r) {
         if (r % 4 == 0) {
@@ -143,9 +145,10 @@ void test_packer_failure_branches() {
         return p.add_row(&a) && p.add_row(&second);
     };
     uint32_t size = 1;
-    while (size < buf.size() && !fits(size, a)) ++size;
+    while (size < buf.size() && !fits(size, a))
+        ++size;
     CHECK(size < buf.size());
-    std::printf("  граница буфера %u байт\n", size);
+    std::printf("  buffer boundary %u bytes\n", size);
     CHECK(!fits(size - 1, a)); // на байт меньше - уже нет
 
     memory::PsramStore psram;
@@ -180,16 +183,17 @@ void test_packer_rate_and_last_channel_roundtrip() {
     std::printf("test_pattern_packer_rate_and_last_channel_roundtrip\n");
     constexpr uint8_t kCh = 64;
     std::vector<PatternCell> row0(kCh), row1(kCh), row2(kCh);
-    row0[63] = make_cell(40, 1, Effect::PortaUp, 3);
-    row0[63].effect.rate = soundsinth::model::SlideRate::Fine;
-    row1[63] = make_cell(41, 1, Effect::PortaDown, 5);
-    row1[63].effect.rate = soundsinth::model::SlideRate::ExtraFine;
-    row2[63] = make_cell(42, 2, static_cast<Effect>(static_cast<uint8_t>(Effect::Count) - 1), 9);
+    row0[63]                                = make_cell(40, 1, Effect::PortaUp, 3);
+    row0[63].effect.rate                    = soundsinth::model::SlideRate::Fine;
+    row1[63]                                = make_cell(41, 1, Effect::PortaDown, 5);
+    row1[63].effect.rate                    = soundsinth::model::SlideRate::ExtraFine;
+    row2[63]                                = make_cell(42, 2, static_cast<Effect>(static_cast<uint8_t>(Effect::Count) - 1), 9);
     const std::vector<PatternCell>* rows[3] = {&row0, &row1, &row2};
 
     std::vector<uint8_t> buf(soundsinth::memory::kPatternPackBufferBytes);
     patterns::PatternPacker p(buf.data(), static_cast<uint32_t>(buf.size()), 3, kCh);
-    for (const auto* r : rows) CHECK(p.add_row(r->data()));
+    for (const auto* r : rows)
+        CHECK(p.add_row(r->data()));
     memory::PsramStore psram;
     memory::psram_create(psram);
     const uint32_t off = p.finish(psram);
@@ -215,18 +219,18 @@ void test_packer_rate_and_last_channel_roundtrip() {
 void test_dict_lookup_word_collisions_roundtrip() {
     std::printf("test_pattern_packer_dict_lookup_word_collisions_roundtrip\n");
     constexpr uint16_t kRows = 64;
-    constexpr uint8_t kCh = 32;
+    constexpr uint8_t kCh    = 32;
     std::vector<PatternCell> cells(kRows * kCh);
     uint32_t x = 99;
     for (auto& c : cells) {
         x = x * 1664525u + 1013904223u;
         if ((x >> 28) < 3) continue; // часть ячеек пустая
-        c = make_cell(static_cast<uint8_t>(40 + ((x >> 8) & 3)), 1, ((x >> 12) & 1) ? Effect::PortaUp : Effect::PortaDown,
-                      static_cast<uint8_t>((x >> 16) & 7));
+        c = make_cell(static_cast<uint8_t>(40 + ((x >> 8) & 3)), 1, ((x >> 12) & 1) ? Effect::PortaUp : Effect::PortaDown, static_cast<uint8_t>((x >> 16) & 7));
     }
     std::vector<uint8_t> buf(soundsinth::memory::kPatternPackBufferBytes);
     patterns::PatternPacker p(buf.data(), static_cast<uint32_t>(buf.size()), kRows, kCh);
-    for (uint16_t r = 0; r < kRows; ++r) CHECK(p.add_row(&cells[r * kCh]));
+    for (uint16_t r = 0; r < kRows; ++r)
+        CHECK(p.add_row(&cells[r * kCh]));
     memory::PsramStore psram;
     memory::psram_create(psram);
     const uint32_t off = p.finish(psram);
@@ -238,8 +242,7 @@ void test_dict_lookup_word_collisions_roundtrip() {
         reader.read_row(r, got.data());
         for (uint8_t ch = 0; ch < kCh; ++ch) {
             const PatternCell& w = cells[r * kCh + ch];
-            if (got[ch].note != w.note || got[ch].instrument != w.instrument || got[ch].effect.type != w.effect.type ||
-                got[ch].effect.param != w.effect.param)
+            if (got[ch].note != w.note || got[ch].instrument != w.instrument || got[ch].effect.type != w.effect.type || got[ch].effect.param != w.effect.param)
                 ++bad;
         }
     }
@@ -256,22 +259,22 @@ void test_cell_codec_instrument_9_bits() {
     for (uint32_t inst = 0; inst <= patterns::kMaxCellInstrument; ++inst) {
         for (uint32_t vt = 0; vt <= static_cast<uint32_t>(VolumeColumnType::Offset); ++vt) {
             PatternCell c;
-            c.instrument = static_cast<uint16_t>(inst);
-            c.note = static_cast<uint8_t>(inst % 120);
-            c.volume.type = static_cast<VolumeColumnType>(vt);
+            c.instrument   = static_cast<uint16_t>(inst);
+            c.note         = static_cast<uint8_t>(inst % 120);
+            c.volume.type  = static_cast<VolumeColumnType>(vt);
             c.volume.param = static_cast<uint8_t>(inst ^ 0x5A);
-            c.effect.type = Effect::SetPanning;
+            c.effect.type  = Effect::SetPanning;
             c.effect.param = static_cast<uint8_t>(inst * 7);
             uint8_t enc[patterns::kEncodedCellBytes];
             patterns::encode_cell(c, enc);
             const PatternCell d = patterns::decode_cell(enc);
-            if (d.instrument != c.instrument || d.note != c.note || d.volume.type != c.volume.type ||
-                d.volume.param != c.volume.param || d.effect.type != c.effect.type || d.effect.param != c.effect.param) {
+            if (d.instrument != c.instrument || d.note != c.note || d.volume.type != c.volume.type || d.volume.param != c.volume.param ||
+                d.effect.type != c.effect.type || d.effect.param != c.effect.param) {
                 ++bad;
             }
         }
     }
-    std::printf("  расхождений: %d\n", bad);
+    std::printf("  differences: %d\n", bad);
     CHECK_EQ(bad, 0);
 }
 

@@ -56,6 +56,10 @@
 /* Каталог: чёрным по серому, выбранная строка наоборот. */
 #define UI_ATTR_LIST   (FW_INK(FW_BLACK) | FW_PAPER(FW_WHITE))
 #define UI_ATTR_CURSOR (FW_INK(FW_WHITE) | FW_PAPER(FW_BLACK) | FW_BRIGHT)
+/* Играющая запись: жёлтая строка. Под курсором бумага чёрная, и жёлтыми
+   становятся буквы - иначе курсор прятал бы признак. */
+#define UI_ATTR_LIST_PLAY   (FW_INK(FW_BLACK) | FW_PAPER(FW_YELLOW))
+#define UI_ATTR_CURSOR_PLAY (FW_INK(FW_YELLOW) | FW_PAPER(FW_BLACK) | FW_BRIGHT)
 
 void ui_init(void);
 
@@ -75,7 +79,7 @@ void ui_update(void);
 void ui_draw_path(const char *path);
 
 /** Одна строка списка: i - номер строки на экране, 0..UI_LIST_ROWS-1. */
-void ui_draw_entry(u8 i, const char *name, u8 is_dir, u8 selected);
+void ui_draw_entry(u8 i, const char *name, u8 is_dir, u8 selected, u8 playing);
 
 /** Сообщение о беде вместо времени. */
 void ui_alarm(const char *text);

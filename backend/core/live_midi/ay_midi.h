@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 #pragma once
 
 // Живой MIDI с порта A AY: разбор записей в порты AY, последовательного
@@ -48,8 +49,8 @@ public:
     uint32_t framing_errors() const { return framing_errors_; }
 
 private:
-    uint8_t count_ = 0; // 0 - покой, 1..8 - бит данных, 9 - стоп-бит
-    uint8_t shift_ = 0;
+    uint8_t count_           = 0; // 0 - покой, 1..8 - бит данных, 9 - стоп-бит
+    uint8_t shift_           = 0;
     uint32_t framing_errors_ = 0;
 };
 
@@ -58,8 +59,8 @@ private:
 // Запись в порт AY, как её кладёт плата: kSelect - запись в #FFFD (выбор
 // регистра), иначе в #BFFD (данные), младший байт - значение.
 inline constexpr uint16_t kAyWriteSelect = 0x100u;
-inline constexpr uint8_t kAyRegPortA = 14;
-inline constexpr uint8_t kMidiOutBit = 1u << 2;
+inline constexpr uint8_t kAyRegPortA     = 14;
+inline constexpr uint8_t kMidiOutBit     = 1u << 2;
 
 class AyPortA {
 public:
@@ -83,12 +84,12 @@ private:
 
 enum class MidiKind : uint8_t {
     NoteOff,
-    NoteOn,       // скорость 0 превращается в NoteOff
+    NoteOn, // скорость 0 превращается в NoteOff
     PolyPressure,
     Control,
     Program,
     ChannelPressure,
-    PitchBend,    // value - 14 бит, 8192 - середина
+    PitchBend, // value - 14 бит, 8192 - середина
 };
 
 struct MidiEvent {
@@ -122,14 +123,14 @@ public:
     uint32_t skipped_bytes() const { return skipped_; }
 
 private:
-    uint8_t status_ = 0;  // running status, 0 - нет
-    uint8_t data_[2] = {};
-    uint8_t have_ = 0;
-    bool in_sysex_ = false;
-    bool sysex_ready_ = false;
+    uint8_t status_            = 0; // running status, 0 - нет
+    uint8_t data_[2]           = {};
+    uint8_t have_              = 0;
+    bool in_sysex_             = false;
+    bool sysex_ready_          = false;
     uint8_t sysex_[kSysexKeep] = {};
-    uint32_t sysex_len_ = 0; // всего байт тела, а не сохранённых
-    uint32_t skipped_ = 0;
+    uint32_t sysex_len_        = 0; // всего байт тела, а не сохранённых
+    uint32_t skipped_          = 0;
 };
 
 // Длина данных сообщения канала по старшему полубайту статуса.
@@ -142,7 +143,7 @@ constexpr uint8_t midi_data_bytes(uint8_t status) {
 // два байта данных. Питч-бенд - младшие семь бит, потом старшие.
 inline void midi_event_bytes(const MidiEvent& e, uint8_t& status, uint8_t& d1, uint8_t& d2) {
     static constexpr uint8_t kHi[] = {0x80, 0x90, 0xa0, 0xb0, 0xc0, 0xd0, 0xe0};
-    status = static_cast<uint8_t>(kHi[static_cast<uint8_t>(e.kind)] | e.channel);
+    status                         = static_cast<uint8_t>(kHi[static_cast<uint8_t>(e.kind)] | e.channel);
     if (e.kind == MidiKind::PitchBend) {
         d1 = static_cast<uint8_t>(e.value & 0x7fu);
         d2 = static_cast<uint8_t>((e.value >> 7) & 0x7fu);
@@ -158,13 +159,13 @@ public:
     // true - сообщение канала готово (в out).
     bool feed(uint16_t ay_write, MidiEvent& out) {
         sysex_ready_ = false; // готовность - про эту запись, а не про прошлую
-        bool line = false;
+        bool line    = false;
         if (!port_.feed(ay_write, line)) return false;
         uint8_t byte = 0;
         if (!bits_.feed(line, byte)) return false;
         ++bytes_;
         const bool got = parser_.feed(byte, out);
-        sysex_ready_ = parser_.sysex_ready();
+        sysex_ready_   = parser_.sysex_ready();
         return got;
     }
 
@@ -182,7 +183,7 @@ private:
     SerialBits bits_;
     MidiParser parser_;
     bool sysex_ready_ = false;
-    uint32_t bytes_ = 0;
+    uint32_t bytes_   = 0;
 };
 
 } // namespace soundsinth::midi_in

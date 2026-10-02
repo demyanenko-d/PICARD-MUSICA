@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 // Реализация diskio.h (third_party/fatfs) для PC: физический диск - это
 // файл-образ (build/sd.img), читаемый и записываемый посекторно через
 // <cstdio>. На MCU этот файл заменяется драйвером SD-карты, ff.c
@@ -22,7 +23,7 @@
 
 namespace {
 constexpr long kSectorSize = 512;
-std::FILE* g_image_file = nullptr;
+std::FILE* g_image_file    = nullptr;
 } // namespace
 
 namespace platform_pc {

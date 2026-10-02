@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 #pragma once
 
 // Порт распаковки сэмплов IT из OpenMPT: ITDecompression
@@ -25,21 +26,21 @@ namespace soundsinth::formats::it {
 // на первом вызове.
 struct DecompressState {
     uint32_t byte_pos = 0;
-    uint32_t bit_buf = 0;
-    int32_t bit_num = 0;
-    bool ok = true;
-    bool is16bit = false;
-    bool is215 = false; // вариант сжатия IT 2.15
-    int32_t mem1 = 0;
-    int32_t mem2 = 0;
-    int32_t width = 0;
+    uint32_t bit_buf  = 0;
+    int32_t bit_num   = 0;
+    bool ok           = true;
+    bool is16bit      = false;
+    bool is215        = false; // вариант сжатия IT 2.15
+    int32_t mem1      = 0;
+    int32_t mem2      = 0;
+    int32_t width     = 0;
 };
 
 // Шаг загрузчика - kStepSamples отсчётов. На отсчёт не больше 38 бит (поле 17
 // бит плюс смена ширины 17 + 4) - 4864 байта на шаг, kStepWorstBytes с
 // запасом. Посреди значения decompress_step не возобновляется: перед шагом
 // впереди должно быть kStepWorstBytes байт потока или конец блока.
-inline constexpr uint32_t kStepSamples = 1024;
+inline constexpr uint32_t kStepSamples    = 1024;
 inline constexpr uint32_t kStepWorstBytes = 5120;
 
 // bitstream/bitstream_bytes - сжатые данные блока от его начала (2-байтный
@@ -51,7 +52,6 @@ inline constexpr uint32_t kStepWorstBytes = 5120;
 // Возвращает число декодированных за этот вызов отсчётов; меньше
 // max_samples, если поток блока кончился (конец блока или битый файл). 0 -
 // блок исчерпан или поток оборвался, дальше звать не нужно.
-uint32_t decompress_step(DecompressState& state, const uint8_t* bitstream, uint32_t bitstream_bytes,
-                         uint32_t max_samples, int16_t* out);
+uint32_t decompress_step(DecompressState& state, const uint8_t* bitstream, uint32_t bitstream_bytes, uint32_t max_samples, int16_t* out);
 
 } // namespace soundsinth::formats::it

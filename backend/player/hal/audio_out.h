@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 #pragma once
 
 // Куда звуковая цепочка отдаёт готовые буферы. Реализует порт.

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 #include "core/engine/tracker_engine.h"
 
 #include <cstdlib> // std::abs
@@ -11,7 +12,6 @@
 #include "core/model/amiga_period.h"
 #include "core/engine/voice_mixer.h"
 
-
 namespace soundsinth::engine {
 
 namespace {
@@ -23,7 +23,7 @@ namespace {
 // одного UMULL.
 
 // Шкалы громкости в Q0.16, оба множителя точные.
-constexpr uint32_t kVol64ToQ16 = kQ16One / 64; // 0..64
+constexpr uint32_t kVol64ToQ16  = kQ16One / 64;  // 0..64
 constexpr uint32_t kVol128ToQ16 = kQ16One / 128; // 0..128
 
 // Сглаживание загрузки рендера: новому замеру - 1/8.
@@ -35,8 +35,8 @@ struct PlayScratch {
     Reverb reverb;
     int32_t bus[SOUNDSINTH_AUDIO_BUFFER_FRAMES];
 };
-static_assert(alignof(PlayScratch) <= 8, "буфер сценариев выровнен на 8");
-static_assert(sizeof(PlayScratch) <= memory::kPlayScratchBytes, "ревербератор с шиной не влезает в свой сценарий");
+static_assert(alignof(PlayScratch) <= 8, "the scratch buffer is aligned to 8");
+static_assert(sizeof(PlayScratch) <= memory::kPlayScratchBytes, "the reverb with its bus does not fit its scratch");
 
 uint32_t q16_mul(uint32_t a_q16, uint32_t b_q16) {
     return static_cast<uint32_t>((static_cast<uint64_t>(a_q16) * b_q16) >> kQ16Bits);
@@ -56,23 +56,19 @@ bool glissando_snaps(const ChannelState& cs, soundsinth::model::QuirkFlags quirk
 // Панорама по корню, как у FastTracker II (PanLaw): 8192*sqrt(q) для
 // q = 0..64 - кривая панорамы FT2 в шкале 0..64 вместо 0..256.
 constexpr uint32_t kFt2PanTable[65] = {
-    0,     8192,  11585, 14189, 16384, 18318, 20066, 21674, 23170, 24576, 25905, 27170, 28378,
-    29537, 30652, 31727, 32768, 33776, 34756, 35708, 36636, 37540, 38424, 39287, 40132, 40960,
-    41771, 42567, 43348, 44115, 44869, 45611, 46341, 47059, 47767, 48465, 49152, 49830, 50499,
-    51159, 51811, 52454, 53090, 53719, 54340, 54954, 55561, 56162, 56756, 57344, 57926, 58503,
-    59073, 59639, 60199, 60753, 61303, 61848, 62388, 62924, 63455, 63982, 64504, 65022, 65536,
+    0,     8192,  11585, 14189, 16384, 18318, 20066, 21674, 23170, 24576, 25905, 27170, 28378, 29537, 30652, 31727, 32768, 33776, 34756, 35708, 36636, 37540,
+    38424, 39287, 40132, 40960, 41771, 42567, 43348, 44115, 44869, 45611, 46341, 47059, 47767, 48465, 49152, 49830, 50499, 51159, 51811, 52454, 53090, 53719,
+    54340, 54954, 55561, 56162, 56756, 57344, 57926, 58503, 59073, 59639, 60199, 60753, 61303, 61848, 62388, 62924, 63455, 63982, 64504, 65022, 65536,
 };
 
 // Множители L/R одного голоса (единица 1 << kGainQ24Bits) - живого канала или
 // фонового NNA, формула одна. Все входы меняются не чаще раза в тик: считаются
 // раз за тик из rebuild_active_indices() в mixer_.gain_l_q24/gain_r_q24.
-void SOUNDSINTH_HOT_PATH(compute_mix_gains)(const ChannelState& cs, uint32_t global_vol_q24,
-                                            soundsinth::model::Song::PanLaw pan_law, bool envelope_db,
+void SOUNDSINTH_HOT_PATH(compute_mix_gains)(const ChannelState& cs, uint32_t global_vol_q24, soundsinth::model::Song::PanLaw pan_law, bool envelope_db,
                                             int32_t* gain_l_q24, int32_t* gain_r_q24) {
     uint32_t channel_vol_q16 = 0;
     if (!cs.tremor_muted) { // Tremor глушит канал на этом тике целиком, поверх остальных множителей
-        int32_t vol =
-            static_cast<int32_t>(cs.volume) + cs.volume_offset; // Tremolo - временное отклонение, cs.volume не тронут
+        int32_t vol = static_cast<int32_t>(cs.volume) + cs.volume_offset; // Tremolo - временное отклонение, cs.volume не тронут
         if (vol < 0) vol = 0;
         if (vol > 64) vol = 64;
         // Множители Q0.16: громкость, огибающая, громкость канала и сэмпла -
@@ -94,10 +90,9 @@ void SOUNDSINTH_HOT_PATH(compute_mix_gains)(const ChannelState& cs, uint32_t glo
     // Panbrello (pan_offset) - ещё одно временное смещение, без глубины к
     // краям. Арифметика целая: промежуточно
     // *32, в конце >>5.
-    const int32_t pan_depth_x32 = 32 - std::abs(static_cast<int32_t>(cs.pan) - 32); // 0..32
+    const int32_t pan_depth_x32           = 32 - std::abs(static_cast<int32_t>(cs.pan) - 32); // 0..32
     const int32_t pan_envelope_offset_x32 = (static_cast<int32_t>(cs.pan_envelope_value) - 32) * pan_depth_x32;
-    int32_t effective_pan =
-        static_cast<int32_t>(cs.pan) + (pan_envelope_offset_x32 >> 5) + static_cast<int32_t>(cs.pan_offset);
+    int32_t effective_pan                 = static_cast<int32_t>(cs.pan) + (pan_envelope_offset_x32 >> 5) + static_cast<int32_t>(cs.pan_offset);
     if (effective_pan < 0) effective_pan = 0;
     if (effective_pan > 64) effective_pan = 64;
     uint32_t pan_r_q16 = static_cast<uint32_t>(effective_pan) * kVol64ToQ16;
@@ -137,14 +132,13 @@ void SOUNDSINTH_HOT_PATH(compute_mix_gains)(const ChannelState& cs, uint32_t glo
     }
 }
 
-
 // Скользящее среднее загрузки: новому замеру - 1/2^kLoadEwmaShift.
 // Знаковое: разность бывает отрицательной, а сдвиг отрицательного uint32 дал
 // бы мусор.
 void smooth_load(uint32_t& load_ewma_q8, uint32_t load_q8) {
     const int32_t prev = static_cast<int32_t>(load_ewma_q8);
     const int32_t next = prev + ((static_cast<int32_t>(load_q8) - prev) >> kLoadEwmaShift);
-    load_ewma_q8 = static_cast<uint32_t>(next < 0 ? 0 : next);
+    load_ewma_q8       = static_cast<uint32_t>(next < 0 ? 0 : next);
 }
 
 // Загрузка рендера: время на буфер против времени его звучания. По всему
@@ -155,8 +149,7 @@ void smooth_load(uint32_t& load_ewma_q8, uint32_t load_q8) {
 // замечает плотный кусок и не дёргается от одного дорогого буфера.
 void update_render_load(uint32_t& load_ewma_q8, uint32_t render_t0_us, uint32_t n_frames) {
     const uint32_t dt_us = platform::time_us() - render_t0_us;
-    smooth_load(load_ewma_q8, static_cast<uint32_t>((static_cast<uint64_t>(dt_us) * kQ8One * kSampleRateHz) /
-                                                    (static_cast<uint64_t>(n_frames) * 1000000u)));
+    smooth_load(load_ewma_q8, static_cast<uint32_t>((static_cast<uint64_t>(dt_us) * kQ8One * kSampleRateHz) / (static_cast<uint64_t>(n_frames) * 1000000u)));
 }
 
 } // namespace
@@ -165,13 +158,12 @@ TrackerEngine::TrackerEngine(const soundsinth::model::Song& song, memory::TrackM
     : song_(song)
     , mem_(mem)
     , channel_count_(song.channel_count > SOUNDSINTH_MAX_VOICES ? SOUNDSINTH_MAX_VOICES : song.channel_count) {
-    ramp_samples_ =
-        song.volume_ramp_samples ? song.volume_ramp_samples : static_cast<uint32_t>(SOUNDSINTH_VOLUME_RAMP_SAMPLES);
+    ramp_samples_ = song.volume_ramp_samples ? song.volume_ramp_samples : static_cast<uint32_t>(SOUNDSINTH_VOLUME_RAMP_SAMPLES);
     if (ramp_samples_ > kMaxRampSamples) ramp_samples_ = kMaxRampSamples;
     // Волновое гашение включает только формат, который сам задал длину
     // сглаживания, то есть .mid. У трекерных форматов на кону побитовая сверка с
     // эталонными плеерами.
-    wave_tail_ = song.volume_ramp_samples != 0;
+    wave_tail_   = song.volume_ramp_samples != 0;
     envelope_db_ = (song.quirks & soundsinth::model::kQuirkEnvelopeDecibel) != 0;
     filter_prepare(song.filter_units_per_octave);
     // Линии ревербератора - в буфере сценариев: от сборки движка до его
@@ -182,22 +174,22 @@ TrackerEngine::TrackerEngine(const soundsinth::model::Song& song, memory::TrackM
         // звук, а место кончилось не по его вине.
         uint8_t* buf = memory::scratch_take(mem.scratch, memory::Scratch::Play, memory::kPlayScratchBytes);
         if (buf != nullptr) {
-            auto* ps = new (buf) PlayScratch{};
-            reverb_ = &ps->reverb;
+            auto* ps    = new (buf) PlayScratch{};
+            reverb_     = &ps->reverb;
             reverb_bus_ = ps->bus;
         }
     }
     mixer_.ramp_samples = ramp_samples_;
-    mixer_.reverb_bus = reverb_bus_;
+    mixer_.reverb_bus   = reverb_bus_;
     link_.init(&mixer_, &mem_.psram);
     arbiter_.init(channels_, &link_, channel_count_, wave_tail_, envelope_db_);
-    iface_.self = this;
+    iface_.self       = this;
     iface_.render_add = &TrackerEngine::render_add;
 
-    dispatch_ctx_.channels = channels_;
-    dispatch_ctx_.song = &song_;
-    dispatch_ctx_.ps = &ps_;
-    dispatch_ctx_.nna_user = this;
+    dispatch_ctx_.channels            = channels_;
+    dispatch_ctx_.song                = &song_;
+    dispatch_ctx_.ps                  = &ps_;
+    dispatch_ctx_.nna_user            = this;
     dispatch_ctx_.on_note_trigger_nna = &TrackerEngine::on_note_trigger_nna;
 
     for (uint32_t& m : filter_memo_) {
@@ -275,8 +267,8 @@ SOUNDSINTH_ALWAYS_INLINE void TrackerEngine::apply_retrigger_and_note_cut() {
 // тем же флагам, pitch_offset у них 0.
 SOUNDSINTH_ALWAYS_INLINE void TrackerEngine::sync_voice_pitch() {
     const uint8_t pitch_sync_limit = static_cast<uint8_t>(channel_count_ + kNnaPool);
-    const bool glissando_nearest = (song_.quirks & soundsinth::model::kQuirkGlissandoNearest) != 0;
-    const bool amiga_limits = (song_.quirks & soundsinth::model::kQuirkAmigaLimits) != 0;
+    const bool glissando_nearest   = (song_.quirks & soundsinth::model::kQuirkGlissandoNearest) != 0;
+    const bool amiga_limits        = (song_.quirks & soundsinth::model::kQuirkAmigaLimits) != 0;
     if (song_.frequency_model == soundsinth::model::FrequencyModel::Amiga) {
         for (uint8_t ch = 0; ch < pitch_sync_limit; ++ch) {
             const ChannelState& cs = channels_[ch];
@@ -285,8 +277,7 @@ SOUNDSINTH_ALWAYS_INLINE void TrackerEngine::sync_voice_pitch() {
                 if (glissando_snaps(cs, song_.quirks, ps_.tick_in_row)) {
                     period = glissando_amiga_period(cs, song_.samples[cs.sample_index].finetune, glissando_nearest);
                 }
-                const uint16_t effective_period =
-                    soundsinth::model::clamp_amiga_period(static_cast<int32_t>(period) + cs.pitch_offset, amiga_limits);
+                const uint16_t effective_period = soundsinth::model::clamp_amiga_period(static_cast<int32_t>(period) + cs.pitch_offset, amiga_limits);
                 link_.set_pitch_amiga(ch, effective_period, song_.samples[cs.sample_index].c5_speed);
             }
         }
@@ -299,8 +290,7 @@ SOUNDSINTH_ALWAYS_INLINE void TrackerEngine::sync_voice_pitch() {
                 if (glissando_snaps(cs, song_.quirks, ps_.tick_in_row)) {
                     pitch = glissando_linear_pitch(cs, song_.samples[cs.sample_index].finetune, glissando_nearest);
                 }
-                link_.set_pitch_linear(ch, pitch + cs.pitch_offset + cs.pitch_envelope_offset + cs.bend_offset,
-                                       song_.samples[cs.sample_index].c5_speed);
+                link_.set_pitch_linear(ch, pitch + cs.pitch_offset + cs.pitch_envelope_offset + cs.bend_offset, song_.samples[cs.sample_index].c5_speed);
             }
         }
     }
@@ -312,10 +302,10 @@ void TrackerEngine::run_tick() {
     advance_tick();
     const uint32_t dt_us = platform::time_us() - t0_us;
     if (dt_us > max_tick_duration_us_) {
-        max_tick_duration_us_ = dt_us;
+        max_tick_duration_us_    = dt_us;
         worst_tick_active_count_ = voice_count_; // после rebuild_active_indices() внутри advance_tick()
-        worst_tick_triggers_ = voice_triggers_this_tick_;
-        worst_tick_row_start_ = ps_.tick_in_row == 0;
+        worst_tick_triggers_     = voice_triggers_this_tick_;
+        worst_tick_row_start_    = ps_.tick_in_row == 0;
     }
 }
 
@@ -332,7 +322,7 @@ bool TrackerEngine::seek_to_frame(uint32_t target_frames) {
         uint32_t batch = target_frames - frames_rendered_;
         if (samples_until_next_tick_ < batch) batch = samples_until_next_tick_;
         samples_until_next_tick_ -= batch;
-        frames_rendered_ += batch;
+        frames_rendered_         += batch;
         // Команды тика - в микшер, как это делает рендер: без них состояние
         // голосов разъедется с тем, что насчитал арбитр.
         link_.flush();
@@ -378,14 +368,12 @@ void TrackerEngine::advance_tick() {
     // .mid: огибающие и затухание переведены в тики по default_tempo - при
     // смене темпа они продвигаются на отношение темпов (Song::envelopes_in_real_time).
     const uint32_t envelope_time_step_q8 =
-        song_.envelopes_in_real_time && ps_.tempo != 0
-            ? (static_cast<uint32_t>(song_.default_tempo) * kQ8One + ps_.tempo / 2u) / ps_.tempo
-            : kQ8One;
+        song_.envelopes_in_real_time && ps_.tempo != 0 ? (static_cast<uint32_t>(song_.default_tempo) * kQ8One + ps_.tempo / 2u) / ps_.tempo : kQ8One;
     // У живой песни строка равна тику: тика 1 не бывает, и слайды без этого
     // не шли бы вовсе - скольжение высоты оставляло бы ноту на высоте
     // предыдущей.
-    apply_continuous_effects(ps_, channels_, channel_count_, song_.quirks, song_.frequency_model,
-                             envelope_time_step_q8, live_row_ != nullptr || ps_.tick_in_row != 0);
+    apply_continuous_effects(ps_, channels_, channel_count_, song_.quirks, song_.frequency_model, envelope_time_step_q8,
+                             live_row_ != nullptr || ps_.tick_in_row != 0);
     advance_nna_slot_envelopes(envelope_time_step_q8);
     apply_retrigger_and_note_cut();
     sync_voice_pitch();
@@ -413,21 +401,21 @@ SOUNDSINTH_ALWAYS_INLINE void TrackerEngine::update_voice_mix(uint8_t idx, uint3
     // арифметика. У голосов без фильтра active = false, и посэмпловый цикл для
     // них не запускается.
     const ChannelState& fcs = channels_[idx];
-    uint32_t& memo = filter_memo_[idx];
+    uint32_t& memo          = filter_memo_[idx];
     // IT: фильтр, у которого срез стал открытым (резонанса нет, срез с
     // огибающей до верха шкалы), снимается только на ноте; посреди ноты
     // он работает прежними коэффициентами с той же памятью - как у
     // OpenMPT (SetupChannelFilter не трогает коэффициенты, снимает фильтр
     // только triggerNote). У .mid (filter_sf2_response) снимается сразу.
     const bool keep_open = memo != kFilterMemoNoteTrigger && !song_.filter_sf2_response && link_.filter_on(idx);
-    const uint32_t key = static_cast<uint32_t>(fcs.filter_cutoff) | (static_cast<uint32_t>(fcs.filter_resonance) << 8) |
+    const uint32_t key   = static_cast<uint32_t>(fcs.filter_cutoff) | (static_cast<uint32_t>(fcs.filter_resonance) << 8) |
                          (static_cast<uint32_t>(static_cast<uint16_t>(fcs.filter_env_modifier)) << 16);
     if (fcs.filter_cutoff >= 127 && fcs.filter_resonance == 0 && fcs.filter_envelope == nullptr) {
         if (!keep_open) link_.filter_off(idx); // самый частый случай - не считаем
-        memo = kFilterMemoNone; // мимо filter_compute - запомненному верить нельзя
+        memo = kFilterMemoNone;                // мимо filter_compute - запомненному верить нельзя
     } else if (memo != key) {
-        const FilterCoeffs computed = filter_compute(fcs.filter_cutoff, fcs.filter_resonance, fcs.filter_env_modifier,
-                                                     song_.filter_units_per_octave, song_.filter_sf2_response);
+        const FilterCoeffs computed =
+            filter_compute(fcs.filter_cutoff, fcs.filter_resonance, fcs.filter_env_modifier, song_.filter_units_per_octave, song_.filter_sf2_response);
         if (computed.active || !keep_open) link_.set_filter(idx, computed);
         memo = key;
     } // иначе входы те же - коэффициенты уже посчитаны
@@ -454,10 +442,9 @@ void TrackerEngine::rebuild_active_indices() {
     // нём. Предел: global_volume 128, sample_preamp 255, master 1 - 130560,
     // после сдвига 33.4 млн; громкость сэмпла до 4 - усиление голоса до
     // 134 млн, в int32 входит.
-    const uint32_t global_vol_q24 = q16_mul(q16_mul(static_cast<uint32_t>(ps_.global_volume) * kVol128ToQ16,
-                                                    static_cast<uint32_t>(song_.sample_preamp) * kVol128ToQ16),
-                                            master_gain_q16_)
-                                    << mixbus::kMixFracBits;
+    const uint32_t global_vol_q24 =
+        q16_mul(q16_mul(static_cast<uint32_t>(ps_.global_volume) * kVol128ToQ16, static_cast<uint32_t>(song_.sample_preamp) * kVol128ToQ16), master_gain_q16_)
+        << mixbus::kMixFracBits;
 
     // Хвосты NNA - на остаток потолка SOUNDSINTH_MAX_VOICES, лишние гасятся.
     arbiter_.list_tails([&](uint8_t idx) {
@@ -481,7 +468,6 @@ void TrackerEngine::rebuild_active_indices() {
     voice_count_ = static_cast<uint32_t>(link_.list_size()) + link_.fading_count();
 
     if (voice_count_ > peak_active_count_) peak_active_count_ = voice_count_;
-
 
     // Карта сэмплов для вытеснения - по всем слотам, которые читают цепочку
     // PSRAM, а не по списку: не влезший в список голос жив и вернётся в
@@ -515,10 +501,10 @@ void TrackerEngine::rebuild_active_indices() {
 // внутри тика.
 void TrackerEngine::update_voice_routes() {
     for (uint8_t k = 0; k < link_.list_size(); ++k) {
-        const uint8_t idx = link_.list_at(k);
+        const uint8_t idx          = link_.list_at(k);
         const bool is_live_channel = idx < channel_count_;
-        const uint8_t origin = is_live_channel ? idx : arbiter_.origin_channel(static_cast<uint8_t>(idx - channel_count_));
-        const bool to_discard = solo_channel_ >= 0 && origin != static_cast<uint8_t>(solo_channel_);
+        const uint8_t origin       = is_live_channel ? idx : arbiter_.origin_channel(static_cast<uint8_t>(idx - channel_count_));
+        const bool to_discard      = solo_channel_ >= 0 && origin != static_cast<uint8_t>(solo_channel_);
         // Посыл только при заведённых линиях: без них шины нет, и голосу некуда писать.
         link_.set_route(idx, to_discard, (reverb_bus_ != nullptr && !to_discard) ? channels_[origin].reverb_send : 0);
     }
@@ -534,7 +520,7 @@ void TrackerEngine::trigger_voice(uint8_t ch, uint32_t start_offset, bool note) 
     // Выключенный канал (Song::channel_muted): нота разобрана, состояние
     // канала живёт, но голос не запускается.
     if (soundsinth::model::channel_is_muted(song_, ch)) return;
-    const ChannelState& cs = channels_[ch];
+    const ChannelState& cs          = channels_[ch];
     memory::SampleCacheEntry* entry = memory::sample_cache_find(mem_.sample_cache, cs.sample_index);
     if (entry == nullptr && song_.samples[cs.sample_index].length_samples != 0) {
         missing_ring_[triggers_without_sample_ % kMissingRing] = cs.sample_index;
@@ -543,12 +529,11 @@ void TrackerEngine::trigger_voice(uint8_t ch, uint32_t start_offset, bool note) 
     if (wave_tail_ && (entry == nullptr || song_.samples[cs.sample_index].length_samples == 0)) {
         link_.fade_before_missing(ch);
     }
-    const uint16_t first_page = entry ? entry->first_page : memory::kPageChainEnd;
+    const uint16_t first_page            = entry ? entry->first_page : memory::kPageChainEnd;
     const uint16_t checkpoint_first_page = entry ? entry->checkpoint_first_page : memory::kPageChainEnd;
     // Шаг здесь не считается: высоту голоса выставит sync_voice_pitch этого же
     // тика, до рендера, и с учётом смещений (эффект, огибающая, бенд).
-    link_.trigger(ch, song_.samples[cs.sample_index], first_page, cs.last_note, song_.frequency_model,
-                   start_offset, song_.quirks, checkpoint_first_page);
+    link_.trigger(ch, song_.samples[cs.sample_index], first_page, cs.last_note, song_.frequency_model, start_offset, song_.quirks, checkpoint_first_page);
     ++voice_triggers_this_tick_;
     if (note) {
         // Коэффициенты фильтра считаются заново, даже если входы те же.
@@ -575,20 +560,17 @@ void TrackerEngine::sync_voices_after_dispatch() {
     }
 }
 
-void TrackerEngine::on_note_trigger_nna(void* user, uint8_t channel, uint16_t new_instrument_1based,
-                                        uint16_t new_sample_index, uint8_t new_resolved_note) {
-    static_cast<TrackerEngine*>(user)->handle_note_trigger_nna(channel, new_instrument_1based, new_sample_index,
-                                                               new_resolved_note);
+void TrackerEngine::on_note_trigger_nna(void* user, uint8_t channel, uint16_t new_instrument_1based, uint16_t new_sample_index, uint8_t new_resolved_note) {
+    static_cast<TrackerEngine*>(user)->handle_note_trigger_nna(channel, new_instrument_1based, new_sample_index, new_resolved_note);
 }
 
-void TrackerEngine::handle_note_trigger_nna(uint8_t channel, uint16_t new_instrument_1based, uint16_t new_sample_index,
-                                            uint8_t new_resolved_note) {
+void TrackerEngine::handle_note_trigger_nna(uint8_t channel, uint16_t new_instrument_1based, uint16_t new_sample_index, uint8_t new_resolved_note) {
     using soundsinth::model::DuplicateCheckAction;
     using soundsinth::model::DuplicateCheckType;
     using soundsinth::model::NewNoteAction;
 
     const soundsinth::model::Instrument& new_ins = song_.instruments[new_instrument_1based - 1];
-    const bool it_rules = (song_.quirks & soundsinth::model::kQuirkItEnvelopeSustainLoop) != 0;
+    const bool it_rules                          = (song_.quirks & soundsinth::model::kQuirkItEnvelopeSustainLoop) != 0;
 
     // DCT/DCA обрывает или освобождает голоса этого канала (живой и его хвосты
     // NNA), у которых нота, сэмпл или инструмент совпадает с новым по правилам
@@ -603,8 +585,7 @@ void TrackerEngine::handle_note_trigger_nna(uint8_t channel, uint16_t new_instru
                 case DuplicateCheckType::Note:
                     return cand.last_note == new_resolved_note;
                 case DuplicateCheckType::Sample:
-                    if ((song_.quirks & soundsinth::model::kQuirkItDctRequiresInstrumentMatch) &&
-                        cand.last_instrument != new_instrument_1based) {
+                    if ((song_.quirks & soundsinth::model::kQuirkItDctRequiresInstrumentMatch) && cand.last_instrument != new_instrument_1based) {
                         return false;
                     }
                     return cand.sample_index == new_sample_index;
@@ -663,11 +644,11 @@ void TrackerEngine::handle_note_trigger_nna(uint8_t channel, uint16_t new_instru
     // Временные модуляторы - в нейтраль: фоновые слоты Vibrato/Tremolo/Tremor/
     // Panbrello больше не получают, и активный в момент увода tremor_muted
     // заглушил бы голос навсегда.
-    channels_[bg].tremor_muted = false;
+    channels_[bg].tremor_muted    = false;
     channels_[bg].glissando_porta = false; // фоновый голос звучит без ступеней glissando, как в OpenMPT
-    channels_[bg].volume_offset = 0;
-    channels_[bg].pan_offset = 0;
-    channels_[bg].pitch_offset = 0;
+    channels_[bg].volume_offset   = 0;
+    channels_[bg].pan_offset      = 0;
+    channels_[bg].pitch_offset    = 0;
 
     // Off - как KeyOff у IT (release_note), Fade - затухание (fade_note).
     // Continue - голос продолжает как играл.
@@ -676,6 +657,9 @@ void TrackerEngine::handle_note_trigger_nna(uint8_t channel, uint16_t new_instru
 }
 
 SOUNDSINTH_HOT_PATH_ATTR("te_render_add")
+// Рекурсия ровно на один уровень: внешний вызов режет буфер на куски не
+// длиннее solo_discard_frames_, и внутренний в эту ветку уже не заходит.
+// NOLINTNEXTLINE(misc-no-recursion)
 void TrackerEngine::render_add(void* self_ptr, int32_t* mix_l, int32_t* mix_r, uint32_t n_frames) {
     auto* self = static_cast<TrackerEngine*>(self_ptr);
     // Solo: голоса чужих каналов сводятся в discard, а он не длиннее
@@ -683,7 +667,7 @@ void TrackerEngine::render_add(void* self_ptr, int32_t* mix_l, int32_t* mix_r, u
     if (self->solo_channel_ >= 0 && n_frames > self->solo_discard_frames_) {
         for (uint32_t off = 0; off < n_frames;) {
             const uint32_t left = n_frames - off;
-            const uint32_t n = left < self->solo_discard_frames_ ? left : self->solo_discard_frames_;
+            const uint32_t n    = left < self->solo_discard_frames_ ? left : self->solo_discard_frames_;
             render_add(self_ptr, mix_l + off, mix_r + off, n);
             off += n;
         }
@@ -703,11 +687,10 @@ void TrackerEngine::render_add(void* self_ptr, int32_t* mix_l, int32_t* mix_r, u
     const uint32_t render_t0_us = platform::time_us();
     // Шина рассчитана на один блок; тесты зовут render_add напрямую с
     // произвольным n_frames, выходить за буфер нельзя.
-    const uint32_t reverb_frames =
-        n_frames < SOUNDSINTH_AUDIO_BUFFER_FRAMES ? n_frames : SOUNDSINTH_AUDIO_BUFFER_FRAMES;
+    const uint32_t reverb_frames = n_frames < SOUNDSINTH_AUDIO_BUFFER_FRAMES ? n_frames : SOUNDSINTH_AUDIO_BUFFER_FRAMES;
     // Неполная группа прореживания ревербератора бывает только в последнем
     // блоке: иначе выход зависит от разбиения на блоки.
-    static_assert(SOUNDSINTH_AUDIO_BUFFER_FRAMES % kReverbRateDiv == 0, "блок кратен kReverbRateDiv");
+    static_assert(SOUNDSINTH_AUDIO_BUFFER_FRAMES % kReverbRateDiv == 0, "the block is a multiple of kReverbRateDiv");
     uint32_t i = 0;
     while (i < n_frames) {
         if (self->samples_until_next_tick_ == 0) {
@@ -738,8 +721,8 @@ void TrackerEngine::render_add(void* self_ptr, int32_t* mix_l, int32_t* mix_r, u
         // Раз на батч, а не на голос-отсчёт: иначе таймер искажал бы то, что
         // измеряет.
         self->voice_loop_total_us_ += platform::time_us() - voice_loop_t0_us;
-        self->voice_sample_count_ += static_cast<uint64_t>(batch) * self->voice_count_;
-        i += batch;
+        self->voice_sample_count_  += static_cast<uint64_t>(batch) * self->voice_count_;
+        i                          += batch;
     }
 
     // Реверберация - после всех голосов, одним проходом на блок: ревербератор

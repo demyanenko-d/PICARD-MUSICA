@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 #pragma once
 
 // Очередь команд от управляющей части к звуковой: тик кладёт, сведение
@@ -39,14 +40,14 @@ enum class VoiceOp : uint8_t {
 inline constexpr uint8_t kListPerCommand = 12;
 
 // Флаги команды Trigger.
-inline constexpr uint8_t kTriggerSounds = 1u << 0;  // нота звучит
-inline constexpr uint8_t kTriggerLoop = 1u << 1;    // петля годная
+inline constexpr uint8_t kTriggerSounds  = 1u << 0; // нота звучит
+inline constexpr uint8_t kTriggerLoop    = 1u << 1; // петля годная
 inline constexpr uint8_t kTriggerHermite = 1u << 2; // эрмитова интерполяция
 
 struct VoiceCommand {
-    VoiceOp op = VoiceOp::Stop;
-    uint8_t slot = 0;
-    uint8_t arg = 0;
+    VoiceOp op    = VoiceOp::Stop;
+    uint8_t slot  = 0;
+    uint8_t arg   = 0;
     uint8_t flags = 0;
     union Payload {
         struct {
@@ -70,14 +71,14 @@ struct VoiceCommand {
         } trig;
     } u{};
 };
-static_assert(sizeof(VoiceCommand) <= 24, "команда голоса - короткая запись"); // на плате 20 байт
+static_assert(sizeof(VoiceCommand) <= 24, "a voice command is a short record"); // на плате 20 байт
 
 // Ёмкость кольца. Самый плотный тик кладёт 315 команд - строка .mid, где
 // разом стартуют 32 ноты. Пока обе стороны на одном ядре, переполнение
 // команд не теряет: писатель разбирает кольцо сам и кладёт снова. Когда
 // стороны разъедутся по ядрам, ёмкость обязана покрывать тик целиком.
 inline constexpr uint32_t kVoiceQueueCapacity = 128;
-static_assert((kVoiceQueueCapacity & (kVoiceQueueCapacity - 1)) == 0, "ёмкость - степень двойки: индекс маской");
+static_assert((kVoiceQueueCapacity & (kVoiceQueueCapacity - 1)) == 0, "the capacity is a power of two: the index is a mask");
 
 // Кольцо на одного писателя и одного читателя. Писатель двигает write_ после
 // записи (release), читатель читает его acquire - запись команды не обгонит
@@ -102,7 +103,7 @@ public:
     template <typename Apply>
     void drain(Apply&& apply) {
         const uint32_t w = write_.load(std::memory_order_acquire);
-        uint32_t r = read_.load(std::memory_order_relaxed);
+        uint32_t r       = read_.load(std::memory_order_relaxed);
         while (r != w) {
             apply(ring_[r & (kVoiceQueueCapacity - 1)]);
             ++r;

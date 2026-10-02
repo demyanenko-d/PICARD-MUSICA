@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 #pragma once
 
 #include <cstdint>
@@ -16,77 +17,77 @@ using QuirkFlags = uint64_t;
 enum QuirkBit : QuirkFlags {
     // --- MOD ---
     // Арпеджио с переполнением и глушением канала за границей 3 октав; движок не читает.
-    kQuirkModArpeggioWrap              = 1ull << 0,
+    kQuirkModArpeggioWrap = 1ull << 0,
     // Период модели Amiga в границах 113..856 (C-3..B-5 ST3), как у OpenMPT: MOD в режиме
     // ProTracker, S3M с битом amigaLimits (0x10) флагов заголовка; у остальных - только 1..65535.
-    kQuirkAmigaLimits                  = 1ull << 1,
+    kQuirkAmigaLimits = 1ull << 1,
     // M&K!/N.T./FEST и 15-сэмпловый MOD: Fxx всегда speed (не BPM), новый темп со 2-го тика строки;
     // движок не читает.
-    kQuirkModVBlankTiming              = 1ull << 2,
+    kQuirkModVBlankTiming = 1ull << 2,
     // Номер инструмента без ноты подменяет сэмпл играющего голоса без ретриггера; движок не читает.
-    kQuirkModSampleSwap                = 1ull << 3,
+    kQuirkModSampleSwap = 1ull << 3,
     // Аппаратная разводка Paula: каналы 0 и 3 (mod 4) жёстко влево, 1 и 2 жёстко вправо.
-    kQuirkModHardwarePanning           = 1ull << 24,
+    kQuirkModHardwarePanning = 1ull << 24,
 
     // --- S3M ---
     // Портаменто, вибрато, тремор и прочие делят один слот памяти; движок не читает.
-    kQuirkS3mSharedEffectMemory        = 1ull << 4,
-    kQuirkS3mVolSlideDownPriority      = 1ull << 5,  // конфликт ниблов Dxy: побеждает слайд вниз (у MOD/XM вверх)
+    kQuirkS3mSharedEffectMemory   = 1ull << 4,
+    kQuirkS3mVolSlideDownPriority = 1ull << 5, // конфликт ниблов Dxy: побеждает слайд вниз (у MOD/XM вверх)
     // Qxy с ниблом счётчика 0 всё равно ретриггерит на тике 0; движок не читает.
-    kQuirkS3mRetrigOnZero              = 1ull << 6,
+    kQuirkS3mRetrigOnZero = 1ull << 6,
     // Параметр 00 у арпеджио повторяет последнее ненулевое значение; движок не читает.
-    kQuirkS3mArpeggioMemory            = 1ull << 7,
+    kQuirkS3mArpeggioMemory = 1ull << 7,
     // Настоящий ST3 (по отпечатку заголовка и адресам GUS у сэмплов, как у OpenMPT): Kxy/Lxy на
     // тике 0 не идут, тонкий вариант в них пропадает. Другие трекеры S3M его играют.
-    kQuirkS3mIgnoreCombinedFineSlides  = 1ull << 8,
+    kQuirkS3mIgnoreCombinedFineSlides = 1ull << 8,
 
     // --- XM (FT2) ---
     // Испорченная 32-элементная таблица арпеджио (мусор в 16..31); движок не читает.
-    kQuirkXmFt2ArpeggioTable           = 1ull << 9,
+    kQuirkXmFt2ArpeggioTable = 1ull << 9,
     // Раздельная память портаменто вверх и вниз; не реализовано, память общая.
-    kQuirkXmFt2SeparatePortaMemory     = 1ull << 10,
+    kQuirkXmFt2SeparatePortaMemory = 1ull << 10,
     // Память 9xx обновляется только при срабатывании команды; не реализовано.
-    kQuirkXmFt2OffsetMemoryOnActivate  = 1ull << 11,
+    kQuirkXmFt2OffsetMemoryOnActivate = 1ull << 11,
     // Lxx проверяет sustain огибающей громкости, а не панорамы; движок не читает.
-    kQuirkXmFt2PanEnvelopeSustainBug   = 1ull << 12,
+    kQuirkXmFt2PanEnvelopeSustainBug = 1ull << 12,
     // E60 портит pBreakPos/jump_row, даже если луп не сработал; движок не читает.
-    kQuirkXmFt2E60RowClobber           = 1ull << 13,
+    kQuirkXmFt2E60RowClobber = 1ull << 13,
     // Пилообразное тремоло берёт фазу vibratoPos, а не свою; движок не читает.
-    kQuirkXmFt2TremoloUsesVibratoPos   = 1ull << 14,
+    kQuirkXmFt2TremoloUsesVibratoPos = 1ull << 14,
     // Тремор (Rxy) с ниблом 0 не поднимается до 1, в отличие от S3M/IT; движок не читает.
-    kQuirkXmFt2ZeroTremorStaysZero     = 1ull << 15,
+    kQuirkXmFt2ZeroTremorStaysZero = 1ull << 15,
     // Колонка громкости до колонки эффекта (у IT наоборот); порядок задаёт
     // kQuirkItEffectBeforeVolColumn, движок читает как признак XM.
-    kQuirkXmVolColumnBeforeEffect      = 1ull << 16,
+    kQuirkXmVolColumnBeforeEffect = 1ull << 16,
 
     // --- IT ---
     // "Old Effects": вибрато вдвое глубже и сначала вниз, фаза LFO на тике 0 стоит, Oxx за концом
     // сэмпла прижимается к концу, Note-Off + инструмент ретриггерит.
-    kQuirkItOldEffects                 = 1ull << 17,
+    kQuirkItOldEffects = 1ull << 17,
     // "Compatible Gxx" (бит 0x20 флагов) - флаг файла; движок не читает, поведение задаёт
     // kQuirkGxxSharesPortaMemory.
-    kQuirkItCompatGxx                  = 1ull << 18,
-    kQuirkItEffectBeforeVolColumn      = 1ull << 19,  // колонка эффекта до колонки громкости (обратное XM)
+    kQuirkItCompatGxx             = 1ull << 18,
+    kQuirkItEffectBeforeVolColumn = 1ull << 19, // колонка эффекта до колонки громкости (обратное XM)
     // Note-off не возвращает уже идущий fadeout к полной громкости; движок не читает.
-    kQuirkItKeyOffPreservesFadeout     = 1ull << 20,
+    kQuirkItKeyOffPreservesFadeout = 1ull << 20,
     // Gxx/Exx/Fxx одновременно в колонках эффекта и громкости одной строки: порядок инициализации
     // памяти; нигде не выставляется.
     kQuirkItDoublePortamentoSlides     = 1ull << 21,
-    kQuirkItDctRequiresInstrumentMatch = 1ull << 22,  // DCT=Sample требует совпадения и сэмпла, и инструмента
+    kQuirkItDctRequiresInstrumentMatch = 1ull << 22, // DCT=Sample требует совпадения и сэмпла, и инструмента
     // DCT=Note сравнивает ноту из паттерна, а не транспонированную инструментом.
-    kQuirkItDctComparesPatternNote     = 1ull << 23,
+    kQuirkItDctComparesPatternNote = 1ull << 23,
     // Модель Linear: c5_speed относится к ноте C-5 (60), а не C-4 (48, как у XM); как у OpenMPT.
-    kQuirkItLinearC5Reference          = 1ull << 25,
+    kQuirkItLinearC5Reference = 1ull << 25,
     // IT, всегда: синус-таблица 256 точек +-64 вместо общей 64 точек +-255,
     // фаза 4*vibrato_speed за тик. Vibrato, FineVibrato и Tremolo (у Tremolo
     // делитель 5, а не 6). Panbrello - общей формулой, с OpenMPT не сверен.
-    kQuirkItVibratoTable               = 1ull << 26,
+    kQuirkItVibratoTable = 1ull << 26,
     // Oxx за концом сэмпла у IT не глушит ноту, в отличие от XM/S3M: с
     // обычными эффектами сэмпл играется с начала, со старыми прижимается к
     // концу (как у OpenMPT). На
     // 034djzjack_icanfly.it канал 1 (сэмпл в 20 отсчётов, Oxx до 0xFE) иначе
     // молчит целиком.
-    kQuirkItOffsetPastEndRestarts      = 1ull << 27,
+    kQuirkItOffsetPastEndRestarts = 1ull << 27,
 
     // --- Нота, которой не досталось сэмпла ---
     //
@@ -97,8 +98,8 @@ enum QuirkBit : QuirkFlags {
     //   XM    обрыв                              обрыв
     //   MOD   ничего                             ничего
     //   S3M   ничего                             ничего
-    kQuirkCutOnEmptySample             = 1ull << 28,  // IT, XM
-    kQuirkCutOnUnmappedNote            = 1ull << 29,  // XM
+    kQuirkCutOnEmptySample  = 1ull << 28, // IT, XM
+    kQuirkCutOnUnmappedNote = 1ull << 29, // XM
 
     // S3M/IT кодируют тонкий вариант слайда громкости и панорамы в самом
     // параметре:
@@ -109,7 +110,7 @@ enum QuirkBit : QuirkFlags {
     //
     // У MOD/XM тонкий слайд - отдельные EAx/EBx, загрузчик сам ставит
     // SlideRate::Fine; у MOD Axy с ниблом F - обычный слайд. Поэтому квирк.
-    kQuirkFineSlideInParam             = 1ull << 30,  // S3M, IT
+    kQuirkFineSlideInParam = 1ull << 30, // S3M, IT
 
     // Затухание голоса по децибелам, а не по амплитуде: Instrument::fadeout_rate
     // - множитель Q16 на тик, а не убыль. Ставит только загрузчик MIDI.
@@ -118,7 +119,7 @@ enum QuirkBit : QuirkFlags {
     // Релиз SF2 линеен в децибелах: с линейным затуханием против эталона
     // перкуссия обрывается на полсекунды раньше, сустейновые тянутся на
     // секунду дольше.
-    kQuirkFadeoutExponential           = 1ull << 31,  // MIDI
+    kQuirkFadeoutExponential = 1ull << 31, // MIDI
 
     // Значение точки огибающей громкости - децибелы, а не амплитуда.
     //
@@ -133,16 +134,16 @@ enum QuirkBit : QuirkFlags {
     // уже int16_t.
     //
     // Ставит только загрузчик MIDI.
-    kQuirkEnvelopeDecibel              = 1ull << 32,  // MIDI
+    kQuirkEnvelopeDecibel = 1ull << 32, // MIDI
 
     // Glissando (E3x, S1x): при тон-портаменто высота звучит ступенями по
     // полутонам, а сам период едет плавно. Прижатие - к первой ноте не ниже
     // звучащей высоты, у FT2 - к ближайшей.
-    kQuirkGlissandoNearest             = 1ull << 33,  // XM
+    kQuirkGlissandoNearest = 1ull << 33, // XM
     // ProTracker: прижатие только на строках с
     // тон-портаменто и не на первом тике. У остальных форматов - от первого
     // тон-портаменто до новой ноты.
-    kQuirkGlissandoPtMode              = 1ull << 34,  // MOD M.K./M!K!
+    kQuirkGlissandoPtMode = 1ull << 34, // MOD M.K./M!K!
 
     // Огибающие IT: пока нота удерживается, позиция крутится по петле
     // удержания sustain_point..sustain_end, обычная петля в это время не
@@ -151,7 +152,7 @@ enum QuirkBit : QuirkFlags {
     // включает его сразу только без огибающей громкости или при её петле,
     // иначе - конец огибающей, и у неотпущенной ноты; ^^^, NNA и DCA Fade
     // гасят, не снимая удержания.
-    kQuirkItEnvelopeSustainLoop        = 1ull << 35,  // IT
+    kQuirkItEnvelopeSustainLoop = 1ull << 35, // IT
 
     // MOD, эвристики панорамы OpenMPT. IgnorePanning - файл ProTracker (как
     // kQuirkGlissandoPtMode), где 8xx и E8x не больше 0x2F: это метки
@@ -159,8 +160,8 @@ enum QuirkBit : QuirkFlags {
     // 7BitPanning - 8xx в шкале 0..0x80 (есть значения меньше 0x80, нет
     // больших 0x8F, кроме A4, максимум от 0x30): параметр удваивается, A4 -
     // surround.
-    kQuirkModIgnorePanning             = 1ull << 36,  // MOD
-    kQuirkMod7BitPanning               = 1ull << 37,  // MOD
+    kQuirkModIgnorePanning = 1ull << 36, // MOD
+    kQuirkMod7BitPanning   = 1ull << 37, // MOD
 
     // Интерполяция сэмпла по четырём точкам (кубическая эрмитова, как
     // hermite у spessasynth по умолчанию) вместо линейной по двум. Только
@@ -175,27 +176,27 @@ enum QuirkBit : QuirkFlags {
     // Сейчас не ставит никто: у .mid на слух разницы нет.
     // У трекерных форматов звук сверяется с эталонными плеерами, и линейная
     // интерполяция там часть сверенного.
-    kQuirkHermiteInterpolation         = 1ull << 38,  // никто
+    kQuirkHermiteInterpolation = 1ull << 38, // никто
     // SampleOffset за концом петли зацикленного сэмпла: S3M заворачивает
     // смещение внутрь петли, MOD играет с loop_start, как у эталона. Без
     // квирка нота не звучит (XM). На 2nd_pm.s3m без него каналы 7 и 8
     // молчат там, где у эталона нота.
-    kQuirkS3mOffsetWrapInLoop          = 1ull << 39,  // S3M
-    kQuirkModOffsetPastLoopEnd         = 1ull << 40,  // MOD
+    kQuirkS3mOffsetWrapInLoop  = 1ull << 39, // S3M
+    kQuirkModOffsetPastLoopEnd = 1ull << 40, // MOD
     // Огибающая громкости без петли прошла последнюю точку со значением 0 -
     // голос снимается: он больше не зазвучит, а декодировался бы и сводился
     // с нулём до новой ноты или кражи слота. Как у OpenMPT для IT; XM канал
     // держит (Lxx может вернуть огибающую).
-    kQuirkItSilentEnvelopeEndStops     = 1ull << 41,  // IT
+    kQuirkItSilentEnvelopeEndStops = 1ull << 41, // IT
     // Новый темп (Fxx >= 0x20) вступает со второго тика строки, как у
     // ProTracker, - и на строке 0, и при скорости 1. Без квирка (S3M, XM,
     // IT) - с тика 0 строки, где он записан.
-    kQuirkModTempoOnSecondTick         = 1ull << 42,  // MOD
+    kQuirkModTempoOnSecondTick = 1ull << 42, // MOD
     // Gxx пишет и память Exx/Fxx, общую с ними: IT без "Compatible Gxx", как у OpenMPT. У
     // S3M и остальных памяти раздельные.
-    kQuirkGxxSharesPortaMemory         = 1ull << 43,  // IT
+    kQuirkGxxSharesPortaMemory = 1ull << 43, // IT
     // TonePorta колонки громкости: скорость по таблице IT (param 0..9), а не param*16, как у XM.
-    kQuirkItVolColumnPortaTable        = 1ull << 44,  // IT
+    kQuirkItVolColumnPortaTable = 1ull << 44, // IT
 };
 
 // Отдельный набор под Pattern Loop/Break/Jump: не бит на трекер, а
@@ -204,20 +205,20 @@ enum QuirkBit : QuirkFlags {
 using FlowModeFlags = uint32_t;
 
 enum FlowModeBit : FlowModeFlags {
-    kFlowLoopGlobalTarget        = 1u << 0, // цель и счётчик лупа общие на все каналы (ST3, IT < 1.04)
+    kFlowLoopGlobalTarget = 1u << 0, // цель и счётчик лупа общие на все каналы (ST3, IT < 1.04)
     // Конец лупа сдвигает цель на следующую строку (ST3, IT >= 2.10); движок не читает.
-    kFlowLoopEndAdvancesRow      = 1u << 1,
+    kFlowLoopEndAdvancesRow = 1u << 1,
     // Position Jump на строке сработавшего лупа побеждает луп (IT >= 2.00, как
     // у OpenMPT). Без флага сработавший луп отменяет break/jump той же строки;
     // Pattern Break без Position Jump лупу проигрывает и с флагом.
-    kFlowLoopDelaysSameRowBreak  = 1u << 3,
+    kFlowLoopDelaysSameRowBreak = 1u << 3,
     // SBx/E6x без заданной цели берёт текущую строку (ST3); нигде не выставляется.
-    kFlowLoopDefaultsCurrentRow  = 1u << 4,
+    kFlowLoopDefaultsCurrentRow = 1u << 4,
     // Bxx не сбрасывает строку назначения в 0, она берётся из Dxx той же строки; нигде не
     // выставляется.
-    kFlowJumpNoRowReset          = 1u << 5,
+    kFlowJumpNoRowReset = 1u << 5,
     // Любой break/jump на строке сработавшего лупа отбрасывается (ST3 3.21); нигде не выставляется.
-    kFlowLoopNoBreakJump         = 1u << 6,
+    kFlowLoopNoBreakJump = 1u << 6,
 };
 
 } // namespace soundsinth::model

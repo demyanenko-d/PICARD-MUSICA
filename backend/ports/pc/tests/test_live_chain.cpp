@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 // Сквозной путь живого MIDI на ПК: события .mid -> записи в порт A AY, как
 // их делает ПЗУ 128 -> разбор последовательного потока -> очередь с форой ->
 // живая песня. Проверяются два звена, которых нет в других тестах: поток на
@@ -41,13 +42,13 @@ using namespace soundsinth;
 namespace {
 
 constexpr const char* kBankPath = "release/banks/GeneralUser-GS.ssb";
-constexpr uint32_t kChannels = formats::midi::kMaxChannels;
+constexpr uint32_t kChannels    = formats::midi::kMaxChannels;
 // Кадр 8N1 на 31250 бод - десять бит, 0.32 мс на байт.
 constexpr double kSerialMsPerByte = 10.0 * 1000.0 / 31250.0;
-constexpr uint32_t kLookaheadMs = SOUNDSINTH_LIVE_MIDI_LOOKAHEAD_MS;
+constexpr uint32_t kLookaheadMs   = SOUNDSINTH_LIVE_MIDI_LOOKAHEAD_MS;
 // Живая сетка: строка = тик.
 constexpr uint32_t kLiveTickMs = 2500u / SOUNDSINTH_LIVE_MIDI_TEMPO;
-static_assert(kLiveTickMs * SOUNDSINTH_LIVE_MIDI_TEMPO == 2500u, "темп живого режима обязан давать целый тик");
+static_assert(kLiveTickMs * SOUNDSINTH_LIVE_MIDI_TEMPO == 2500u, "the live mode tempo must produce a whole tick");
 // Дальше сорока секунд трека не идём: тик живой сетки мелкий, а файлов много.
 constexpr double kSpanMs = 40000.0;
 
@@ -75,10 +76,8 @@ struct Trace {
 // другом ядре уже выбросила PCM.
 struct Requests {
     formats::midi::LiveMidi* live = nullptr;
-    uint32_t count = 0;
-    static void on_retire(void* user, uint16_t song_sample) {
-        static_cast<Requests*>(user)->live->record_retired(song_sample);
-    }
+    uint32_t count                = 0;
+    static void on_retire(void* user, uint16_t song_sample) { static_cast<Requests*>(user)->live->record_retired(song_sample); }
     static void on_request(void* user, uint16_t) { ++static_cast<Requests*>(user)->count; }
 };
 
@@ -90,7 +89,9 @@ struct Note {
     uint16_t bank_inst;
 };
 
-bool same_note(const Note& a, const Note& b) { return a.note == b.note && a.bank_inst == b.bank_inst; }
+bool same_note(const Note& a, const Note& b) {
+    return a.note == b.note && a.bank_inst == b.bank_inst;
+}
 bool note_less(const Note& a, const Note& b) {
     return a.note != b.note ? a.note < b.note : a.bank_inst < b.bank_inst;
 }
@@ -113,9 +114,9 @@ struct Wire {
 
 // Ноты одной строки файла и время прихода её сообщений.
 struct Group {
-    uint32_t at_ms = 0;      // время строки по сетке файла
-    uint32_t first_ms = 0;   // приход самого раннего сообщения строки
-    uint32_t last_ms = 0;    // приход самого позднего
+    uint32_t at_ms    = 0; // время строки по сетке файла
+    uint32_t first_ms = 0; // приход самого раннего сообщения строки
+    uint32_t last_ms  = 0; // приход самого позднего
     std::vector<Note> notes;
 };
 
@@ -126,18 +127,18 @@ std::vector<uint8_t> read_file(const std::string& path) {
 
 // События трассы -> сообщения на линии со временем прихода. Линия одна:
 // занятая отодвигает следующее сообщение, как на настоящем Спектруме.
-uint32_t build_wires(const Trace& trace, uint32_t rows, double row_ms, double tick_ms, std::vector<Wire>& out,
-                     std::vector<uint32_t>* row_first, std::vector<uint32_t>* row_last) {
+uint32_t build_wires(const Trace& trace, uint32_t rows, double row_ms, double tick_ms, std::vector<Wire>& out, std::vector<uint32_t>* row_first,
+                     std::vector<uint32_t>* row_last) {
     double line_free = 0.0, nominal = 0.0;
     uint32_t backlog = 0;
     for (uint32_t r = 0; r < rows; ++r) {
         for (const TraceEvent& e : trace.events[r]) {
-            const double at = static_cast<double>(r) * row_ms + static_cast<double>(e.delay) * tick_ms;
-            nominal = at > nominal ? at : nominal; // порядок событий - как у конвертера
+            const double at     = static_cast<double>(r) * row_ms + static_cast<double>(e.delay) * tick_ms;
+            nominal             = at > nominal ? at : nominal; // порядок событий - как у конвертера
             const uint8_t count = static_cast<uint8_t>(midi_in::midi_data_bytes(e.status) + 1u);
-            const double start = nominal > line_free ? nominal : line_free;
-            const double done = start + kSerialMsPerByte * static_cast<double>(count);
-            line_free = done;
+            const double start  = nominal > line_free ? nominal : line_free;
+            const double done   = start + kSerialMsPerByte * static_cast<double>(count);
+            line_free           = done;
             pc_tests::AyRomWriter rom;
             if (count == 3) {
                 rom.bytes({e.status, e.d1, e.d2});
@@ -145,7 +146,7 @@ uint32_t build_wires(const Trace& trace, uint32_t rows, double row_ms, double ti
                 rom.bytes({e.status, e.d1});
             }
             const uint32_t done_ms = static_cast<uint32_t>(done + 0.5);
-            const uint32_t at_ms = static_cast<uint32_t>(nominal + 0.5);
+            const uint32_t at_ms   = static_cast<uint32_t>(nominal + 0.5);
             if (done_ms - at_ms > backlog) backlog = done_ms - at_ms;
             if (row_first != nullptr && done_ms < (*row_first)[r]) (*row_first)[r] = done_ms;
             if (row_last != nullptr && done_ms > (*row_last)[r]) (*row_last)[r] = done_ms;
@@ -166,8 +167,8 @@ void render(engine::TrackerEngine& e, std::vector<int32_t>& l, std::vector<int32
 // Живая песня не должна упереться в потолки: за ними состав нот расходится
 // законно, и сверять его нечем.
 bool hit_caps(const formats::midi::LiveMidi& live) {
-    return live.instruments_evicted() != 0 || live.instruments_failed() != 0 || live.samples_capped() != 0 ||
-           live.stats().notes_over_cap != 0 || live.stats().steals != 0;
+    return live.instruments_evicted() != 0 || live.instruments_failed() != 0 || live.samples_capped() != 0 || live.stats().notes_over_cap != 0 ||
+           live.stats().steals != 0;
 }
 
 } // namespace
@@ -177,7 +178,7 @@ void test_live_chain_matches_direct_events() {
     std::vector<uint8_t> blob = read_file(kBankPath);
     bank::Bank bnk;
     if (blob.empty() || !bank::bank_open(blob.data(), static_cast<uint32_t>(blob.size()), bnk, nullptr)) {
-        std::printf("  ПРОПУСК: банка нет\n");
+        std::printf("  SKIP: no bank\n");
         return;
     }
     std::vector<std::string> files;
@@ -193,22 +194,22 @@ void test_live_chain_matches_direct_events() {
         }
     }
     if (files.empty()) {
-        std::printf("  ПРОПУСК: .mid нет\n");
+        std::printf("  SKIP: no .mid\n");
         return;
     }
     std::sort(files.begin(), files.end());
 
     auto file_mem = std::make_unique<memory::TrackMemory>();
-    auto ref_mem = std::make_unique<memory::TrackMemory>();
+    auto ref_mem  = std::make_unique<memory::TrackMemory>();
     auto live_mem = std::make_unique<memory::TrackMemory>();
     memory::track_memory_create(*file_mem);
     memory::track_memory_create(*ref_mem);
     memory::track_memory_create(*live_mem);
     auto file_song = std::make_unique<soundsinth::model::Song>();
-    auto ref_song = std::make_unique<soundsinth::model::Song>();
+    auto ref_song  = std::make_unique<soundsinth::model::Song>();
     auto live_song = std::make_unique<soundsinth::model::Song>();
-    auto ref = std::make_unique<formats::midi::LiveMidi>();
-    auto live = std::make_unique<formats::midi::LiveMidi>();
+    auto ref       = std::make_unique<formats::midi::LiveMidi>();
+    auto live      = std::make_unique<formats::midi::LiveMidi>();
 
     uint32_t checked = 0, skipped_effects = 0, skipped_caps = 0, bad_files = 0;
     uint32_t notes = 0, bad_groups = 0, missing = 0, extra = 0;
@@ -217,14 +218,13 @@ void test_live_chain_matches_direct_events() {
     for (const std::string& path : files) {
         const std::vector<uint8_t> file = read_file(path);
         Trace trace;
-        trace.hook.event = &Trace::on_event;
+        trace.hook.event    = &Trace::on_event;
         trace.hook.row_done = &Trace::on_row;
-        trace.hook.user = &trace;
+        trace.hook.user     = &trace;
         memory::track_memory_reset_for_new_track(*file_mem);
         formats::MemoryByteSource src(file.data(), static_cast<uint32_t>(file.size()));
         formats::midi::set_convert_trace(&trace.hook);
-        const bool ok = formats::midi::load(src.as_byte_source(), static_cast<uint32_t>(file.size()), *file_mem, bnk,
-                                            *file_song, nullptr, true);
+        const bool ok = formats::midi::load(src.as_byte_source(), static_cast<uint32_t>(file.size()), *file_mem, bnk, *file_song, nullptr, true);
         formats::midi::set_convert_trace(nullptr);
         if (!ok) continue;
         // Смена темпа по ходу трека сдвигает сетку файла: время события тогда
@@ -236,8 +236,8 @@ void test_live_chain_matches_direct_events() {
 
         // Сетка файла: тик - 2500/темп мс, строка - speed тиков.
         const double tick_ms = 2500.0 / static_cast<double>(file_song->default_tempo);
-        const double row_ms = tick_ms * static_cast<double>(file_song->default_speed);
-        const uint32_t rows = std::min<uint32_t>(trace.rows, static_cast<uint32_t>(kSpanMs / row_ms) + 1);
+        const double row_ms  = tick_ms * static_cast<double>(file_song->default_speed);
+        const uint32_t rows  = std::min<uint32_t>(trace.rows, static_cast<uint32_t>(kSpanMs / row_ms) + 1);
 
         std::vector<Wire> wires;
         std::vector<uint32_t> row_first(rows, 0xFFFFFFFFu), row_last(rows, 0);
@@ -247,22 +247,23 @@ void test_live_chain_matches_direct_events() {
         // Эталон: события построчно, сетка файла.
         memory::track_memory_reset_for_new_track(*ref_mem);
         Requests ref_req;
-        ref_req.live = ref.get();
-        const char* why = ref->begin(*ref_song, *ref_mem, bnk, file_song->default_speed,
-                                     static_cast<uint8_t>(file_song->default_tempo), &Requests::on_request,
+        ref_req.live    = ref.get();
+        const char* why = ref->begin(*ref_song, *ref_mem, bnk, file_song->default_speed, static_cast<uint8_t>(file_song->default_tempo), &Requests::on_request,
                                      &Requests::on_retire, &ref_req);
         CHECK(why == nullptr);
         if (why) return;
-        for (uint8_t ch = 0; ch < 16; ++ch) ref->set_drum_channel(ch, ((trace.hook.drum_mask >> ch) & 1u) != 0);
+        for (uint8_t ch = 0; ch < 16; ++ch)
+            ref->set_drum_channel(ch, ((trace.hook.drum_mask >> ch) & 1u) != 0);
         std::vector<Group> want;
         for (uint32_t r = 0; r < rows; ++r) {
             ref->begin_row();
-            for (const TraceEvent& e : trace.events[r]) ref->event(e.status, e.d1, e.d2, e.delay);
+            for (const TraceEvent& e : trace.events[r])
+                ref->event(e.status, e.d1, e.d2, e.delay);
             ref->finish_row();
             Group g;
-            g.at_ms = static_cast<uint32_t>(static_cast<double>(r) * row_ms + 0.5);
+            g.at_ms    = static_cast<uint32_t>(static_cast<double>(r) * row_ms + 0.5);
             g.first_ms = row_first[r];
-            g.last_ms = row_last[r];
+            g.last_ms  = row_last[r];
             collect_notes(*ref, g.at_ms, g.notes);
             if (!g.notes.empty()) want.push_back(std::move(g));
         }
@@ -271,16 +272,16 @@ void test_live_chain_matches_direct_events() {
         memory::track_memory_reset_for_new_track(*live_mem);
         Requests live_req;
         live_req.live = live.get();
-        why = live->begin(*live_song, *live_mem, bnk, /*ticks_per_row=*/1, SOUNDSINTH_LIVE_MIDI_TEMPO,
-                          &Requests::on_request, &Requests::on_retire, &live_req);
+        why = live->begin(*live_song, *live_mem, bnk, /*ticks_per_row=*/1, SOUNDSINTH_LIVE_MIDI_TEMPO, &Requests::on_request, &Requests::on_retire, &live_req);
         CHECK(why == nullptr);
         if (why) return;
-        for (uint8_t ch = 0; ch < 16; ++ch) live->set_drum_channel(ch, ((trace.hook.drum_mask >> ch) & 1u) != 0);
+        for (uint8_t ch = 0; ch < 16; ++ch)
+            live->set_drum_channel(ch, ((trace.hook.drum_mask >> ch) & 1u) != 0);
         midi_in::LiveStream stream;
         stream.begin(live.get(), kLookaheadMs);
         midi_in::AyMidiInput input;
         std::vector<Note> got;
-        size_t next = 0;
+        size_t next           = 0;
         const uint32_t end_ms = wires.back().done_ms + kLookaheadMs + 4u * kLiveTickMs;
         for (uint32_t t = 0; t <= end_ms; t += kLiveTickMs) {
             while (next < wires.size() && wires[next].done_ms <= t) {
@@ -298,7 +299,7 @@ void test_live_chain_matches_direct_events() {
             collect_notes(*live, t, got);
         }
         lost_events += stream.lost();
-        framing += input.framing_errors();
+        framing     += input.framing_errors();
 
         if (hit_caps(*ref) || hit_caps(*live)) {
             ++skipped_caps;
@@ -317,8 +318,8 @@ void test_live_chain_matches_direct_events() {
             size_t kk = k;
             for (;;) {
                 mine.insert(mine.end(), want[kk].notes.begin(), want[kk].notes.end());
-                first_ms = std::min(first_ms, want[kk].first_ms);
-                last_ms = std::max(last_ms, want[kk].last_ms);
+                first_ms         = std::min(first_ms, want[kk].first_ms);
+                last_ms          = std::max(last_ms, want[kk].last_ms);
                 const size_t end = gi + mine.size();
                 // Граница пришлась на середину тика - забрать и следующую строку.
                 if (kk + 1 < want.size() && end < got.size() && got[end - 1].at_ms == got[end].at_ms) {
@@ -349,28 +350,27 @@ void test_live_chain_matches_direct_events() {
             if (shift > max_shift) max_shift = shift;
         }
         if (got.size() > gi) extra += static_cast<uint32_t>(got.size() - gi);
-        notes += static_cast<uint32_t>(got.size());
+        notes      += static_cast<uint32_t>(got.size());
         bad_groups += file_bad;
-        early += file_early;
-        late += file_late;
+        early      += file_early;
+        late       += file_late;
         if (file_bad || file_early || file_late || got.size() != gi) {
             ++bad_files;
             if (bad_files <= 5) {
-                std::printf("  расхождение: %s нот %zu, не сошлось %u, раньше форы %u, позже %u, лишних %zu\n",
-                            path.c_str(), got.size(), file_bad, file_early, file_late, got.size() - gi);
+                std::printf("  difference: %s notes %zu, mismatched %u, earlier than the lookahead %u, later %u, extra %zu\n", path.c_str(), got.size(),
+                            file_bad, file_early, file_late, got.size() - gi);
             }
         }
     }
 
-    std::printf("  файлов сверено %u (нот %u), пропущено: темп/громкость %u, потолки %u; расходится файлов %u\n",
-                checked, notes, skipped_effects, skipped_caps, bad_files);
-    std::printf("  ноты: не сошлось %u, не вышло %u, лишних %u; раньше форы %u, позже форы с тиком %u\n", bad_groups,
-                missing, extra, early, late);
-    std::printf("  поток: событий потеряно %u, кадров битых %u, в очереди пик %u из %u; линия отстала на %u мс\n",
-                lost_events, framing, max_pending, midi_in::kLiveStreamCapacity, max_backlog);
+    std::printf("  files checked %u (notes %u), skipped: tempo/volume %u, caps %u; files that differ %u\n", checked, notes, skipped_effects, skipped_caps,
+                bad_files);
+    std::printf("  notes: mismatched %u, missing %u, extra %u; earlier than the lookahead %u, later than it by a tick %u\n", bad_groups, missing, extra, early,
+                late);
+    std::printf("  stream: events lost %u, frames broken %u, queue peak %u of %u; the line fell behind by %u ms\n", lost_events, framing, max_pending,
+                midi_in::kLiveStreamCapacity, max_backlog);
     if (min_shift != 0xFFFFFFFFu) {
-        std::printf("  сдвиг строки: %u..%u мс при форе %u и тике %u\n", min_shift, max_shift, kLookaheadMs,
-                    kLiveTickMs);
+        std::printf("  row shift: %u..%u ms with a lookahead of %u and a tick of %u\n", min_shift, max_shift, kLookaheadMs, kLiveTickMs);
     }
     CHECK(checked > 0);
     CHECK_EQ(bad_groups, 0u);
@@ -394,7 +394,7 @@ void test_live_chain_sysex_drum_channel() {
     std::vector<uint8_t> blob = read_file(kBankPath);
     bank::Bank bnk;
     if (blob.empty() || !bank::bank_open(blob.data(), static_cast<uint32_t>(blob.size()), bnk, nullptr)) {
-        std::printf("  ПРОПУСК: банка нет\n");
+        std::printf("  SKIP: no bank\n");
         return;
     }
     constexpr uint8_t kChannel = 2, kProgram = 0, kNote = 38, kVelocity = 100;
@@ -409,8 +409,7 @@ void test_live_chain_sysex_drum_channel() {
         auto live = std::make_unique<formats::midi::LiveMidi>();
         Requests req;
         req.live = live.get();
-        CHECK(live->begin(*song, *mem, bnk, /*ticks_per_row=*/1, SOUNDSINTH_LIVE_MIDI_TEMPO, &Requests::on_request,
-                          &Requests::on_retire, &req) == nullptr);
+        CHECK(live->begin(*song, *mem, bnk, /*ticks_per_row=*/1, SOUNDSINTH_LIVE_MIDI_TEMPO, &Requests::on_request, &Requests::on_retire, &req) == nullptr);
         midi_in::LiveStream stream;
         stream.begin(live.get(), kLookaheadMs);
         midi_in::SysexTracker sysex;
@@ -451,12 +450,11 @@ void test_live_chain_sysex_drum_channel() {
     for (uint32_t pass = 0; pass < 2; ++pass) {
         const bank::BankPreset& preset = bank::bank_preset(bnk, pass == 0 ? 128u : 0u, kProgram);
         bank::NoteLayer layers[bank::kMaxNoteLayers];
-        const uint32_t n = bank::select_note_layers(
-            bnk, preset, kNote, kVelocity, [](uint16_t, uint16_t) { return true; }, layers);
+        const uint32_t n = bank::select_note_layers(bnk, preset, kNote, kVelocity, [](uint16_t, uint16_t) { return true; }, layers);
         CHECK(n > 0);
         if (n > 0) want[pass] = bnk.layers[layers[0].layer].instrument;
     }
-    std::printf("  инструмент: с SysEx %u (ждали %u), без %u (ждали %u)\n", inst[0], want[0], inst[1], want[1]);
+    std::printf("  instrument: with SysEx %u (expected %u), without %u (expected %u)\n", inst[0], want[0], inst[1], want[1]);
     CHECK_EQ(inst[0], want[0]);
     CHECK_EQ(inst[1], want[1]);
     CHECK(inst[0] != inst[1]);
@@ -471,7 +469,7 @@ void test_live_chain_spreads_instrument_builds() {
     std::vector<uint8_t> blob = read_file(kBankPath);
     bank::Bank bnk;
     if (blob.empty() || !bank::bank_open(blob.data(), static_cast<uint32_t>(blob.size()), bnk, nullptr)) {
-        std::printf("  ПРОПУСК: банка нет\n");
+        std::printf("  SKIP: no bank\n");
         return;
     }
     auto mem = std::make_unique<memory::TrackMemory>();
@@ -481,13 +479,12 @@ void test_live_chain_spreads_instrument_builds() {
     auto live = std::make_unique<formats::midi::LiveMidi>();
     Requests req;
     req.live = live.get();
-    CHECK(live->begin(*song, *mem, bnk, /*ticks_per_row=*/1, SOUNDSINTH_LIVE_MIDI_TEMPO, &Requests::on_request,
-                      &Requests::on_retire, &req) == nullptr);
+    CHECK(live->begin(*song, *mem, bnk, /*ticks_per_row=*/1, SOUNDSINTH_LIVE_MIDI_TEMPO, &Requests::on_request, &Requests::on_retire, &req) == nullptr);
     midi_in::LiveStream stream;
     stream.begin(live.get(), kLookaheadMs);
 
     // Восемь каналов, у каждого своя программа и нота - всё в один момент.
-    constexpr uint32_t kChannelsUsed = 8;
+    constexpr uint32_t kChannelsUsed              = 8;
     static const uint8_t kPrograms[kChannelsUsed] = {0, 19, 24, 33, 48, 56, 73, 90};
     for (uint8_t c = 0; c < kChannelsUsed; ++c) {
         CHECK(stream.push(0, static_cast<uint8_t>(0xc0 | c), kPrograms[c], 0));
@@ -506,8 +503,8 @@ void test_live_chain_spreads_instrument_builds() {
             if (soundsinth::model::is_real_note(cell.note) && cell.instrument != 0) ++notes;
         }
     }
-    std::printf("  инструментов %u, в худшей строке %u (предел %u), подготовка отложена %u раз; нот вышло %u\n",
-                live->instruments_built(), worst_per_row, midi_in::kLiveBuildsPerRow, stream.deferred(), notes);
+    std::printf("  instruments %u, %u in the worst row (limit %u), preparation deferred %u times; notes produced %u\n", live->instruments_built(),
+                worst_per_row, midi_in::kLiveBuildsPerRow, stream.deferred(), notes);
     // Предел на подготовку; на своём тике нота достраивает инструмент сама,
     // поэтому строка с нотами может выйти за него - но не на всю пачку.
     CHECK(worst_per_row < kChannelsUsed);
@@ -525,7 +522,7 @@ void test_live_chain_prefetch_never_behind_read() {
     std::vector<uint8_t> blob = read_file(kBankPath);
     bank::Bank bnk;
     if (blob.empty() || !bank::bank_open(blob.data(), static_cast<uint32_t>(blob.size()), bnk, nullptr)) {
-        std::printf("  ПРОПУСК: банка нет\n");
+        std::printf("  SKIP: no bank\n");
         return;
     }
     auto mem = std::make_unique<memory::TrackMemory>();
@@ -535,8 +532,7 @@ void test_live_chain_prefetch_never_behind_read() {
     auto live = std::make_unique<formats::midi::LiveMidi>();
     Requests req;
     req.live = live.get();
-    CHECK(live->begin(*song, *mem, bnk, /*ticks_per_row=*/1, SOUNDSINTH_LIVE_MIDI_TEMPO, &Requests::on_request,
-                      &Requests::on_retire, &req) == nullptr);
+    CHECK(live->begin(*song, *mem, bnk, /*ticks_per_row=*/1, SOUNDSINTH_LIVE_MIDI_TEMPO, &Requests::on_request, &Requests::on_retire, &req) == nullptr);
     midi_in::LiveStream stream;
     stream.begin(live.get(), kLookaheadMs);
 
@@ -553,8 +549,8 @@ void test_live_chain_prefetch_never_behind_read() {
     // Следующая строка обязана выровнять её по чтению, а не идти по сыгранным
     // местам кольца.
     stream.tick(kLookaheadMs + kLiveTickMs);
-    std::printf("  событий %u, в очереди %u, подготовка отстала до %u, выровнена до %u, отложено %u раз\n", pushed,
-                stream.pending(), behind, stream.prefetched(), stream.deferred());
+    std::printf("  events %u, queued %u, preparation fell behind to %u, levelled to %u, deferred %u times\n", pushed, stream.pending(), behind,
+                stream.prefetched(), stream.deferred());
     CHECK_EQ(stream.pending(), 0u);
     CHECK(behind < pushed); // отставание действительно было
     CHECK_EQ(stream.prefetched(), pushed);
@@ -576,7 +572,7 @@ void test_live_chain_board_model() {
     std::vector<uint8_t> blob = read_file(kBankPath);
     bank::Bank bnk;
     if (blob.empty() || !bank::bank_open(blob.data(), static_cast<uint32_t>(blob.size()), bnk, nullptr)) {
-        std::printf("  ПРОПУСК: банка нет\n");
+        std::printf("  SKIP: no bank\n");
         return;
     }
     // Файлы с плотной сменой программ: на плате молчащие ноты видны именно на
@@ -613,18 +609,17 @@ void test_live_chain_board_model() {
         if (!std::filesystem::exists(candidate, ec)) continue;
         const std::vector<uint8_t> file = read_file(candidate);
         Trace trace;
-        trace.hook.event = &Trace::on_event;
+        trace.hook.event    = &Trace::on_event;
         trace.hook.row_done = &Trace::on_row;
-        trace.hook.user = &trace;
+        trace.hook.user     = &trace;
         memory::track_memory_reset_for_new_track(*file_mem);
         formats::MemoryByteSource src(file.data(), static_cast<uint32_t>(file.size()));
         formats::midi::set_convert_trace(&trace.hook);
-        const bool ok = formats::midi::load(src.as_byte_source(), static_cast<uint32_t>(file.size()), *file_mem, bnk,
-                                            *file_song, nullptr, true);
+        const bool ok = formats::midi::load(src.as_byte_source(), static_cast<uint32_t>(file.size()), *file_mem, bnk, *file_song, nullptr, true);
         formats::midi::set_convert_trace(nullptr);
         if (!ok || trace.hook.row_effects != 0) continue; // смена темпа сетку сдвигает
         const double tick_ms = 2500.0 / static_cast<double>(file_song->default_tempo);
-        const double row_ms = tick_ms * static_cast<double>(file_song->default_speed);
+        const double row_ms  = tick_ms * static_cast<double>(file_song->default_speed);
         std::vector<Wire> part;
         build_wires(trace, trace.rows, row_ms, tick_ms, part, nullptr, nullptr);
         if (part.empty()) continue;
@@ -632,14 +627,14 @@ void test_live_chain_board_model() {
             w.done_ms += offset_ms;
             wires.push_back(std::move(w));
         }
-        offset_ms = wires.back().done_ms + kGapMs;
-        played += (taken ? ", " : "");
-        played += std::filesystem::path(candidate).filename().string();
+        offset_ms  = wires.back().done_ms + kGapMs;
+        played    += (taken ? ", " : "");
+        played    += std::filesystem::path(candidate).filename().string();
         ++taken;
     }
     memory::track_memory_destroy(*file_mem);
     if (wires.empty()) {
-        std::printf("  ПРОПУСК: .mid нет\n");
+        std::printf("  SKIP: no .mid\n");
         return;
     }
     const std::string path = played;
@@ -655,11 +650,11 @@ void test_live_chain_board_model() {
     // Подгрузка как на плате: заказ в очередь, чтение по одному, сэмпл виден
     // лишь по времени готовности.
     struct Loader {
-        const bank::Bank* bank = nullptr;
-        memory::TrackMemory* mem = nullptr;
+        const bank::Bank* bank        = nullptr;
+        memory::TrackMemory* mem      = nullptr;
         soundsinth::model::Song* song = nullptr;
         formats::midi::LiveMidi* live = nullptr;
-        const uint64_t* now_us = nullptr;
+        const uint64_t* now_us        = nullptr;
         struct Job {
             uint16_t index;
             uint64_t ready_us;
@@ -680,20 +675,16 @@ void test_live_chain_board_model() {
                 return;
             }
             // Время чтения из флеша по размеру сэмпла: банк даёт 9.6 МБ/с.
-            const uint16_t bs = static_cast<uint16_t>(l->song->samples[song_sample].file_offset);
-            const uint32_t bytes = bs < l->bank->header->sample_count ? l->bank->samples[bs].pcm_packed_bytes : 0u;
+            const uint16_t bs      = static_cast<uint16_t>(l->song->samples[song_sample].file_offset);
+            const uint32_t bytes   = bs < l->bank->header->sample_count ? l->bank->samples[bs].pcm_packed_bytes : 0u;
             const uint64_t read_us = 1u + static_cast<uint64_t>(bytes) * 1000000u / (96u * 100000u);
-            const uint64_t start = l->busy_until_us > *l->now_us ? l->busy_until_us : *l->now_us;
-            l->busy_until_us = start + read_us;
+            const uint64_t start   = l->busy_until_us > *l->now_us ? l->busy_until_us : *l->now_us;
+            l->busy_until_us       = start + read_us;
             l->queue.push_back(Job{song_sample, l->busy_until_us});
             if (l->queue.size() > l->queue_peak) l->queue_peak = static_cast<uint32_t>(l->queue.size());
         }
-        static void on_retire(void* user, uint16_t song_sample) {
-            static_cast<Loader*>(user)->retire_pending.push_back(song_sample);
-        }
-        bool busy(uint16_t idx) const {
-            return idx >= in_use.size() * 32u || (in_use[idx / 32u] & (1u << (idx % 32u))) != 0;
-        }
+        static void on_retire(void* user, uint16_t song_sample) { static_cast<Loader*>(user)->retire_pending.push_back(song_sample); }
+        bool busy(uint16_t idx) const { return idx >= in_use.size() * 32u || (in_use[idx / 32u] & (1u << (idx % 32u))) != 0; }
         // Шаг задачи подгрузки: читает готовое и возвращает записи, которые
         // отпустили голоса, - тем же порядком, что live_session.
         void step(uint64_t now) {
@@ -724,27 +715,26 @@ void test_live_chain_board_model() {
     };
     uint64_t now_us = 0;
     Loader loader;
-    loader.bank = &bnk;
-    loader.mem = mem.get();
-    loader.song = song.get();
-    loader.live = live.get();
+    loader.bank   = &bnk;
+    loader.mem    = mem.get();
+    loader.song   = song.get();
+    loader.live   = live.get();
     loader.now_us = &now_us;
     loader.in_use.assign(64, 0);
 
-    CHECK(live->begin(*song, *mem, bnk, /*ticks_per_row=*/1, SOUNDSINTH_LIVE_MIDI_TEMPO, &Loader::on_request,
-                      &Loader::on_retire, &loader) == nullptr);
+    CHECK(live->begin(*song, *mem, bnk, /*ticks_per_row=*/1, SOUNDSINTH_LIVE_MIDI_TEMPO, &Loader::on_request, &Loader::on_retire, &loader) == nullptr);
     stream.begin(live.get(), kLookaheadMs);
 
     // Источник строк: приём записей AY и тик очереди - как live_row на плате.
     struct Rows {
-        midi_in::LiveStream* stream = nullptr;
-        midi_in::AyMidiInput* input = nullptr;
+        midi_in::LiveStream* stream    = nullptr;
+        midi_in::AyMidiInput* input    = nullptr;
         const std::vector<Wire>* wires = nullptr;
-        const uint64_t* now_us = nullptr;
-        size_t next = 0;
-        uint32_t lost = 0;
+        const uint64_t* now_us         = nullptr;
+        size_t next                    = 0;
+        uint32_t lost                  = 0;
         static const soundsinth::model::PatternCell* row(void* user) {
-            auto* c = static_cast<Rows*>(user);
+            auto* c               = static_cast<Rows*>(user);
             const uint32_t now_ms = static_cast<uint32_t>(*c->now_us / 1000u);
             while (c->next < c->wires->size() && (*c->wires)[c->next].done_ms <= now_ms) {
                 midi_in::MidiEvent ev{};
@@ -761,8 +751,8 @@ void test_live_chain_board_model() {
     };
     Rows rows_src;
     rows_src.stream = &stream;
-    rows_src.input = &input;
-    rows_src.wires = &wires;
+    rows_src.input  = &input;
+    rows_src.wires  = &wires;
     rows_src.now_us = &now_us;
 
     engine::TrackerEngine e(*song, *mem);
@@ -785,13 +775,13 @@ void test_live_chain_board_model() {
 
     // Прогон: буфер за буфером, между ними - шаг задачи подгрузки не чаще её
     // опроса на плате.
-    constexpr uint32_t kFrames = SOUNDSINTH_AUDIO_BUFFER_FRAMES;
+    constexpr uint32_t kFrames   = SOUNDSINTH_AUDIO_BUFFER_FRAMES;
     constexpr uint64_t kBufferUs = kFrames * 1000000ull / engine::kSampleRateHz;
-    constexpr uint64_t kPollUs = 5000; // app_task в живом режиме
-    const uint64_t end_us = (static_cast<uint64_t>(wires.back().done_ms) + kLookaheadMs + 2000u) * 1000ull;
+    constexpr uint64_t kPollUs   = 5000; // app_task в живом режиме
+    const uint64_t end_us        = (static_cast<uint64_t>(wires.back().done_ms) + kLookaheadMs + 2000u) * 1000ull;
     std::vector<int32_t> l, r;
     uint64_t last_poll = 0;
-    uint32_t buffers = 0;
+    uint32_t buffers   = 0;
     while (now_us < end_us) {
         if (now_us - last_poll >= kPollUs) {
             loader.step(now_us);
@@ -802,15 +792,13 @@ void test_live_chain_board_model() {
         ++buffers;
     }
 
-    std::printf("  %s: буферов %u, заказов %u (повторов %u), прочитано %u, отказов %u, очередь чтения пик %u\n",
-                path.c_str(), buffers, loader.requests, loader.repeats, loader.loaded, loader.failed,
-                loader.queue_peak);
-    std::printf("  инструментов %u (вытеснено %u), записей отдано %u; мимо упреждения - инструментов %u, записей %u; "
-                "отдано свежих %u\n",
-                live->instruments_built(), live->instruments_evicted(), loader.retired, live->instruments_late(),
-                live->records_late(), live->records_retired_recent());
-    std::printf("  МОЛЧАЩИХ НОТ %u; событий потеряно %u/%u\n", e.triggers_without_sample(), rows_src.lost,
-                stream.lost());
+    std::printf("  %s: buffers %u, requests %u (repeats %u), read %u, failures %u, read queue peak %u\n", path.c_str(), buffers, loader.requests,
+                loader.repeats, loader.loaded, loader.failed, loader.queue_peak);
+    std::printf("  instruments %u (evicted %u), records retired %u; past the lookahead - instruments %u, records %u; "
+                "fresh ones retired %u\n",
+                live->instruments_built(), live->instruments_evicted(), loader.retired, live->instruments_late(), live->records_late(),
+                live->records_retired_recent());
+    std::printf("  SILENT NOTES %u; events lost %u/%u\n", e.triggers_without_sample(), rows_src.lost, stream.lost());
     CHECK_EQ(loader.failed, 0u);
     CHECK_EQ(stream.lost(), 0u);
     CHECK(e.triggers_without_sample() == 0u);

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 #include "core/engine/voice_mixer.h"
 
 #include "platform/hot_path.h"
@@ -36,8 +37,7 @@ int32_t clamp_ramp_gain(int32_t g, int32_t toward_sign_of) {
 // где Rn - усиление (все 32 бита, до 134 млн), Rm - отсчёт int16.
 // Результат побитово совпадает с q16_scale. Запасной вариант для PC - та
 // же формула развёрнуто.
-void SOUNDSINTH_HOT_PATH(mix_native_sample)(int16_t native_sample, int32_t gain_l_q24, int32_t gain_r_q24,
-                                            int32_t* mix_l, int32_t* mix_r) {
+void SOUNDSINTH_HOT_PATH(mix_native_sample)(int16_t native_sample, int32_t gain_l_q24, int32_t gain_r_q24, int32_t* mix_l, int32_t* mix_r) {
 #if defined(SOUNDSINTH_HAVE_SMLAWB)
     *mix_l = __smlawb(gain_l_q24, static_cast<int32_t>(native_sample), *mix_l);
     *mix_r = __smlawb(gain_r_q24, static_cast<int32_t>(native_sample), *mix_r);
@@ -53,7 +53,7 @@ void SOUNDSINTH_HOT_PATH(mix_native_sample)(int16_t native_sample, int32_t gain_
 // слышимый как тихий щелчок.
 int32_t tail_curve_q15(uint32_t pos, uint32_t len) {
     if (pos >= len) return 32768;
-    const int32_t x = static_cast<int32_t>((pos * 32768u) / len);
+    const int32_t x  = static_cast<int32_t>((pos * 32768u) / len);
     const int32_t xx = (x * x) >> 15;
     return (xx * (98304 - 2 * x)) >> 15; // 98304 == 3 << 15
 }
@@ -67,8 +67,8 @@ int32_t scale_by_curve_q15(int32_t gain, int32_t curve_q15) {
 
 void VoiceMixer::start_tail(VoiceRamp& r, int32_t from_l, int32_t from_r) const {
     if (ramp_samples == 0) return; // сглаживание выключено
-    r.tail_remaining = static_cast<uint8_t>(ramp_samples);
-    r.fading_sample = r.last_output; // замораживаем: дальше голос волен писать в last_output своё
+    r.tail_remaining    = static_cast<uint8_t>(ramp_samples);
+    r.fading_sample     = r.last_output; // замораживаем: дальше голос волен писать в last_output своё
     r.tail_start_gain_l = from_l;
     r.tail_start_gain_r = from_r;
 }
@@ -90,13 +90,12 @@ void VoiceMixer::fade_stopped(bool wave_tail) {
         const uint8_t idx = active[k];
         if (voices[idx].active) continue; // ещё звучит
         VoiceRamp& r = ramp[idx];
-        if (wave_tail && r.last_output != 0 && (r.gain_l != 0 || r.gain_r != 0) && r.wave_remaining == 0 &&
-            r.tail_remaining == 0) {
-            r.wave_remaining = static_cast<uint8_t>(ramp_samples);
+        if (wave_tail && r.last_output != 0 && (r.gain_l != 0 || r.gain_r != 0) && r.wave_remaining == 0 && r.tail_remaining == 0) {
+            r.wave_remaining    = static_cast<uint8_t>(ramp_samples);
             r.tail_start_gain_l = r.gain_l;
             r.tail_start_gain_r = r.gain_r;
-            r.gain_l = 0;
-            r.gain_r = 0;
+            r.gain_l            = 0;
+            r.gain_r            = 0;
             ++wave_tail_started;
         } else {
             fade_out(r);
@@ -121,18 +120,18 @@ void VoiceMixer::ramp_to_gains(uint8_t slot) {
         // нечего. Стык закрывает разгон новой ноты.
         if (r.wave_remaining != 0) ++wave_tail_cut_note;
         r.wave_remaining = 0;
-        r.gain_l = 0;
-        r.gain_r = 0;
-        r.restart = false;
+        r.gain_l         = 0;
+        r.gain_r         = 0;
+        r.restart        = false;
     }
     const int32_t target_l = gain_l_q24[slot];
     const int32_t target_r = gain_r_q24[slot];
     if (ramp_samples == 0 || (r.gain_l == target_l && r.gain_r == target_r)) {
         r.ramp_remaining = 0; // ничего не изменилось - сглаживать нечего
     } else {
-        const int32_t n = static_cast<int32_t>(ramp_samples);
-        r.step_l = (target_l - r.gain_l) / n;
-        r.step_r = (target_r - r.gain_r) / n;
+        const int32_t n  = static_cast<int32_t>(ramp_samples);
+        r.step_l         = (target_l - r.gain_l) / n;
+        r.step_r         = (target_r - r.gain_r) / n;
         r.ramp_remaining = static_cast<uint8_t>(n);
     }
 }
@@ -144,7 +143,7 @@ SOUNDSINTH_HOT_PATH_ATTR("vm_fade_before_missing")
 void VoiceMixer::fade_before_missing(uint8_t slot) {
     VoiceRamp& r = ramp[slot];
     if (!voices[slot].active && r.wave_remaining != 0) {
-        r.fading_sample = r.last_output;
+        r.fading_sample  = r.last_output;
         r.tail_remaining = r.wave_remaining;
         r.wave_remaining = 0;
     } else if (r.last_output != 0 && (r.gain_l != 0 || r.gain_r != 0)) {
@@ -174,23 +173,23 @@ void VoiceMixer::move(uint8_t from, uint8_t to) {
     // прежнего хозяина слота - щелчок на каждом уводе в фон. Коэффициенты -
     // тоже: фильтр с открытым срезом держит прежние, и у слота они были бы
     // чужими.
-    filter_state[to] = filter_state[from];
+    filter_state[to]  = filter_state[from];
     filter_coeffs[to] = filter_coeffs[from];
     // Сглаживание громкости переезжает с голосом, последнее значение на канале
     // не гасится - голос не оборван, а звучит в слоте. Иначе на каждом уводе в
     // фон слышен удар (гашение плюс разгон с нуля).
-    VoiceRamp& src = ramp[from];
-    VoiceRamp& dst = ramp[to];
-    dst.gain_l = src.gain_l;
-    dst.gain_r = src.gain_r;
-    dst.step_l = src.step_l;
-    dst.step_r = src.step_r;
+    VoiceRamp& src     = ramp[from];
+    VoiceRamp& dst     = ramp[to];
+    dst.gain_l         = src.gain_l;
+    dst.gain_r         = src.gain_r;
+    dst.step_l         = src.step_l;
+    dst.step_r         = src.step_r;
     dst.ramp_remaining = src.ramp_remaining;
-    dst.last_output = src.last_output;
+    dst.last_output    = src.last_output;
     if (dst.wave_remaining != 0) ++wave_tail_cut_move;
     dst.wave_remaining = 0;
-    dst.restart = false;
-    src.last_output = 0;
+    dst.restart        = false;
+    src.last_output    = 0;
 }
 
 // Гаснущий слот обязан попасть в сведение, иначе затухание оборвётся на
@@ -213,8 +212,7 @@ void VoiceMixer::collect_tails() {
 
 // Горячий путь каждого батча.
 SOUNDSINTH_HOT_PATH_ATTR("vm_mix")
-void VoiceMixer::mix(memory::PsramStore& psram, int32_t* mix_l, int32_t* mix_r, uint32_t i, uint32_t batch,
-                     uint32_t reverb_frames) {
+void VoiceMixer::mix(memory::PsramStore& psram, int32_t* mix_l, int32_t* mix_r, uint32_t i, uint32_t batch, uint32_t reverb_frames) {
     // Голос снаружи, отсчёт внутри: чтения одного голоса из PSRAM идут подряд,
     // у кэша XIP меньше конфликтных промахов. Сумма та же побитово.
     constexpr uint32_t kVoiceRenderChunk = SOUNDSINTH_AUDIO_BUFFER_FRAMES; // обычный батч и так не длиннее
@@ -223,10 +221,9 @@ void VoiceMixer::mix(memory::PsramStore& psram, int32_t* mix_l, int32_t* mix_r, 
     const uint16_t total = static_cast<uint16_t>(active_count) + tail_count;
     for (uint16_t k = 0; k < total; ++k) {
         const uint8_t idx = (k < active_count) ? active[k] : tails[k - active_count];
-        Voice& v = voices[idx];
+        Voice& v          = voices[idx];
         // Мёртвый голос пропускаем, но не пока он догашивается.
-        if (!v.active && ramp[idx].tail_remaining == 0 && ramp[idx].wave_remaining == 0 &&
-            ramp[idx].last_output == 0) {
+        if (!v.active && ramp[idx].tail_remaining == 0 && ramp[idx].wave_remaining == 0 && ramp[idx].last_output == 0) {
             continue;
         }
 
@@ -240,17 +237,16 @@ void VoiceMixer::mix(memory::PsramStore& psram, int32_t* mix_l, int32_t* mix_r, 
         auto mix_tail = [&](uint32_t from) {
             if (r.tail_remaining == 0 || from >= batch) return;
             const uint32_t room = batch - from;
-            const uint32_t n = (r.tail_remaining < room) ? r.tail_remaining : room;
+            const uint32_t n    = (r.tail_remaining < room) ? r.tail_remaining : room;
             for (uint32_t j = 0; j < n; ++j) {
                 const int32_t c = tail_curve_q15(r.tail_remaining - j - 1, ramp_samples);
-                mix_native_sample(r.fading_sample, scale_by_curve_q15(r.tail_start_gain_l, c),
-                                  scale_by_curve_q15(r.tail_start_gain_r, c), &out_l[i + from + j],
+                mix_native_sample(r.fading_sample, scale_by_curve_q15(r.tail_start_gain_l, c), scale_by_curve_q15(r.tail_start_gain_r, c), &out_l[i + from + j],
                                   &out_r[i + from + j]);
             }
             r.tail_remaining = static_cast<uint8_t>(r.tail_remaining - n);
             if (r.tail_remaining == 0) {
                 r.fading_sample = 0;
-                r.last_output = 0;
+                r.last_output   = 0;
             } // отработало, второй раз не начинать
         };
 
@@ -265,26 +261,26 @@ void VoiceMixer::mix(memory::PsramStore& psram, int32_t* mix_l, int32_t* mix_r, 
             // гасился - нота пропадала целиком.
             if (!v.active && wr.wave_remaining != 0) {
                 const uint32_t want = wr.wave_remaining < batch ? wr.wave_remaining : batch;
-                v.active = true;
-                const uint32_t got = voice_render(v, psram, voice_scratch, want);
-                v.active = false;
+                v.active            = true;
+                const uint32_t got  = voice_render(v, psram, voice_scratch, want);
+                v.active            = false;
                 for (uint32_t j = 0; j < got; ++j) {
                     const int32_t c = tail_curve_q15(wr.wave_remaining - j - 1, ramp_samples);
-                    mix_native_sample(voice_scratch[j], scale_by_curve_q15(wr.tail_start_gain_l, c),
-                                      scale_by_curve_q15(wr.tail_start_gain_r, c), &out_l[i + j], &out_r[i + j]);
+                    mix_native_sample(voice_scratch[j], scale_by_curve_q15(wr.tail_start_gain_l, c), scale_by_curve_q15(wr.tail_start_gain_r, c), &out_l[i + j],
+                                      &out_r[i + j]);
                 }
                 if (got > 0) wr.last_output = voice_scratch[got - 1];
                 wr.wave_remaining = static_cast<uint8_t>(wr.wave_remaining - got);
                 if (got < want && wr.wave_remaining != 0) {
                     // Данные кончились посреди гашения: последнее значение волны
                     // гаснет той же кривой с того же места, в этом же батче.
-                    wr.fading_sample = wr.last_output;
+                    wr.fading_sample  = wr.last_output;
                     wr.tail_remaining = wr.wave_remaining;
                     wr.wave_remaining = 0;
                     mix_tail(got);
                 } else if (wr.wave_remaining == 0) {
                     wr.fading_sample = 0;
-                    wr.last_output = 0;
+                    wr.last_output   = 0;
                 }
                 continue; // мёртвый голос
             }
@@ -299,9 +295,7 @@ void VoiceMixer::mix(memory::PsramStore& psram, int32_t* mix_l, int32_t* mix_r, 
         // шины (Q24.8), шина реверберации - в целых единицах int16: дробь
         // снимается делителем, иначе умножение на посыл переполнило бы int32.
         const uint8_t rev_send = reverb_send[idx];
-        const int32_t send_q16 =
-            rev_send ? (((gain_l + gain_r) / (2 << (kGainQ24Bits - kQ16Bits))) * static_cast<int32_t>(rev_send)) / 127
-                     : 0;
+        const int32_t send_q16 = rev_send ? (((gain_l + gain_r) / (2 << (kGainQ24Bits - kQ16Bits))) * static_cast<int32_t>(rev_send)) / 127 : 0;
 
         // Затухание подмешивается параллельно, с начала батча, а не после голоса.
         // Иначе оно работало бы только для мёртвых голосов, а самый частый случай -
@@ -311,13 +305,13 @@ void VoiceMixer::mix(memory::PsramStore& psram, int32_t* mix_l, int32_t* mix_r, 
             uint32_t n = (r.tail_remaining < batch) ? r.tail_remaining : batch;
             for (uint32_t j = 0; j < n; ++j) {
                 const int32_t c = tail_curve_q15(r.tail_remaining - j - 1, ramp_samples);
-                mix_native_sample(r.fading_sample, scale_by_curve_q15(r.tail_start_gain_l, c),
-                                  scale_by_curve_q15(r.tail_start_gain_r, c), &out_l[i + j], &out_r[i + j]);
+                mix_native_sample(r.fading_sample, scale_by_curve_q15(r.tail_start_gain_l, c), scale_by_curve_q15(r.tail_start_gain_r, c), &out_l[i + j],
+                                  &out_r[i + j]);
             }
             r.tail_remaining = static_cast<uint8_t>(r.tail_remaining - n);
             if (r.tail_remaining == 0) {
                 r.fading_sample = 0;
-                r.last_output = 0;
+                r.last_output   = 0;
             } // отработало, второй раз не начинать
         }
 
@@ -343,8 +337,7 @@ void VoiceMixer::mix(memory::PsramStore& psram, int32_t* mix_l, int32_t* mix_r, 
                 int32_t gl = r.gain_l;
                 int32_t gr = r.gain_r;
                 for (uint32_t e = j + n; j < e; ++j) {
-                    mix_native_sample(voice_scratch[j], clamp_ramp_gain(gl, gain_l), clamp_ramp_gain(gr, gain_r),
-                                      &out_l[i + done + j], &out_r[i + done + j]);
+                    mix_native_sample(voice_scratch[j], clamp_ramp_gain(gl, gain_l), clamp_ramp_gain(gr, gain_r), &out_l[i + done + j], &out_r[i + done + j]);
                     gl += r.step_l;
                     gr += r.step_r;
                 }
@@ -362,7 +355,7 @@ void VoiceMixer::mix(memory::PsramStore& psram, int32_t* mix_l, int32_t* mix_r, 
             // Только голоса с посылом; не дальше reverb_frames - иначе запись за буфер.
             if (send_q16 != 0 && i + done < reverb_frames) {
                 const uint32_t base = i + done;
-                uint32_t take = reverb_frames - base;
+                uint32_t take       = reverb_frames - base;
                 if (take > produced) take = produced;
                 int32_t* bus = reverb_bus + base;
                 for (uint32_t e = 0; e < take; ++e) {

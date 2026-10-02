@@ -1,11 +1,16 @@
+// SPDX-License-Identifier: MIT
 #pragma once
+
+// Секции pico-sdk нужны самой TinyUSB: с 0.21.0 порт RP2 объявляет
+// TU_ATTR_FAST_FUNC через __not_in_flash, а его заголовки сама она не
+// включает. Настройка читается до tusb_mcu.h, поэтому место здесь.
+#include "pico/platform/sections.h"
 
 // TinyUSB: только хост, встроенный контроллер RP2350.
 //
 // Каналов DMA не берёт ни одного: драйвер копает байты между буфером и
 // двухпортовой памятью USB своим memcpy, дальше их забирает сам контроллер.
-// Это проверено по исходникам порта - hardware/dma.h там не включается
-// нигде.
+// В порте не включается hardware/dma.h.
 //
 // Операционной системы у стека нет, и это обязательное условие, а не
 // удобство: стек крутится в цикле того ядра, которое ведёт шину.
@@ -21,27 +26,27 @@
 //
 // Трогать стек с Core0 нельзя - ни из задачи, ни из прерывания.
 #if CFG_TUSB_OS != OPT_OS_NONE
-#error "TinyUSB: нужен OPT_OS_NONE - иначе стек гасит шинные прерывания (TINYUSB_OPT_OS в CMakeLists)"
+#error "TinyUSB: OPT_OS_NONE required - otherwise the stack masks bus interrupts (TINYUSB_OPT_OS in CMakeLists)"
 #endif
 
 #define CFG_TUSB_DEBUG 0
 
-#define CFG_TUH_ENABLED 1
-#define CFG_TUD_ENABLED 0
+#define CFG_TUH_ENABLED     1
+#define CFG_TUD_ENABLED     0
 #define CFG_TUH_RPI_PIO_USB 0 // встроенный контроллер, не битбанг на PIO
-#define CFG_TUH_MAX_SPEED OPT_MODE_FULL_SPEED
+#define CFG_TUH_MAX_SPEED   OPT_MODE_FULL_SPEED
 
 // Концентратор: у платы один порт, а устройств просят четыре - клавиатура,
 // мышь, джойстик, флешка. Без него в разъём входит ровно одно.
-#define CFG_TUH_HUB 1
+#define CFG_TUH_HUB        1
 #define CFG_TUH_DEVICE_MAX 5 // сам концентратор адреса не занимает
 
-#define CFG_TUH_HID 4 // у клавиатуры бывает два интерфейса, у джойстика один
-#define CFG_TUH_HID_EPIN_BUFSIZE 64
+#define CFG_TUH_HID               4 // у клавиатуры бывает два интерфейса, у джойстика один
+#define CFG_TUH_HID_EPIN_BUFSIZE  64
 #define CFG_TUH_HID_EPOUT_BUFSIZE 64
 
-#define CFG_TUH_MSC 1
-#define CFG_TUH_CDC 0
+#define CFG_TUH_MSC    1
+#define CFG_TUH_CDC    0
 #define CFG_TUH_VENDOR 0
 
 // Дескрипторы устройства целиком: у флешек с несколькими интерфейсами

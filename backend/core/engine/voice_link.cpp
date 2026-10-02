@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 #include "core/engine/voice_link.h"
 
 #include "platform/hot_path.h"
@@ -7,8 +8,8 @@ namespace soundsinth::engine {
 // Команды, которые случаются на ноте и на тике, а не на каждый голос: тела
 // во флеше, чтобы не раздувать горячие функции тика в SRAM.
 void VoiceLink::trigger(uint8_t slot, const soundsinth::model::SampleDescriptor& sample, uint16_t first_page, uint8_t note,
-    soundsinth::model::FrequencyModel frequency_model, uint32_t start_offset,
-    soundsinth::model::QuirkFlags quirks, uint16_t checkpoint_first_page) {
+                        soundsinth::model::FrequencyModel frequency_model, uint32_t start_offset, soundsinth::model::QuirkFlags quirks,
+                        uint16_t checkpoint_first_page) {
     (void)note;
     (void)frequency_model;
     // Начало ноты разбирает тик: вниз уходит отсчёт, годность петли и
@@ -22,27 +23,27 @@ void VoiceLink::trigger(uint8_t slot, const soundsinth::model::SampleDescriptor&
     // второй - если сэмпл не кончился), дробная часть с нуля.
     sounding_[slot] = start.sounds;
     if (start.sounds) {
-        sounding_loop_[slot] = start.loop_ok;
+        sounding_loop_[slot]       = start.loop_ok;
         sounding_loop_start_[slot] = sample.loop_start;
-        sounding_loop_end_[slot] = start.loop_ok ? sample.loop_end : sample.length_samples;
-        uint32_t decoded = start.offset + 1u;
+        sounding_loop_end_[slot]   = start.loop_ok ? sample.loop_end : sample.length_samples;
+        uint32_t decoded           = start.offset + 1u;
         if (start.loop_ok && decoded >= sounding_loop_end_[slot]) decoded = sample.loop_start;
         if (decoded < sample.length_samples) ++decoded;
         sounding_decoded_[slot] = decoded;
-        sounding_frac_[slot] = 0;
+        sounding_frac_[slot]    = 0;
     }
-    step_[slot] = 0;
-    enc_[slot] = sample.resident_encoding;
-    pitch_memo_[slot] = 0;
+    step_[slot]          = 0;
+    enc_[slot]           = sample.resident_encoding;
+    pitch_memo_[slot]    = 0;
     pitch_memo_c5_[slot] = 0;
 
     VoiceCommand cmd{VoiceOp::Trigger, slot, 0, 0, {}};
     if (start.sounds) cmd.flags |= kTriggerSounds;
     if (start.loop_ok) cmd.flags |= kTriggerLoop;
     if (voice_hermite(sample, quirks)) cmd.flags |= kTriggerHermite;
-    cmd.u.trig.sample = &sample;
-    cmd.u.trig.offset = start.offset;
-    cmd.u.trig.first_page = first_page;
+    cmd.u.trig.sample                = &sample;
+    cmd.u.trig.offset                = start.offset;
+    cmd.u.trig.first_page            = first_page;
     cmd.u.trig.checkpoint_first_page = checkpoint_first_page;
     push(cmd);
 }
@@ -52,19 +53,19 @@ void VoiceLink::move(uint8_t from, uint8_t to) {
     // приехавшему голосу, дальше состояние и сглаживание переезжают целиком.
     model_tail(to);
     filter_on_[to] = filter_on_[from]; // фильтр переезжает вместе с голосом
-    restart_[to] = false;              // переехавший голос уже разогнан, как и у микшера
+    restart_[to]   = false;            // переехавший голос уже разогнан, как и у микшера
     // Голос переезжает целиком - вместе с моделью его звучания.
-    sounding_[to] = sounding_[from];
-    sounding_frac_[to] = sounding_frac_[from];
-    sounding_decoded_[to] = sounding_decoded_[from];
-    sounding_loop_[to] = sounding_loop_[from];
+    sounding_[to]            = sounding_[from];
+    sounding_frac_[to]       = sounding_frac_[from];
+    sounding_decoded_[to]    = sounding_decoded_[from];
+    sounding_loop_[to]       = sounding_loop_[from];
     sounding_loop_start_[to] = sounding_loop_start_[from];
-    sounding_loop_end_[to] = sounding_loop_end_[from];
+    sounding_loop_end_[to]   = sounding_loop_end_[from];
     // Исходный слот не гасится: микшер копирует голос, а не переносит, и
     // voices[from] остаётся звучащим до следующего запуска на этом слоте.
-    step_[to] = step_[from];
-    enc_[to] = enc_[from];
-    pitch_memo_[to] = pitch_memo_[from];
+    step_[to]          = step_[from];
+    enc_[to]           = enc_[from];
+    pitch_memo_[to]    = pitch_memo_[from];
     pitch_memo_c5_[to] = pitch_memo_c5_[from];
     VoiceCommand cmd{VoiceOp::Move, from, to, 0, {}};
     push(cmd);
@@ -94,8 +95,7 @@ void VoiceLink::fade_stopped(bool wave_tail) {
 
 void VoiceLink::set_filter(uint8_t slot, const FilterCoeffs& c) {
     filter_on_[slot] = c.active;
-    VoiceCommand cmd{VoiceOp::SetFilter, slot, static_cast<uint8_t>(c.active ? 1 : 0),
-            static_cast<uint8_t>(c.fir121 ? 1 : 0), {}};
+    VoiceCommand cmd{VoiceOp::SetFilter, slot, static_cast<uint8_t>(c.active ? 1 : 0), static_cast<uint8_t>(c.fir121 ? 1 : 0), {}};
     cmd.u.filter.a0 = c.a0;
     cmd.u.filter.b0 = c.b0;
     cmd.u.filter.b1 = c.b1;
@@ -107,7 +107,7 @@ void VoiceLink::set_filter(uint8_t slot, const FilterCoeffs& c) {
 // список этого тика приходит после него.
 SOUNDSINTH_HOT_PATH_ATTR("vl_flush")
 void VoiceLink::flush() {
-    VoiceMixer& mixer = *mixer_;
+    VoiceMixer& mixer         = *mixer_;
     memory::PsramStore& psram = *psram_;
     queue_.drain([&](const VoiceCommand& cmd) {
         switch (cmd.op) {
@@ -116,11 +116,11 @@ void VoiceLink::flush() {
                 break;
             case VoiceOp::Trigger: {
                 TriggerStart start;
-                start.sounds = (cmd.flags & kTriggerSounds) != 0;
+                start.sounds  = (cmd.flags & kTriggerSounds) != 0;
                 start.loop_ok = (cmd.flags & kTriggerLoop) != 0;
-                start.offset = cmd.u.trig.offset;
-                mixer.trigger(cmd.slot, psram, *cmd.u.trig.sample, cmd.u.trig.first_page,
-                              cmd.u.trig.checkpoint_first_page, start, (cmd.flags & kTriggerHermite) != 0);
+                start.offset  = cmd.u.trig.offset;
+                mixer.trigger(cmd.slot, psram, *cmd.u.trig.sample, cmd.u.trig.first_page, cmd.u.trig.checkpoint_first_page, start,
+                              (cmd.flags & kTriggerHermite) != 0);
                 break;
             }
             case VoiceOp::SetStep:
@@ -150,9 +150,9 @@ void VoiceLink::flush() {
                 break;
             case VoiceOp::SetFilter: {
                 FilterCoeffs c;
-                c.a0 = cmd.u.filter.a0;
-                c.b0 = cmd.u.filter.b0;
-                c.b1 = cmd.u.filter.b1;
+                c.a0     = cmd.u.filter.a0;
+                c.b0     = cmd.u.filter.b0;
+                c.b1     = cmd.u.filter.b1;
                 c.fir121 = cmd.flags != 0;
                 c.active = cmd.arg != 0;
                 mixer.set_filter(cmd.slot, c);

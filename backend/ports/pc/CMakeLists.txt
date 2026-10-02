@@ -24,7 +24,15 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 # репозитория (не внутри build/) - то же самое место, что
 # использовалось до переноса, чтобы уже скачанные SDL2/FreeRTOS-Kernel не
 # тянулись заново.
-set(FETCHCONTENT_BASE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../../../.deps CACHE PATH "" FORCE)
+#
+# Каталог свой у каждой разрядности: 32-битная сборка (ею память считается
+# как на плате - указатель 4 байта) не должна подхватывать объектные файлы
+# 64-битной. Общий каталог на две конфигурации уже стоил дня поисков.
+if(CMAKE_SIZEOF_VOID_P EQUAL 4)
+    set(FETCHCONTENT_BASE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../../../.deps32 CACHE PATH "" FORCE)
+else()
+    set(FETCHCONTENT_BASE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../../../.deps CACHE PATH "" FORCE)
+endif()
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -91,6 +99,8 @@ add_library(platform_pc STATIC
     fatfs_diskio.cpp
     fatfs_byte_source.cpp
     usb_host_stub.cpp
+    config_flash_stub.cpp
+    boot_mode_stub.cpp
 )
 
 target_include_directories(platform_pc PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/..)

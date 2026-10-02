@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 #pragma once
 
 // Отчёты USB HID -> состояние эмулируемых устройств ZX.
@@ -13,7 +14,7 @@ namespace devices::hid {
 
 // --- Модификаторы ---
 //
-// ЛЕВЫЙ Shift не настраивается никогда: он и есть Shift, то есть выбор
+// Левый Shift не настраивается никогда: он и есть Shift, то есть выбор
 // верхнего знака клавиши. Если верхней записи нет (буквы, стрелки), он
 // становится CAPS SHIFT.
 //
@@ -23,10 +24,10 @@ enum class ModRole : uint8_t { None, CapsShift, SymbolShift };
 
 struct ModifierRoles {
     ModRole right_shift = ModRole::CapsShift;
-    ModRole left_ctrl = ModRole::SymbolShift;
-    ModRole right_ctrl = ModRole::SymbolShift;
-    ModRole left_alt = ModRole::None;
-    ModRole right_alt = ModRole::None;
+    ModRole left_ctrl   = ModRole::SymbolShift;
+    ModRole right_ctrl  = ModRole::SymbolShift;
+    ModRole left_alt    = ModRole::None;
+    ModRole right_alt   = ModRole::None;
 };
 
 // Умолчание нашей раскладки.
@@ -35,11 +36,26 @@ ModifierRoles usb_map_default_modifiers();
 void usb_map_set_modifiers(const ModifierRoles& roles);
 ModifierRoles usb_map_modifiers();
 
+// Нажатий по кодам, которых нет в раскладке (F1..F10, Pause, PrintScreen,
+// Menu, часть цифровой клавиатуры). Для пользователя это "клавиша не
+// работает"; число отличает это от промаха дескриптора и потери отчёта.
+uint32_t usb_map_unmapped_presses();
+
 // Клавиатура: загрузочная раскладка - байт модификаторов, байт запаса,
 // шесть кодов. От карты нужен только номер отчёта, если устройство шлёт
 // его первым байтом. Матрица ставится целиком: отпускания приходят тем же
 // отчётом, без кода.
 void usb_map_keyboard(const ReportMap& map, const uint8_t* report, uint16_t len);
+
+// Мышь: скорость в четвертях (4 - один к одному) и перестановка левой с
+// правой. Приращение умножается до обрезки байтом: у Kempston счётчик
+// восьмиразрядный, и быстрое движение при большой скорости упирается в
+// него, а не заворачивается.
+struct MouseTuning {
+    uint8_t speed     = 4;
+    bool swap_buttons = false;
+};
+void usb_map_set_mouse(const MouseTuning& t);
 
 // Мышь: приращения X и Y и кнопки по карте.
 void usb_map_mouse(const ReportMap& map, const uint8_t* report, uint16_t len);

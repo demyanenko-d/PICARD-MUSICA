@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 // Повторная выдача строк .mid (midi::replay_*).
 //
 // У .mid упакованных паттернов нет: строки делает конвертер из файла по ходу
@@ -36,15 +37,14 @@ std::vector<uint8_t> read_whole_file(const char* path) {
 // EffectCommand свой конструктор - значит дополнение не обнуляется, и
 // побайтное сравнение ловило бы мусор.
 bool same_cell(const PatternCell& a, const PatternCell& b) {
-    return a.instrument == b.instrument && a.note == b.note && a.volume.type == b.volume.type &&
-           a.volume.param == b.volume.param && a.effect.type == b.effect.type && a.effect.rate == b.effect.rate &&
-           a.effect.param == b.effect.param;
+    return a.instrument == b.instrument && a.note == b.note && a.volume.type == b.volume.type && a.volume.param == b.volume.param &&
+           a.effect.type == b.effect.type && a.effect.rate == b.effect.rate && a.effect.param == b.effect.param;
 }
 
 void check_replay_is_repeatable(const bank::Bank& bank, const char* path) {
     const std::vector<uint8_t> bytes = read_whole_file(path);
     if (bytes.empty()) {
-        std::printf("  ПРОПУСК (файл не найден): %s\n", path);
+        std::printf("  SKIP (file not found): %s\n", path);
         return;
     }
 
@@ -54,7 +54,7 @@ void check_replay_is_repeatable(const bank::Bank& bank, const char* path) {
     formats::MemoryByteSource src(bytes.data(), static_cast<uint32_t>(bytes.size()));
     const char* err = nullptr;
     if (!formats::midi::load(src.as_byte_source(), static_cast<uint32_t>(bytes.size()), mem, bank, song, &err)) {
-        std::printf("  ПРОПУСК (не загрузился: %s): %s\n", err ? err : "без причины", path);
+        std::printf("  SKIP (did not load: %s): %s\n", err ? err : "no reason", path);
         memory::track_memory_destroy(mem);
         return;
     }
@@ -82,7 +82,8 @@ void check_replay_is_repeatable(const bank::Bank& bank, const char* path) {
             CHECK(false); // строки кончились раньше времени
             break;
         }
-        for (uint8_t c = 0; c < channels; ++c) first.push_back(cells[c]);
+        for (uint8_t c = 0; c < channels; ++c)
+            first.push_back(cells[c]);
     }
     CHECK(formats::midi::replay_next_row() == nullptr);
 
@@ -109,9 +110,9 @@ void check_replay_is_repeatable(const bank::Bank& bank, const char* path) {
 
     CHECK_EQ(bad_rows, 0u);
     CHECK_EQ(bad_cells, 0u);
-    std::printf("  %s: строк %u, каналов %u, длительность %u с, расхождений %u%s\n", path, rows_in_patterns, channels,
-                formats::midi::last_total_frames() / 44100u, bad_cells, bad_rows ? "" : " - повтор совпал");
-    if (bad_rows != 0) std::printf("    первая разошедшаяся строка: %u\n", first_bad_row);
+    std::printf("  %s: rows %u, channels %u, duration %u s, differences %u%s\n", path, rows_in_patterns, channels, formats::midi::last_total_frames() / 44100u,
+                bad_cells, bad_rows ? "" : " - the repeat matched");
+    if (bad_rows != 0) std::printf("    first row that differs: %u\n", first_bad_row);
 
     memory::track_memory_destroy(mem);
 }
@@ -120,13 +121,13 @@ void test_replay_is_repeatable() {
     std::printf("test_replay_is_repeatable\n");
     const std::vector<uint8_t> blob = read_whole_file("release/banks/GeneralUser-GS.ssb");
     if (blob.empty()) {
-        std::printf("  ПРОПУСК: банк release/banks/GeneralUser-GS.ssb не найден\n");
+        std::printf("  SKIP: bank release/banks/GeneralUser-GS.ssb not found\n");
         return;
     }
     bank::Bank bank;
     const char* berr = nullptr;
     if (!bank::bank_open(blob.data(), static_cast<uint32_t>(blob.size()), bank, &berr)) {
-        std::printf("  ПРОПУСК: банк не принят (%s)\n", berr ? berr : "без причины");
+        std::printf("  SKIP: bank rejected (%s)\n", berr ? berr : "no reason");
         return;
     }
 

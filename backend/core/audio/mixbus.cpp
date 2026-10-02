@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 #include "core/audio/mixbus.h"
 
 #include <cstring>
@@ -14,20 +15,20 @@ namespace soundsinth::mixbus {
 void MixBus::set_soft_knee(int32_t knee) {
     if (knee < 1) knee = 1;
     if (knee > 32000) knee = 32000;
-    soft_knee_ = knee;
+    soft_knee_            = knee;
     const uint32_t span_u = static_cast<uint32_t>(32767 - knee);
-    soft_span_sq_ = span_u * span_u;   // до 32766^2, в uint32 влезает
+    soft_span_sq_         = span_u * span_u; // до 32766^2, в uint32 влезает
 }
 
 inline int32_t MixBus::soft_clip(int32_t x) const {
-    const int32_t a = x < 0 ? -x : x;   // |x| до 8.4 млн (запас шины), переполнения нет
+    const int32_t a = x < 0 ? -x : x; // |x| до 8.4 млн (запас шины), переполнения нет
     if (a <= soft_knee_) return x;
     const uint32_t over = static_cast<uint32_t>(a - soft_knee_);
     // Частное усекается вниз, выход - вверх меньше чем на единицу; не выше
     // 32767: при частном 0 ровно порог + запас. С ростом входа частное не
     // растёт - монотонно.
     const uint32_t span = static_cast<uint32_t>(32767 - soft_knee_);
-    const int32_t y = 32767 - static_cast<int32_t>(soft_span_sq_ / (span + over));
+    const int32_t y     = 32767 - static_cast<int32_t>(soft_span_sq_ / (span + over));
     return x < 0 ? -y : y;
 }
 
@@ -64,15 +65,14 @@ void MixBus::apply_limiter(uint32_t n_frames) {
         // законен, +32768 нет. ~x = -x-1 даёт ровно это одной командой.
         // Иначе законный -32768 считался бы перегрузом, и лимитер трогал
         // бы неклипующие файлы (на GeneralUser - шесть рендеров из 32).
-        const int32_t al = l < 0 ? ~l : l;
-        const int32_t ar = r < 0 ? ~r : r;
+        const int32_t al   = l < 0 ? ~l : l;
+        const int32_t ar   = r < 0 ? ~r : r;
         const int32_t peak = al > ar ? al : ar;
 
         // Компрессор: поджимает всё громче порога на долю AMOUNT. Полку
         // не гарантирует, за это отвечает лимитер ниже.
         if (peak > comp_threshold_) {
-            const int32_t q = static_cast<int32_t>(
-                (static_cast<uint32_t>(comp_threshold_) << 15) / static_cast<uint32_t>(peak));
+            const int32_t q      = static_cast<int32_t>((static_cast<uint32_t>(comp_threshold_) << 15) / static_cast<uint32_t>(peak));
             const int32_t target = kUnityGain - (((kUnityGain - q) * comp_amount_) >> 15);
             if (target < gain_) gain_ = target;
         }
@@ -85,9 +85,7 @@ void MixBus::apply_limiter(uint32_t n_frames) {
                 // Деление 32-битное беззнаковое: потолок<<15 = 1073709056
                 // влезает в uint32. С int64 компилятор вызывает
                 // __aeabi_ldivmod вместо одной UDIV.
-                gain_ = static_cast<int32_t>(
-                    (static_cast<uint32_t>(SOUNDSINTH_MIDI_LIMITER_CEILING) << 15) /
-                    static_cast<uint32_t>(peak));
+                gain_ = static_cast<int32_t>((static_cast<uint32_t>(SOUNDSINTH_MIDI_LIMITER_CEILING) << 15) / static_cast<uint32_t>(peak));
             }
         }
 
@@ -101,9 +99,9 @@ void MixBus::apply_limiter(uint32_t n_frames) {
             // Единица снизу обязательна: при недостаче меньше 2^N сдвиг
             // даёт ноль, усиление навсегда остаётся ниже единицы, каждый
             // кадр умножается и попадает в limited_frames.
-            const int32_t lack = kUnityGain - gain_;
-            const int32_t step = lack >> SOUNDSINTH_MIDI_LIMITER_RELEASE_SHIFT;
-            gain_ += step > 0 ? step : 1;
+            const int32_t lack  = kUnityGain - gain_;
+            const int32_t step  = lack >> SOUNDSINTH_MIDI_LIMITER_RELEASE_SHIFT;
+            gain_              += step > 0 ? step : 1;
         }
     }
 }
@@ -119,7 +117,7 @@ constexpr int32_t round_q24_8(int32_t x) {
 SOUNDSINTH_NOINLINE void MixBus::count_jump(int32_t dl, int32_t dr) {
     const int32_t al = dl < 0 ? -dl : dl;
     const int32_t ar = dr < 0 ? -dr : dr;
-    const int32_t d = al > ar ? al : ar;
+    const int32_t d  = al > ar ? al : ar;
     ++jumps_;
     if (static_cast<uint32_t>(d) > max_jump_) max_jump_ = static_cast<uint32_t>(d);
 }
@@ -137,9 +135,9 @@ SOUNDSINTH_NOINLINE void MixBus::soft_clip_frame(int32_t l, int32_t r, int32_t& 
 template <bool kRound, bool kSoft>
 void MixBus::write_frames(int16_t* dst_interleaved, uint32_t n_frames) {
     const uint32_t knee = static_cast<uint32_t>(soft_knee_);
-    int32_t prev_l = prev_l_;
-    int32_t prev_r = prev_r_;
-    uint32_t run = run_;
+    int32_t prev_l      = prev_l_;
+    int32_t prev_r      = prev_r_;
+    uint32_t run        = run_;
     for (uint32_t i = 0; i < n_frames; ++i) {
         int32_t l = mix_l_[i];
         int32_t r = mix_r_[i];
@@ -153,7 +151,7 @@ void MixBus::write_frames(int16_t* dst_interleaved, uint32_t n_frames) {
         if constexpr (kSoft) {
             // Мягкое насыщение - вместо полки (set_soft_clip). Полка считается
             // до него: сколько раз сумма уходила за шкалу.
-            over = static_cast<uint32_t>(l + 32768) > 65535u || static_cast<uint32_t>(r + 32768) > 65535u;
+            over  = static_cast<uint32_t>(l + 32768) > 65535u || static_cast<uint32_t>(r + 32768) > 65535u;
             out_l = l;
             out_r = r;
             if (static_cast<uint32_t>(l) + knee > 2u * knee || static_cast<uint32_t>(r) + knee > 2u * knee) {
@@ -162,7 +160,7 @@ void MixBus::write_frames(int16_t* dst_interleaved, uint32_t n_frames) {
         } else {
             out_l = sat_s16(l);
             out_r = sat_s16(r);
-            over = ((out_l ^ l) | (out_r ^ r)) != 0;
+            over  = ((out_l ^ l) | (out_r ^ r)) != 0;
         }
         // Полка считается по кадру: важно, сколько подряд звук стоит на шкале
         // (одиночный отсчёт не слышен, полка в миллисекунды слышна).
@@ -172,8 +170,8 @@ void MixBus::write_frames(int16_t* dst_interleaved, uint32_t n_frames) {
         } else {
             run = 0;
         }
-        const int32_t dl = out_l - prev_l;
-        const int32_t dr = out_r - prev_r;
+        const int32_t dl         = out_l - prev_l;
+        const int32_t dr         = out_r - prev_r;
         constexpr uint32_t kJump = static_cast<uint32_t>(kJumpThreshold);
         if (static_cast<uint32_t>(dl) + kJump > 2u * kJump || static_cast<uint32_t>(dr) + kJump > 2u * kJump) {
             count_jump(dl, dr);
@@ -181,13 +179,12 @@ void MixBus::write_frames(int16_t* dst_interleaved, uint32_t n_frames) {
         prev_l = out_l;
         prev_r = out_r;
         // Кадр одной записью слова.
-        const uint32_t frame =
-            static_cast<uint16_t>(out_l) | (static_cast<uint32_t>(static_cast<uint16_t>(out_r)) << 16);
+        const uint32_t frame = static_cast<uint16_t>(out_l) | (static_cast<uint32_t>(static_cast<uint16_t>(out_r)) << 16);
         std::memcpy(dst_interleaved + i * 2, &frame, sizeof(frame));
     }
     prev_l_ = prev_l;
     prev_r_ = prev_r;
-    run_ = run;
+    run_    = run;
 }
 
 void MixBus::render(int16_t* dst_interleaved, uint32_t n_frames) {
@@ -237,12 +234,15 @@ void MixBus::render(int16_t* dst_interleaved, uint32_t n_frames) {
 // хвоста голоса: без изломов на концах. Счёт затухания и разрывов уже
 // сделан по кадрам до неё.
 void MixBus::apply_fade(int16_t* dst_interleaved, uint32_t n_frames) {
-    // t^2 (3K - 2t) при t = K = 256 - это 2^24, сдвиг на 9 даёт Q15. При
-    // другом K кривая начинается ступенькой или заворачивает int16.
-    static_assert(kFadeFrames == 256, "сдвиг кривой затухания посчитан для 256 кадров");
+    // t^2 (3K - 2t) при t = K равно K^3, и чтобы это дало ровно Q15, делить
+    // надо на K^3/32768. Деление, а не сдвиг: K больше не степень двойки.
+    // Считается вне цикла отсчётов и только на кадрах затухания.
+    constexpr int32_t kFadeDiv = static_cast<int32_t>(static_cast<uint64_t>(kFadeFrames) * kFadeFrames * kFadeFrames / 32768u);
+    static_assert(static_cast<uint64_t>(kFadeDiv) * 32768u == static_cast<uint64_t>(kFadeFrames) * kFadeFrames * kFadeFrames,
+                  "the cube of the fade length must divide by 2^15, otherwise the curve never reaches one");
     for (uint32_t i = 0; i < n_frames; ++i) {
-        const int32_t t = fade_pos_ < kFadeFrames ? static_cast<int32_t>(kFadeFrames - fade_pos_) : 0; // 256..0
-        const int32_t g = (t * t * (3 * static_cast<int32_t>(kFadeFrames) - 2 * t)) >> 9;             // Q15
+        const int32_t t            = fade_pos_ < kFadeFrames ? static_cast<int32_t>(kFadeFrames - fade_pos_) : 0; // K..0
+        const int32_t g            = (t * t * (3 * static_cast<int32_t>(kFadeFrames) - 2 * t)) / kFadeDiv;        // Q15
         dst_interleaved[i * 2 + 0] = static_cast<int16_t>((dst_interleaved[i * 2 + 0] * g) >> 15);
         dst_interleaved[i * 2 + 1] = static_cast<int16_t>((dst_interleaved[i * 2 + 1] * g) >> 15);
         if (fade_dir_ > 0) {

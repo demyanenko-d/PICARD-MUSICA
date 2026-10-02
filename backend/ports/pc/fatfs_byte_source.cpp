@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 #include "pc/fatfs_byte_source.h"
 
 #ifdef _WIN32
@@ -38,8 +39,8 @@ ByteSource FatFsByteSource::as_byte_source() {
 }
 
 uint32_t FatFsByteSource::read_fn(void* self, void* dst, uint32_t n) {
-    auto* src = static_cast<FatFsByteSource*>(self);
-    UINT read = 0;
+    auto* src         = static_cast<FatFsByteSource*>(self);
+    UINT read         = 0;
     const FRESULT res = f_read(static_cast<FIL*>(src->file_), dst, n, &read);
     return res == FR_OK ? static_cast<uint32_t>(read) : 0;
 }

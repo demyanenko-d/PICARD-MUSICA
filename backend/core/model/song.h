@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 #pragma once
 
 #include <cstdint>
@@ -11,31 +12,32 @@ namespace soundsinth::model {
 
 // Специальные значения PatternCell::note (вместо номера ноты 0..119).
 inline constexpr uint8_t kNoteNone = 0xFF;
-inline constexpr uint8_t kNoteOff = 0xFE;   // отпускание ноты (XM нота 97, IT "===", S3M "^^"): с огибающей громкости - release, без неё - остановка голоса
-inline constexpr uint8_t kNoteFade = 0xFD;  // IT note fade ("~~~")
-inline constexpr uint8_t kNoteCut = 0xFC;   // мгновенная остановка голоса без release и fadeout
+inline constexpr uint8_t kNoteOff = 0xFE; // отпускание ноты (XM нота 97, IT "===", S3M "^^"): с огибающей громкости - release, без неё - остановка голоса
+inline constexpr uint8_t kNoteFade = 0xFD; // IT note fade ("~~~")
+inline constexpr uint8_t kNoteCut  = 0xFC; // мгновенная остановка голоса без release и fadeout
 
 // Нота запускает голос и требует сэмпла; специальные значения выше - нет.
 // Одно правило для движка (effect_dispatch) и планировщика загрузки
 // (sample_prefetch): новое специальное значение их не разведёт.
-static_assert(kNoteCut < kNoteFade && kNoteFade < kNoteOff && kNoteOff < kNoteNone,
-              "специальные значения ноты - от kNoteCut и выше");
-inline constexpr bool is_real_note(uint8_t note) { return note < kNoteCut; }
+static_assert(kNoteCut < kNoteFade && kNoteFade < kNoteOff && kNoteOff < kNoteNone, "special note values start at kNoteCut");
+inline constexpr bool is_real_note(uint8_t note) {
+    return note < kNoteCut;
+}
 
 // Номер инструмента первым: 16 бит без дырки выравнивания, ячейка 8 байт.
 struct PatternCell {
-    uint16_t instrument = 0;  // 0 - нет инструмента, иначе 1-based индекс в Song::instruments
-    uint8_t note = kNoteNone;
+    uint16_t instrument = 0; // 0 - нет инструмента, иначе 1-based индекс в Song::instruments
+    uint8_t note        = kNoteNone;
     VolumeColumnCommand volume;
     EffectCommand effect;
 };
-static_assert(sizeof(PatternCell) == 8, "PatternCell: 8 байт, номер инструмента 16-битный");
+static_assert(sizeof(PatternCell) == 8, "PatternCell: 8 bytes, the instrument number is 16-bit");
 
 // Скорость и темп по умолчанию (тиков на строку, BPM) и нижний предел
 // темпа: Set Tempo меньше 32 - это Set Speed у MOD/XM и слайд темпа у S3M/IT.
-inline constexpr uint8_t kDefaultSpeed = 6;
+inline constexpr uint8_t kDefaultSpeed  = 6;
 inline constexpr uint16_t kDefaultTempo = 125;
-inline constexpr uint16_t kMinTempo = 32;
+inline constexpr uint16_t kMinTempo     = 32;
 
 // Предел каналов паттерна: маска строки у PatternPacker и PatternReader -
 // 64 бита. У форматов пределы свои (IT - 6-битный номер канала, S3M - 32),
@@ -43,9 +45,9 @@ inline constexpr uint16_t kMinTempo = 32;
 inline constexpr uint8_t kMaxPatternChannels = 64;
 
 // Делений шкалы среза фильтра на октаву (Song::filter_units_per_octave).
-inline constexpr uint8_t kFilterUnitsIt = 24;
+inline constexpr uint8_t kFilterUnitsIt         = 24;
 inline constexpr uint8_t kFilterUnitsItExtended = 20;
-inline constexpr uint8_t kFilterUnitsMid = 16;
+inline constexpr uint8_t kFilterUnitsMid        = 16;
 
 // Предел строк паттерна: XM и IT - до 256, MOD и S3M - 64, .mid - 128.
 // XM и IT отвергают больше; у MOD, S3M и .mid число строк постоянное.
@@ -55,18 +57,19 @@ inline constexpr uint16_t kMaxPatternRows = 256;
 // ячеек); psram_offset - смещение блока от начала зоны паттернов. Движок
 // читает по строке.
 struct Pattern {
-    uint16_t row_count = 0;
-    uint8_t channel_count = 0;
+    uint16_t row_count                       = 0;
+    uint8_t channel_count                    = 0;
     static constexpr uint32_t kInvalidOffset = 0xFFFFFFFFu;
-    uint32_t psram_offset = kInvalidOffset;  // невалиден, пока упаковщик не записал паттерн
+    uint32_t psram_offset                    = kInvalidOffset; // невалиден, пока упаковщик не записал паттерн
 };
+static_assert(sizeof(Pattern) == 8, "Pattern: 8 bytes");
 
 enum class FrequencyModel : uint8_t { Amiga, Linear };
 
 // Специальные значения Song::order[i], аналог маркеров S3M/IT 0xFE/0xFF.
 // У MOD/XM таких маркеров нет, представление общее для всех форматов.
-inline constexpr uint16_t kOrderEnd = 0xFFFF;   // конец списка воспроизведения
-inline constexpr uint16_t kOrderSkip = 0xFFFE;  // пропустить позицию (не паттерн, не воспроизводится)
+inline constexpr uint16_t kOrderEnd  = 0xFFFF; // конец списка воспроизведения
+inline constexpr uint16_t kOrderSkip = 0xFFFE; // пропустить позицию (не паттерн, не воспроизводится)
 
 // Промежуточное представление, в которое загрузчики MOD/S3M/XM/IT/.mid
 // переводят файл. Движок работает с ним, не зная формата; различия
@@ -126,13 +129,17 @@ struct Song {
     // Конструктор только ради channel_pan и channel_volume: у массива нет
     // инициализатора, заполняющего все элементы одним ненулевым значением.
     Song() {
-        for (auto& p : channel_pan) p = kPanCenter;
-        for (auto& v : channel_volume) v = kVolumeMax;
+        for (auto& p : channel_pan) {
+            p = kPanCenter;
+        }
+        for (auto& v : channel_volume) {
+            v = kVolumeMax;
+        }
     }
 
     // --- Общее ---
-    char title[32] = {};  // с запасом под самый длинный заголовок (S3M: 28 символов + '\0')
-    uint8_t channel_count = 4;
+    char title[32]         = {}; // с запасом под самый длинный заголовок (S3M: 28 символов + '\0')
+    uint8_t channel_count  = 4;
     uint16_t default_speed = kDefaultSpeed; // тиков на строку
     uint16_t default_tempo = kDefaultTempo; // BPM
     // 0..128 (шкала IT). MOD - всегда 128; S3M - GlobalVolume заголовка (0..64)
@@ -153,8 +160,8 @@ struct Song {
     // nullptr - обычный трек, строки читаются из зоны паттернов.
     // Зовётся из тика секвенсора: строки идут по порядку, назад - только
     // перемоткой, и источник обязан это выдержать.
-    using RowFetch = void (*)(void* user, uint16_t pattern_idx, uint16_t row, PatternCell* out, uint8_t channels);
-    RowFetch row_fetch = nullptr;
+    using RowFetch       = void (*)(void* user, uint16_t pattern_idx, uint16_t row, PatternCell* out, uint8_t channels);
+    RowFetch row_fetch   = nullptr;
     void* row_fetch_user = nullptr;
 
     // Закон панорамирования. Linear - сумма усилений 1 (IT, MOD, S3M).
@@ -184,7 +191,7 @@ struct Song {
     //
     // Трекерам столько нельзя: 5 мс - четверть периода быстрого тремоло, оно
     // смажется. Предел 255: счётчики доезда - байт, больше движок прижимает.
-    uint16_t volume_ramp_samples = 0;
+    uint16_t volume_ramp_samples   = 0;
     FrequencyModel frequency_model = FrequencyModel::Amiga;
 
     // Начальная панорама канала, 0..64, 32 - центр (шкала ChannelState::pan).
@@ -208,12 +215,12 @@ struct Song {
     // --- Order list ---
     // В арене, ровно order_count элементов; значения - индекс в Song::patterns
     // или kOrderEnd/kOrderSkip.
-    const uint16_t* order = nullptr;
-    uint16_t order_count = 0;
-    uint16_t restart_position = 0;  // индекс в order, куда переходить после kOrderEnd
+    const uint16_t* order     = nullptr;
+    uint16_t order_count      = 0;
+    uint16_t restart_position = 0; // индекс в order, куда переходить после kOrderEnd
 
     // --- Паттерны ---
-    Pattern* patterns = nullptr;  // в арене, ровно pattern_count элементов
+    Pattern* patterns      = nullptr; // в арене, ровно pattern_count элементов
     uint16_t pattern_count = 0;
 
     // --- Сэмплы: общий плоский список на Song, не вложенный в Instrument
@@ -221,18 +228,21 @@ struct Song {
     // список в файле; у XM сэмплы инструмента - непрерывный диапазон здесь. У
     // MOD/S3M (инструмент == сэмпл) instrument_count == sample_count и
     // default_sample_index у Instrument[i] равен i. ---
-    SampleDescriptor* samples = nullptr;  // в арене, ровно sample_count элементов
-    uint16_t sample_count = 0;
+    SampleDescriptor* samples = nullptr; // в арене, ровно sample_count элементов
+    uint16_t sample_count     = 0;
 
     // --- Инструменты ---
-    Instrument* instruments = nullptr;  // в арене, ровно instrument_count элементов
+    Instrument* instruments   = nullptr; // в арене, ровно instrument_count элементов
     uint16_t instrument_count = 0;
 
     // --- Квирки воспроизведения (quirks.h): выставляет загрузчик один раз по
     // сигнатуре и версии трекера, движок версию не определяет ---
-    QuirkFlags quirks = 0;
+    QuirkFlags quirks       = 0;
     FlowModeFlags flow_mode = 0;
 };
+// Размеры считаны под 32-битный указатель платы; 32-битная сборка для ПК
+// обязана давать те же числа, иначе её замеры арены врут.
+static_assert(sizeof(void*) != 4 || sizeof(Song) == 256, "Song: 256 bytes with a 32-bit pointer");
 
 // Канал выключен в заголовке файла (Song::channel_muted).
 inline bool channel_is_muted(const Song& song, uint8_t ch) {
@@ -253,12 +263,12 @@ inline bool channel_is_muted(const Song& song, uint8_t ch) {
 // нечего дать на эту ноту (нет инструмента, нота вне keymap, kNoSample);
 // false - сэмпл назван, но индекс за пределами песни. Форматы реагируют
 // по-разному (kQuirkCutOnUnmappedNote, kQuirkCutOnEmptySample).
-inline bool resolve_sample_index(const Song& song, uint16_t instrument_1based, uint8_t note, uint16_t* out_index,
-                                  uint8_t* out_note, bool* out_unmapped = nullptr) {
+inline bool resolve_sample_index(const Song& song, uint16_t instrument_1based, uint8_t note, uint16_t* out_index, uint8_t* out_note,
+                                 bool* out_unmapped = nullptr) {
     if (out_unmapped != nullptr) *out_unmapped = true;
     if (instrument_1based == 0 || instrument_1based > song.instrument_count) return false;
     const Instrument& ins = song.instruments[instrument_1based - 1];
-    uint16_t idx = ins.default_sample_index;
+    uint16_t idx          = ins.default_sample_index;
     uint8_t resolved_note = note;
     if (ins.note_to_sample_ranges != nullptr && note <= kNoteMax) {
         const KeymapRange* range = nullptr;
@@ -267,15 +277,15 @@ inline bool resolve_sample_index(const Song& song, uint16_t instrument_1based, u
             range = &ins.note_to_sample_ranges[r];
         }
         if (range != nullptr) {
-            idx = range->sample_index;
+            idx           = range->sample_index;
             resolved_note = keymap_range_note(*range, note);
         }
     }
     if (idx == kNoSample) return false;                 // размечено как "сэмпла нет"
-    if (out_unmapped != nullptr) *out_unmapped = false;  // сэмпл назван, дальше вопрос в его пригодности
+    if (out_unmapped != nullptr) *out_unmapped = false; // сэмпл назван, дальше вопрос в его пригодности
     if (idx >= song.sample_count) return false;
     *out_index = idx;
-    *out_note = resolved_note;
+    *out_note  = resolved_note;
     return true;
 }
 

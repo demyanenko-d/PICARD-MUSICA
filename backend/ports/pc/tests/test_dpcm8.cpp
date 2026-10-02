@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 #include "testing.h"
 
 #include <cmath>
@@ -28,8 +29,7 @@ void test_roundtrip_bounded_error() {
     std::vector<Dpcm8Checkpoint> checkpoints((kN + kCheckpointIntervalSamples - 1) / kCheckpointIntervalSamples);
     uint32_t checkpoint_count = 0;
     Dpcm8State encode_state;
-    checkpoint_count = encode_block(samples.data(), kN, 0, encode_state, dpcm.data(), checkpoints.data(),
-                                    static_cast<uint32_t>(checkpoints.size()));
+    checkpoint_count = encode_block(samples.data(), kN, 0, encode_state, dpcm.data(), checkpoints.data(), static_cast<uint32_t>(checkpoints.size()));
     CHECK_EQ(checkpoint_count, static_cast<uint32_t>(checkpoints.size()));
 
     std::vector<int16_t> decoded(kN);
@@ -62,8 +62,7 @@ void test_roundtrip_full_scale_high_frequency_much_better_than_flat_dpcm() {
     std::vector<Dpcm8Checkpoint> checkpoints((kN + kCheckpointIntervalSamples - 1) / kCheckpointIntervalSamples);
     uint32_t checkpoint_count = 0;
     Dpcm8State encode_state;
-    checkpoint_count = encode_block(samples.data(), kN, 0, encode_state, dpcm.data(), checkpoints.data(),
-                                    static_cast<uint32_t>(checkpoints.size()));
+    checkpoint_count = encode_block(samples.data(), kN, 0, encode_state, dpcm.data(), checkpoints.data(), static_cast<uint32_t>(checkpoints.size()));
 
     std::vector<int16_t> decoded(kN);
     decode_block(dpcm.data(), kN, Dpcm8State{}, decoded.data());
@@ -94,8 +93,7 @@ void test_checkpoint_resume_matches_full_decode_exactly() {
     std::vector<Dpcm8Checkpoint> checkpoints((kN + kCheckpointIntervalSamples - 1) / kCheckpointIntervalSamples);
     uint32_t checkpoint_count = 0;
     Dpcm8State encode_state;
-    checkpoint_count = encode_block(samples.data(), kN, 0, encode_state, dpcm.data(), checkpoints.data(),
-                                    static_cast<uint32_t>(checkpoints.size()));
+    checkpoint_count = encode_block(samples.data(), kN, 0, encode_state, dpcm.data(), checkpoints.data(), static_cast<uint32_t>(checkpoints.size()));
 
     std::vector<int16_t> full_decoded(kN);
     decode_block(dpcm.data(), kN, Dpcm8State{}, full_decoded.data());
@@ -104,7 +102,7 @@ void test_checkpoint_resume_matches_full_decode_exactly() {
     // Декодирование с этой точки должно точно (оба пути идут через один и тот
     // же код декодера) совпасть с соответствующим срезом полного
     // декодирования с нуля.
-    const uint32_t k = 2;
+    const uint32_t k            = 2;
     const uint32_t start_sample = k * kCheckpointIntervalSamples;
     CHECK(start_sample < kN);
     CHECK(k < checkpoint_count);
@@ -132,7 +130,7 @@ void test_small_residual_uses_finest_scale_lossless() {
     for (int16_t target : {0, 5, -5, 15, -15}) {
         const uint8_t code = quantize_sample(target, state);
         CHECK_EQ(static_cast<uint32_t>(code >> 5), static_cast<uint32_t>(0)); // scale=0
-        Dpcm8State tmp = state;
+        Dpcm8State tmp        = state;
         const int16_t decoded = decode_delta(code, tmp);
         CHECK_EQ(decoded, target); // без потерь
     }
@@ -148,15 +146,15 @@ void test_wide_dynamic_range_handles_near_full_scale_jump() {
     // (+-127): там шаг был бы 127 из требуемых ~40000, здесь 30720.
     const int16_t samples[2] = {-20000, 20000};
     Dpcm8State state;
-    const uint8_t d0 = quantize_sample(samples[0], state);
+    const uint8_t d0     = quantize_sample(samples[0], state);
     const int16_t after0 = decode_delta(d0, state);
     CHECK(after0 > -20700 && after0 < -19700); // остаток -20000 сам в пределах масштаба 7 (2048*-10=-20480) - почти точно
 
-    const uint8_t d1 = quantize_sample(samples[1], state);
+    const uint8_t d1     = quantize_sample(samples[1], state);
     const int16_t after1 = decode_delta(d1, state);
-    CHECK(after1 > after0);       // сдвинулся в сторону цели
-    CHECK(after1 < samples[1]);   // но не долетел за один шаг (сам остаток > максимально представимой дельты)
-    CHECK(after1 > 10000);        // главное: намного ближе к цели, чем дал бы старый диапазон +-127 (там after1 было бы ~-19556)
+    CHECK(after1 > after0); // сдвинулся в сторону цели
+    CHECK(after1 < samples[1]); // но не долетел за один шаг (сам остаток > максимально представимой дельты)
+    CHECK(after1 > 10000); // главное: намного ближе к цели, чем дал бы старый диапазон +-127 (там after1 было бы ~-19556)
 }
 
 } // namespace
@@ -165,7 +163,9 @@ void test_wide_dynamic_range_handles_near_full_scale_jump() {
 // quantize_sample на всех остатках при трёх предикторах - одним хэшем.
 // Любая правка кодировщика меняет байты Dpcm8 в PSRAM и в собранных банках;
 // тест делает её видимой. Новое число - только вместе с решением о правке.
-uint32_t fnv1a(uint32_t h, uint8_t b) { return (h ^ b) * 16777619u; }
+uint32_t fnv1a(uint32_t h, uint8_t b) {
+    return (h ^ b) * 16777619u;
+}
 
 void test_encoder_fingerprint() {
     std::printf("test_dpcm8_encoder_fingerprint\n");
@@ -182,7 +182,8 @@ void test_encoder_fingerprint() {
     soundsinth::dpcm8::Dpcm8State st{};
     soundsinth::dpcm8::encode_block(src.data(), kN, 0, st, out.data(), cp.data(), static_cast<uint32_t>(cp.size()));
     uint32_t h = 2166136261u;
-    for (int8_t b : out) h = fnv1a(h, static_cast<uint8_t>(b));
+    for (int8_t b : out)
+        h = fnv1a(h, static_cast<uint8_t>(b));
     for (const int16_t pred : {int16_t(0), int16_t(30000), int16_t(-30000)}) {
         soundsinth::dpcm8::Dpcm8State s{pred};
         for (int32_t r = -65535; r <= 65535; ++r) {
@@ -191,7 +192,7 @@ void test_encoder_fingerprint() {
             h = fnv1a(h, soundsinth::dpcm8::quantize_sample(static_cast<int16_t>(target), s));
         }
     }
-    std::printf("  хэш 0x%08X\n", h);
+    std::printf("  hash 0x%08X\n", h);
     CHECK_EQ(h, 0xB7F20FC0u);
 }
 

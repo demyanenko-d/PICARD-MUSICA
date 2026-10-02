@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 #pragma once
 
 // Произвольный доступ к потоку Dpcm8 через контрольные точки: O(страниц)
@@ -14,7 +15,7 @@ namespace soundsinth::dpcm8 {
 // block_index*kCheckpointIntervalSamples). Ничего не декодирует, только
 // вычисляет, откуда продолжать.
 struct BlockPosition {
-    uint16_t page = memory::kPageChainEnd;
+    uint16_t page        = memory::kPageChainEnd;
     uint16_t byte_offset = 0;
     Dpcm8State state;
 };
@@ -28,7 +29,6 @@ Dpcm8Checkpoint read_checkpoint(memory::PsramStore& psram, uint16_t checkpoint_f
 // BlockPosition для блока block_index сэмпла с first_page по точке из
 // checkpoint_first_page. kPageChainEnd (точек нет) допустим только при
 // block_index == 0; наличие точек проверяет вызывающий (voice_trigger).
-BlockPosition locate_block(memory::PsramStore& psram, uint16_t first_page, uint16_t checkpoint_first_page,
-                            uint32_t block_index);
+BlockPosition locate_block(memory::PsramStore& psram, uint16_t first_page, uint16_t checkpoint_first_page, uint32_t block_index);
 
 } // namespace soundsinth::dpcm8

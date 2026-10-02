@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 // Массовый прогон загрузчиков по реальной библиотеке: ловит падения и
 // assert'ы на большом объёме. Не входит в автоматический набор
 // soundsinth_tests: запускается вручную и зависит от внешних данных
@@ -87,38 +88,49 @@ Format format_from_extension(const std::string& path) {
     return Format::Unknown;
 }
 
-bool load_by_format(formats::ByteSource src, uint32_t file_length, memory::TrackMemory& mem, soundsinth::model::Song& song,
-                     Format fmt, const char** error_out) {
+bool load_by_format(formats::ByteSource src, uint32_t file_length, memory::TrackMemory& mem, soundsinth::model::Song& song, Format fmt,
+                    const char** error_out) {
     switch (fmt) {
-        case Format::Mod: return formats::mod::load(src, mem, song, error_out);
-        case Format::S3m: return formats::s3m::load(src, mem, song, error_out);
-        case Format::Xm: return formats::xm::load(src, mem, song, error_out);
-        case Format::It: return formats::it::load(src, mem, song, error_out);
+        case Format::Mod:
+            return formats::mod::load(src, mem, song, error_out);
+        case Format::S3m:
+            return formats::s3m::load(src, mem, song, error_out);
+        case Format::Xm:
+            return formats::xm::load(src, mem, song, error_out);
+        case Format::It:
+            return formats::it::load(src, mem, song, error_out);
         // metadata_only: сэмплы банка в замер арены не входят, а читать их
         // на сотнях тысяч файлов незачем.
         case Format::Midi:
             return formats::midi::load(src, file_length, mem, g_bank, song, error_out, /*metadata_only=*/true);
-        case Format::Unknown: return false;
+        case Format::Unknown:
+            return false;
     }
     return false;
 }
 
 const char* format_name(Format fmt) {
     switch (fmt) {
-        case Format::Mod: return "MOD";
-        case Format::S3m: return "S3M";
-        case Format::Xm: return "XM";
-        case Format::It: return "IT";
-        case Format::Midi: return "MIDI";
-        case Format::Unknown: return "?";
+        case Format::Mod:
+            return "MOD";
+        case Format::S3m:
+            return "S3M";
+        case Format::Xm:
+            return "XM";
+        case Format::It:
+            return "IT";
+        case Format::Midi:
+            return "MIDI";
+        case Format::Unknown:
+            return "?";
     }
     return "?";
 }
 
 struct Stats {
-    uint64_t attempted = 0;
+    uint64_t attempted               = 0;
     uint64_t per_format_attempted[5] = {};
-    uint64_t per_format_ok[5] = {};
+    uint64_t per_format_ok[5]        = {};
     // Рекордсмены по буферам загрузчика: размер и файл.
     uint32_t pattern_bytes = 0, dict_bytes = 0, rows_bytes = 0, scratch_bytes = 0;
     std::string pattern_file, dict_file, rows_file, scratch_file;
@@ -140,9 +152,9 @@ struct ScanState {
     memory::TrackMemory* mem;
     Stats* stats;
     std::vector<std::string>* failures;
-    bool first = true;
-    bool stop = false;
-    uint64_t limit = 0;
+    bool first                                 = true;
+    bool stop                                  = false;
+    uint64_t limit                             = 0;
     static constexpr size_t kMaxFailuresListed = 100;
 
     // Общая часть для обоих режимов: сброс с отравляющей заливкой перед
@@ -156,13 +168,13 @@ struct ScanState {
         first = false;
 
         soundsinth::model::Song song;
-        const char* error = nullptr;
+        const char* error             = nullptr;
         const uint32_t scratch_before = memory::g_max_scratch_used;
-        memory::g_max_scratch_used = 0;
+        memory::g_max_scratch_used    = 0;
         const uint32_t pattern_before = patterns::g_max_pattern_bytes;
         patterns::g_max_pattern_bytes = 0;
-        const bool ok = load_by_format(src, file_length, *mem, song, fmt, &error);
-        const uint32_t scratch_now = memory::g_max_scratch_used;
+        const bool ok                 = load_by_format(src, file_length, *mem, song, fmt, &error);
+        const uint32_t scratch_now    = memory::g_max_scratch_used;
         if (scratch_now < scratch_before) memory::g_max_scratch_used = scratch_before;
 
         // Пик сценариев этого файла: блок паттерна против постоянных по
@@ -173,13 +185,12 @@ struct ScanState {
         // сэмплы идут из банка мимо перепаковки, зато ревербератор занимает
         // буфер всю игру. У трекерных наоборот - перепаковка есть,
         // ревербератора нет.
-        uint32_t scratch_peak = pattern_now;
-        const uint32_t resident_scenario =
-            fmt == Format::Midi ? memory::kPlayScratchBytes : memory::kSampleRepackBufferBytes;
+        uint32_t scratch_peak            = pattern_now;
+        const uint32_t resident_scenario = fmt == Format::Midi ? memory::kPlayScratchBytes : memory::kSampleRepackBufferBytes;
         if (resident_scenario > scratch_peak) scratch_peak = resident_scenario;
         if (memory::kDurationPassBytes > scratch_peak) scratch_peak = memory::kDurationPassBytes;
         const uint32_t arena_now = static_cast<uint32_t>(memory::arena_used(mem->resident));
-        const uint32_t sum_now = arena_now + scratch_peak;
+        const uint32_t sum_now   = arena_now + scratch_peak;
 
         const int fi = static_cast<int>(fmt);
         ++stats->attempted;
@@ -203,16 +214,15 @@ struct ScanState {
             // портит буфер сценариев, поэтому идёт последним.
             uint32_t seconds = 0;
             if (ok) {
-                const uint32_t frames = engine::compute_song_total_frames(song, mem->psram, memory::scratch_take(mem->scratch, memory::Scratch::DurationPass, memory::kDurationPassBytes),
-                                                                          memory::kDurationPassBytes);
+                const uint32_t frames = engine::compute_song_total_frames(
+                    song, mem->psram, memory::scratch_take(mem->scratch, memory::Scratch::DurationPass, memory::kDurationPassBytes),
+                    memory::kDurationPassBytes);
                 memory::scratch_leave(mem->scratch, memory::Scratch::DurationPass);
                 seconds = frames / engine::kSampleRateHz;
             }
-            std::fprintf(stats->per_file, "%s\t%u\t%u\t%u\t%u\t%u\t%u\t%u\t%d\t%s\t%u\n", format_name(fmt), arena_now,
-                         sum_now, static_cast<unsigned>(song.pattern_count),
-                         static_cast<unsigned>(song.instrument_count), seconds, mem->psram.pattern_bump_offset,
-                         file_length, static_cast<int>(ok), display_path.c_str(),
-                         fmt == Format::Midi ? formats::midi::last_load_stats().events_bytes : 0u);
+            std::fprintf(stats->per_file, "%s\t%u\t%u\t%u\t%u\t%u\t%u\t%u\t%d\t%s\t%u\n", format_name(fmt), arena_now, sum_now,
+                         static_cast<unsigned>(song.pattern_count), static_cast<unsigned>(song.instrument_count), seconds, mem->psram.pattern_bump_offset,
+                         file_length, static_cast<int>(ok), display_path.c_str(), fmt == Format::Midi ? formats::midi::last_load_stats().events_bytes : 0u);
         }
         if (ok) {
             stats->arena_hist.push_back(arena_now);
@@ -227,11 +237,11 @@ struct ScanState {
         if (ok) {
             ++stats->per_format_ok[fi];
         } else if (failures->size() < kMaxFailuresListed) {
-            failures->push_back(std::string(format_name(fmt)) + " " + display_path + ": " + (error ? error : "(нет сообщения)"));
+            failures->push_back(std::string(format_name(fmt)) + " " + display_path + ": " + (error ? error : "(no message)"));
         }
 
         if (stats->attempted % 2000 == 0) {
-            std::printf("  ...%llu файлов обработано\n", static_cast<unsigned long long>(stats->attempted));
+            std::printf("  ...%llu files processed\n", static_cast<unsigned long long>(stats->attempted));
         }
         if (limit != 0 && stats->attempted >= limit) stop = true;
     }
@@ -249,7 +259,7 @@ void scan_directory(const std::string& root, ScanState& state) {
         // диапазона (было падение на E:\ModArchive\XM\A\adj*.xm, баг сканера, не
         // загрузчика). u8string() для валидного UTF-16 из ОС не бросает.
         const std::string display_path = it->path().u8string();
-        const Format fmt = format_from_extension(display_path);
+        const Format fmt               = format_from_extension(display_path);
         if (fmt == Format::Unknown) continue;
 
         std::ifstream in(it->path(), std::ios::binary);
@@ -291,15 +301,15 @@ void walk_fat_dir(const std::string& path, ScanState& state) {
 
 bool scan_image(const std::string& image_path, ScanState& state) {
     if (!platform_pc::mount_disk_image(image_path.c_str())) {
-        std::fprintf(stderr, "не удалось открыть образ: %s\n", image_path.c_str());
+        std::fprintf(stderr, "could not open the image: %s\n", image_path.c_str());
         return false;
     }
     static FATFS fs; // должен жить, пока том смонтирован; переиспользуется между образами (монтируется по одному)
     if (f_mount(&fs, "", 1) != FR_OK) {
-        std::fprintf(stderr, "f_mount не удался: %s\n", image_path.c_str());
+        std::fprintf(stderr, "f_mount failed: %s\n", image_path.c_str());
         return false;
     }
-    std::printf("сканирую образ %s...\n", image_path.c_str());
+    std::printf("scanning image %s...\n", image_path.c_str());
     walk_fat_dir("", state);
     return true;
 }
@@ -309,7 +319,7 @@ bool scan_image(const std::string& image_path, ScanState& state) {
 int main(int argc, char** argv) {
     std::vector<std::string> dirs;
     std::vector<std::string> images;
-    uint64_t limit = 0; // 0 = без ограничения
+    uint64_t limit            = 0; // 0 = без ограничения
     const char* per_file_path = nullptr;
 
     for (int i = 1; i < argc; ++i) {
@@ -325,16 +335,16 @@ int main(int argc, char** argv) {
             // Без банка .mid пропускаются: их разбор без него невозможен.
             std::ifstream bf(argv[++i], std::ios::binary);
             if (!bf) {
-                std::fprintf(stderr, "банк не открывается: %s\n", argv[i]);
+                std::fprintf(stderr, "bank does not open: %s\n", argv[i]);
                 return 1;
             }
             g_bank_bytes.assign(std::istreambuf_iterator<char>(bf), std::istreambuf_iterator<char>());
             const char* berr = nullptr;
             if (!bank::bank_open(g_bank_bytes.data(), static_cast<uint32_t>(g_bank_bytes.size()), g_bank, &berr)) {
-                std::fprintf(stderr, "банк не принят: %s\n", berr ? berr : "(нет причины)");
+                std::fprintf(stderr, "bank rejected: %s\n", berr ? berr : "(no reason)");
                 return 1;
             }
-            std::printf("банк: %s, сэмплов %u\n", g_bank.header->name, unsigned(g_bank.header->sample_count));
+            std::printf("bank: %s, samples %u\n", g_bank.header->name, unsigned(g_bank.header->sample_count));
         } else {
             dirs.push_back(argv[i]); // обратная совместимость: голый путь = каталог
         }
@@ -350,7 +360,7 @@ int main(int argc, char** argv) {
     if (per_file_path != nullptr) {
         stats.per_file = std::fopen(per_file_path, "wb");
         if (stats.per_file == nullptr) {
-            std::fprintf(stderr, "не открывается файл пофайлового вывода: %s\n", per_file_path);
+            std::fprintf(stderr, "cannot open the per-file output: %s\n", per_file_path);
             return 1;
         }
     }
@@ -362,16 +372,16 @@ int main(int argc, char** argv) {
     for (const auto& d : dirs) {
         if (state.stop) break;
         if (!fs::exists(d)) {
-            std::fprintf(stderr, "каталог не найден: %s\n", d.c_str());
+            std::fprintf(stderr, "directory not found: %s\n", d.c_str());
             continue;
         }
-        std::printf("сканирую каталог %s%s...\n", d.c_str(), limit ? " (с лимитом)" : "");
+        std::printf("scanning directory %s%s...\n", d.c_str(), limit ? " (with a limit)" : "");
         scan_directory(d, state);
     }
     for (const auto& img : images) {
         if (state.stop) break;
         if (!fs::exists(img)) {
-            std::fprintf(stderr, "образ не найден: %s\n", img.c_str());
+            std::fprintf(stderr, "image not found: %s\n", img.c_str());
             continue;
         }
         scan_image(img, state);
@@ -381,17 +391,16 @@ int main(int argc, char** argv) {
 
     // Раскладка: хранилище трека - весь чип (8 МБ); до 2026-09-13 умолчание
     // было 7 МБ, итоги прежних прогонов с этими не сравниваются.
-    std::printf("\n=== Итог (%lld c), хранилище трека 8 МБ ===\n", static_cast<long long>(elapsed));
+    std::printf("\n=== Total (%lld s), track storage 8 MB ===\n", static_cast<long long>(elapsed));
     for (int fi = 0; fi < 5; ++fi) {
         const Format fmt = static_cast<Format>(fi);
         if (stats.per_format_attempted[fi] == 0) continue;
-        std::printf("%s: %llu/%llu успешно\n", format_name(fmt), static_cast<unsigned long long>(stats.per_format_ok[fi]),
+        std::printf("%s: %llu/%llu ok\n", format_name(fmt), static_cast<unsigned long long>(stats.per_format_ok[fi]),
                     static_cast<unsigned long long>(stats.per_format_attempted[fi]));
     }
-    std::printf("Всего: %llu\n", static_cast<unsigned long long>(stats.attempted));
-    std::printf("буфер паттерна: блок %u Б (%s), словарь %u Б (%s), строки %u Б (%s); scratch %u Б (%s)\n",
-                stats.pattern_bytes, stats.pattern_file.c_str(), stats.dict_bytes, stats.dict_file.c_str(),
-                stats.rows_bytes, stats.rows_file.c_str(), stats.scratch_bytes, stats.scratch_file.c_str());
+    std::printf("Total: %llu\n", static_cast<unsigned long long>(stats.attempted));
+    std::printf("pattern buffer: block %u B (%s), dictionary %u B (%s), rows %u B (%s); scratch %u B (%s)\n", stats.pattern_bytes, stats.pattern_file.c_str(),
+                stats.dict_bytes, stats.dict_file.c_str(), stats.rows_bytes, stats.rows_file.c_str(), stats.scratch_bytes, stats.scratch_file.c_str());
 
     // Арена и пик суммы: по ним выбирается размер общего пула, если арену и
     // буфер сценариев объединять. Печатаются процентили, а не только
@@ -400,22 +409,23 @@ int main(int argc, char** argv) {
         if (v.empty()) return;
         std::sort(v.begin(), v.end());
         auto at = [&](double q) { return v[static_cast<size_t>(q * (v.size() - 1))]; };
-        std::printf("%s: медиана %u, 99%% %u, 99.9%% %u, 99.99%% %u, максимум %u (%s)\n", name, at(0.50), at(0.99),
-                    at(0.999), at(0.9999), worst, worst_file);
+        std::printf("%s: median %u, 99%% %u, 99.9%% %u, 99.99%% %u, maximum %u (%s)\n", name, at(0.50), at(0.99), at(0.999), at(0.9999), worst, worst_file);
     };
-    percentiles("арена", stats.arena_hist, stats.arena_bytes, stats.arena_file.c_str());
-    percentiles("арена+сценарий", stats.sum_hist, stats.sum_bytes, stats.sum_file.c_str());
+    percentiles("arena", stats.arena_hist, stats.arena_bytes, stats.arena_file.c_str());
+    percentiles("arena+scratch", stats.sum_hist, stats.sum_bytes, stats.sum_file.c_str());
 
     for (int fi = 0; fi < 5; ++fi) {
         if (stats.scratch_top[fi].empty()) continue;
         std::printf("scratch %s:", format_name(static_cast<Format>(fi)));
-        for (const auto& t : stats.scratch_top[fi]) std::printf(" %u (%s)", t.first, t.second.c_str());
+        for (const auto& t : stats.scratch_top[fi])
+            std::printf(" %u (%s)", t.first, t.second.c_str());
         std::printf("\n");
     }
 
     if (!failures.empty()) {
-        std::printf("\nПервые %zu отказов:\n", failures.size());
-        for (const auto& f : failures) std::printf("  %s\n", f.c_str());
+        std::printf("\nFirst %zu failures:\n", failures.size());
+        for (const auto& f : failures)
+            std::printf("  %s\n", f.c_str());
     }
 
     if (stats.per_file != nullptr) std::fclose(stats.per_file);

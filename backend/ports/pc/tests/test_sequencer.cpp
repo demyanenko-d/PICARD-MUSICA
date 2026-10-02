@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 #include "testing.h"
 
 #include <vector>
@@ -24,7 +25,7 @@ using soundsinth::model::Song;
 
 PatternCell make_cell(Effect fx = Effect::None, uint8_t fx_param = 0) {
     PatternCell c;
-    c.effect.type = fx;
+    c.effect.type  = fx;
     c.effect.param = fx_param;
     return c;
 }
@@ -33,8 +34,8 @@ PatternCell make_cell(Effect fx = Effect::None, uint8_t fx_param = 0) {
 // и возвращает готовый Pattern-дескриптор. scratch - переиспользуемый
 // буфер PatternPacker (роль сценария PatternPack), один и тот
 // же буфер можно использовать для нескольких паттернов подряд.
-Pattern build_pattern(memory::PsramStore& psram, uint8_t* scratch, uint32_t scratch_size,
-                       const std::vector<std::vector<PatternCell>>& rows, uint8_t channel_count) {
+Pattern build_pattern(memory::PsramStore& psram, uint8_t* scratch, uint32_t scratch_size, const std::vector<std::vector<PatternCell>>& rows,
+                      uint8_t channel_count) {
     const uint16_t row_count = static_cast<uint16_t>(rows.size());
     patterns::PatternPacker packer(scratch, scratch_size, row_count, channel_count);
     for (const auto& row : rows) {
@@ -45,9 +46,9 @@ Pattern build_pattern(memory::PsramStore& psram, uint8_t* scratch, uint32_t scra
     CHECK(offset != memory::kPatternAllocFailed);
 
     Pattern p;
-    p.row_count = row_count;
+    p.row_count     = row_count;
     p.channel_count = channel_count;
-    p.psram_offset = offset;
+    p.psram_offset  = offset;
     return p;
 }
 
@@ -66,11 +67,11 @@ struct Fixture {
     }
 
     void finalize(uint8_t channel_count, uint16_t restart_position = 0) {
-        song.patterns = patterns.data();
-        song.pattern_count = static_cast<uint16_t>(patterns.size());
-        song.order = order.data();
-        song.order_count = static_cast<uint16_t>(order.size());
-        song.channel_count = channel_count;
+        song.patterns         = patterns.data();
+        song.pattern_count    = static_cast<uint16_t>(patterns.size());
+        song.order            = order.data();
+        song.order_count      = static_cast<uint16_t>(order.size());
+        song.channel_count    = channel_count;
         song.restart_position = restart_position;
     }
 };
@@ -78,7 +79,7 @@ struct Fixture {
 void test_sequential_no_effects() {
     std::printf("test_sequencer_sequential_no_effects\n");
     Fixture f;
-    f.add_pattern({{make_cell()}, {make_cell()}}, 1); // паттерн 0: 2 строки
+    f.add_pattern({{make_cell()}, {make_cell()}}, 1);                // паттерн 0: 2 строки
     f.add_pattern({{make_cell()}, {make_cell()}, {make_cell()}}, 1); // паттерн 1: 3 строки
     f.order = {0, 1, soundsinth::model::kOrderEnd};
     f.finalize(1);
@@ -104,7 +105,8 @@ void test_sequential_no_effects() {
 
     // Домотать до конца паттерна 1 (3 строки * 2 тика = 6 тиков, 2 уже
     // сделаны) и до kOrderEnd -> restart_position=0.
-    for (int i = 0; i < 6; ++i) CHECK(engine::sequencer_tick(f.song, f.psram, ps, nullptr, nullptr));
+    for (int i = 0; i < 6; ++i)
+        CHECK(engine::sequencer_tick(f.song, f.psram, ps, nullptr, nullptr));
     CHECK_EQ(ps.pattern_idx, 0);
     CHECK_EQ(ps.row, 0);
     CHECK(!ps.song_ended);
@@ -134,7 +136,7 @@ void test_pattern_break_row_target() {
     std::printf("test_sequencer_pattern_break_row_target\n");
     Fixture f;
     f.add_pattern({{make_cell(Effect::PatternBreak, 2)}, {make_cell()}, {make_cell()}, {make_cell()}}, 1); // 4 строки, брейк на строке 0
-    f.add_pattern({{make_cell()}, {make_cell()}, {make_cell()}, {make_cell()}, {make_cell()}}, 1);          // 5 строк
+    f.add_pattern({{make_cell()}, {make_cell()}, {make_cell()}, {make_cell()}, {make_cell()}}, 1);         // 5 строк
     f.order = {0, 1};
     f.finalize(1);
     f.song.default_speed = 1;
@@ -203,13 +205,11 @@ void test_pattern_loop_global_target() {
     // Точка возврата и триггер лупа на разных каналах (0 и 1); при
     // kFlowLoopGlobalTarget это должно работать через один общий слот
     // (channels[0]), а не по отдельности на каждом канале.
-    f.add_pattern({{make_cell(Effect::PatternLoop, 0), make_cell()},
-                    {make_cell(), make_cell(Effect::PatternLoop, 1)}},
-                   2);
+    f.add_pattern({{make_cell(Effect::PatternLoop, 0), make_cell()}, {make_cell(), make_cell(Effect::PatternLoop, 1)}}, 2);
     f.order = {0};
     f.finalize(2);
     f.song.default_speed = 1;
-    f.song.flow_mode = soundsinth::model::kFlowLoopGlobalTarget;
+    f.song.flow_mode     = soundsinth::model::kFlowLoopGlobalTarget;
 
     engine::PlayState ps;
     CHECK(engine::sequencer_init(f.song, f.psram, ps, nullptr, nullptr)); // row0 -> loop_start_row[0]
@@ -234,10 +234,9 @@ void test_pattern_loop_vs_position_jump_same_row() {
     // row0 ch0: точка возврата лупа. row1: пусто. row2 ch0: SBx(2) (луп на
     // 2 повтора), row2 ch1: Bxx(1) (PositionJump на order 1) - оба на одной
     // строке, разные каналы.
-    f.add_pattern({{make_cell(Effect::PatternLoop, 0), make_cell()},
-                    {make_cell(), make_cell()},
-                    {make_cell(Effect::PatternLoop, 2), make_cell(Effect::PositionJump, 1)}},
-                   2);
+    f.add_pattern(
+        {{make_cell(Effect::PatternLoop, 0), make_cell()}, {make_cell(), make_cell()}, {make_cell(Effect::PatternLoop, 2), make_cell(Effect::PositionJump, 1)}},
+        2);
     f.add_pattern({{make_cell(), make_cell()}}, 2); // order 1 - цель PositionJump
     f.order = {0, 1};
     f.finalize(2);
@@ -255,15 +254,14 @@ void test_pattern_loop_vs_position_jump_same_row() {
 
     // Тот же сценарий с флагом: джамп должен победить луп.
     Fixture g;
-    g.add_pattern({{make_cell(Effect::PatternLoop, 0), make_cell()},
-                    {make_cell(), make_cell()},
-                    {make_cell(Effect::PatternLoop, 2), make_cell(Effect::PositionJump, 1)}},
-                   2);
+    g.add_pattern(
+        {{make_cell(Effect::PatternLoop, 0), make_cell()}, {make_cell(), make_cell()}, {make_cell(Effect::PatternLoop, 2), make_cell(Effect::PositionJump, 1)}},
+        2);
     g.add_pattern({{make_cell(), make_cell()}}, 2);
     g.order = {0, 1};
     g.finalize(2);
     g.song.default_speed = 1;
-    g.song.flow_mode = soundsinth::model::kFlowLoopDelaysSameRowBreak;
+    g.song.flow_mode     = soundsinth::model::kFlowLoopDelaysSameRowBreak;
 
     engine::PlayState ps2;
     CHECK(engine::sequencer_init(g.song, g.psram, ps2, nullptr, nullptr));
@@ -304,12 +302,15 @@ void test_set_speed_and_tempo_tick_duration() {
 // sequencer.h).
 void test_tick_duration_rounds_to_nearest() {
     std::printf("test_sequencer_tick_duration_rounds_to_nearest\n");
-    struct { uint16_t tempo; uint32_t samples; } cases[] = {
+    struct {
+        uint16_t tempo;
+        uint32_t samples;
+    } cases[] = {
         {125, 882u}, // 882.000 без остатка
         {128, 861u}, // 861.328 -> вниз
         {140, 788u}, // 787.500 -> вверх (к ближайшему, полшага вверх)
         {150, 735u}, // 735.000 без остатка
-        {32,  3445u}, // 3445.313 -> вниз, нижняя граница допустимого темпа
+        {32, 3445u}, // 3445.313 -> вниз, нижняя граница допустимого темпа
     };
     for (const auto& c : cases) {
         Fixture f;
@@ -372,12 +373,12 @@ void test_mod_tempo_on_second_tick() {
     f.finalize(1);
     f.song.default_speed = 1;
     f.song.default_tempo = 125;
-    f.song.quirks = soundsinth::model::kQuirkModTempoOnSecondTick;
+    f.song.quirks        = soundsinth::model::kQuirkModTempoOnSecondTick;
 
     engine::PlayState ps;
     CHECK(engine::sequencer_init(f.song, f.psram, ps, nullptr, nullptr));
     CHECK_EQ(ps.tempo, 140);
-    CHECK_EQ(ps.last_tick_samples, 882u); // тик 0 строки 0 - ещё темпом 125
+    CHECK_EQ(ps.last_tick_samples, 882u);                                 // тик 0 строки 0 - ещё темпом 125
     CHECK(engine::sequencer_tick(f.song, f.psram, ps, nullptr, nullptr)); // -> строка 1
     CHECK_EQ(ps.last_tick_samples, 788u);
     CHECK(engine::sequencer_tick(f.song, f.psram, ps, nullptr, nullptr)); // -> строка 2 с T=100
@@ -431,16 +432,14 @@ void dispatch_callback(void* user, const PatternCell* cells, uint8_t channel_cou
 void test_init_header_channel_state_under_row0_effects() {
     std::printf("test_sequencer_init_header_channel_state_under_row0_effects\n");
     Fixture f;
-    PatternCell volcol_pan = make_cell();
-    volcol_pan.volume.type = soundsinth::model::VolumeColumnType::SetPanning;
+    PatternCell volcol_pan  = make_cell();
+    volcol_pan.volume.type  = soundsinth::model::VolumeColumnType::SetPanning;
     volcol_pan.volume.param = 56;
-    f.add_pattern({{make_cell(Effect::SetChannelVolume, 40), make_cell(Effect::SetPanning, 0xC0), make_cell(),
-                    volcol_pan}},
-                  4);
+    f.add_pattern({{make_cell(Effect::SetChannelVolume, 40), make_cell(Effect::SetPanning, 0xC0), make_cell(), volcol_pan}}, 4);
     f.order = {0};
     f.finalize(4);
     for (uint8_t c = 0; c < 4; ++c) {
-        f.song.channel_pan[c] = 10;
+        f.song.channel_pan[c]    = 10;
         f.song.channel_volume[c] = 20;
     }
 
@@ -448,17 +447,17 @@ void test_init_header_channel_state_under_row0_effects() {
     engine::ChannelState ch[4];
     engine::DispatchContext ctx;
     ctx.channels = ch;
-    ctx.song = &f.song;
-    ctx.ps = &ps;
+    ctx.song     = &f.song;
+    ctx.ps       = &ps;
     engine::channels_init(f.song, ch);
     CHECK(engine::sequencer_init(f.song, f.psram, ps, dispatch_callback, &ctx));
     CHECK_EQ(ch[0].channel_volume, 40); // Mxx строки 0
     CHECK_EQ(ch[0].pan, 10);
     // Xxx и панорама колонки громкости в канале без ноты - тоже поверх
     // заголовка: панорама канала держится до ноты.
-    CHECK_EQ(ch[1].pan, 48);            // 0xC0 / 4
+    CHECK_EQ(ch[1].pan, 48); // 0xC0 / 4
     CHECK_EQ(ch[3].pan, 56);
-    CHECK_EQ(ch[2].pan, 10);            // без эффектов - заголовок
+    CHECK_EQ(ch[2].pan, 10); // без эффектов - заголовок
     CHECK_EQ(ch[2].channel_volume, 20);
 
     // Разводка Paula у MOD - вместо панорамы заголовка.
@@ -475,8 +474,7 @@ void test_init_header_channel_state_under_row0_effects() {
 // Loop - не конец трека. Тик при tempo 125 - 882 отсчёта.
 uint32_t duration_of(Fixture& f, engine::DurationStats* stats = nullptr) {
     std::vector<uint64_t> scratch((engine::kDurationScratchBytes + 7) / 8);
-    return engine::compute_song_total_frames(f.song, f.psram, reinterpret_cast<uint8_t*>(scratch.data()),
-                                             engine::kDurationScratchBytes, stats);
+    return engine::compute_song_total_frames(f.song, f.psram, reinterpret_cast<uint8_t*>(scratch.data()), engine::kDurationScratchBytes, stats);
 }
 
 // Сколько кадров секвенсор отыгрывает до возврата на строку 0 позиции 0:
@@ -507,8 +505,8 @@ void test_duration_equals_first_pass() {
         f.finalize(1);
         f.song.default_speed = 1;
         f.song.default_tempo = 125;
-        const uint32_t pass = engine_pass_frames(f);
-        std::printf("  Txx 60 в конце: проход %u, движок %u\n", duration_of(f), pass);
+        const uint32_t pass  = engine_pass_frames(f);
+        std::printf("  Txx 60 at the end: pass %u, engine %u\n", duration_of(f), pass);
         CHECK_EQ(duration_of(f), pass);
         CHECK_EQ(pass, 3u * 882u + 1838u);
     }
@@ -521,7 +519,7 @@ void test_duration_equals_first_pass() {
         f.finalize(1);
         f.song.default_speed = 3;
         f.song.default_tempo = 125;
-        f.song.quirks = soundsinth::model::kQuirkModTempoOnSecondTick;
+        f.song.quirks        = soundsinth::model::kQuirkModTempoOnSecondTick;
         CHECK_EQ(duration_of(f), engine_pass_frames(f));
     }
     {
@@ -588,9 +586,7 @@ void test_duration_pattern_delay_and_loop() {
     {
         // SB0 на строке 0, SB1 на строке 2: строки 0-2 дважды и строка 3.
         Fixture f;
-        f.add_pattern({{make_cell(Effect::PatternLoop, 0)}, {make_cell()}, {make_cell(Effect::PatternLoop, 1)},
-                       {make_cell()}},
-                      1);
+        f.add_pattern({{make_cell(Effect::PatternLoop, 0)}, {make_cell()}, {make_cell(Effect::PatternLoop, 1)}, {make_cell()}}, 1);
         f.order = {0};
         f.finalize(1);
         f.song.default_speed = 6;
@@ -601,9 +597,7 @@ void test_duration_pattern_delay_and_loop() {
         // E60, E61, E61 в одном канале: луп не кончается, отметки тела
         // снимаются - проход кончается пределом строк на позицию.
         Fixture f;
-        f.add_pattern({{make_cell(Effect::PatternLoop, 0)}, {make_cell(Effect::PatternLoop, 1)},
-                       {make_cell(Effect::PatternLoop, 1)}},
-                      1);
+        f.add_pattern({{make_cell(Effect::PatternLoop, 0)}, {make_cell(Effect::PatternLoop, 1)}, {make_cell(Effect::PatternLoop, 1)}}, 1);
         f.order = {0};
         f.finalize(1);
         f.song.default_speed = 1;
@@ -651,10 +645,8 @@ void test_fine_pattern_delay_sum_and_reset() {
     std::printf("test_sequencer_fine_pattern_delay_sum_and_reset\n");
     {
         Fixture f;
-        f.add_pattern({{make_cell(Effect::FinePatternDelay, 3), make_cell(Effect::FinePatternDelay, 2)},
-                       {make_cell(), make_cell()},
-                       {make_cell(), make_cell()}},
-                      2);
+        f.add_pattern(
+            {{make_cell(Effect::FinePatternDelay, 3), make_cell(Effect::FinePatternDelay, 2)}, {make_cell(), make_cell()}, {make_cell(), make_cell()}}, 2);
         f.order = {0};
         f.finalize(2);
         f.song.default_speed = 3;
@@ -665,9 +657,7 @@ void test_fine_pattern_delay_sum_and_reset() {
     }
     {
         Fixture f;
-        f.add_pattern({{make_cell(Effect::FinePatternDelay, 2), make_cell(Effect::PatternDelay, 1)},
-                       {make_cell(), make_cell()},
-                       {make_cell(), make_cell()}},
+        f.add_pattern({{make_cell(Effect::FinePatternDelay, 2), make_cell(Effect::PatternDelay, 1)}, {make_cell(), make_cell()}, {make_cell(), make_cell()}},
                       2);
         f.order = {0};
         f.finalize(2);
@@ -748,15 +738,14 @@ void test_zero_speed_and_low_tempo_ignored() {
 void test_loop_with_break_under_delays_flag() {
     std::printf("test_sequencer_loop_with_break_under_delays_flag\n");
     Fixture f;
-    f.add_pattern({{make_cell(Effect::PatternLoop, 0), make_cell()},
-                   {make_cell(), make_cell()},
-                   {make_cell(Effect::PatternLoop, 2), make_cell(Effect::PatternBreak, 0)}},
-                  2);
+    f.add_pattern(
+        {{make_cell(Effect::PatternLoop, 0), make_cell()}, {make_cell(), make_cell()}, {make_cell(Effect::PatternLoop, 2), make_cell(Effect::PatternBreak, 0)}},
+        2);
     f.add_pattern({{make_cell(), make_cell()}}, 2);
     f.order = {0, 1};
     f.finalize(2);
     f.song.default_speed = 1;
-    f.song.flow_mode = soundsinth::model::kFlowLoopDelaysSameRowBreak;
+    f.song.flow_mode     = soundsinth::model::kFlowLoopDelaysSameRowBreak;
     engine::PlayState ps;
     CHECK(engine::sequencer_init(f.song, f.psram, ps, nullptr, nullptr));
     CHECK(engine::sequencer_tick(f.song, f.psram, ps, nullptr, nullptr)); // -> row1

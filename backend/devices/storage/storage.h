@@ -1,7 +1,7 @@
+// SPDX-License-Identifier: MIT
 #pragma once
 
-// Арбитр носителя: через него к карте обращаются все. Прямых обращений
-// к sd_card_spi.h мимо него быть не должно.
+// Арбитр носителя: через него к карте обращаются все.
 //
 // Этот заголовок - только чтение. Клиентов двое: эмулятор карты (хост,
 // читает и пишет) и код на МК (только читает). Хост идёт первым: фоновое
@@ -14,6 +14,7 @@
 // (storage_init, bank_sd_open), дальше только цикл Core1. В каждый момент
 // поток один, поэтому внутри нет блокировок и атомиков.
 
+#include <cstddef>
 #include <cstdint>
 
 #include "devices/hal/media.h"
@@ -22,14 +23,48 @@ namespace devices::storage {
 
 inline constexpr uint32_t kSectorBytes = devices::hal::kSectorBytes;
 
-// Строк кэша чтения. Кэш не для скрытия задержки - сектор читается за
-// сотни микросекунд, а хост забирает те же 512 байт миллисекундами. Он для
+// Строк кэша чтения. Кэш не для скрытия задержки - её прячет упреждение
+// эмулятора карты, кладущее заказ на следующий сектор заранее. Он для
 // повторов: таблица FAT и каталог читаются снова и снова. Каждая строка -
 // сектор SRAM.
+//
+// Восемь, и больше не нужно: проверено опытом на плате. Вчетверо больший
+// кэш (32 строки, плюс 12.5 КБ SRAM) дал на той же нагрузке +4 попадания
+// из 438 обращений - 6.4% против 7.3%. Повторов в потоке почти нет, и те,
+// что есть, ловятся восемью строками. Больший кэш, в том числе свой на
+// устройство в PSRAM, отброшен замером - не предлагать заново.
+//
+// Прямое отображение по lba, степень двойки обязательна.
 #ifndef SOUNDSINTH_STORAGE_CACHE_SECTORS
 #define SOUNDSINTH_STORAGE_CACHE_SECTORS 8u
 #endif
+static_assert((SOUNDSINTH_STORAGE_CACHE_SECTORS & (SOUNDSINTH_STORAGE_CACHE_SECTORS - 1u)) == 0, "the row is found by a remainder: a power of two");
 inline constexpr uint32_t kCacheSectors = SOUNDSINTH_STORAGE_CACHE_SECTORS;
+
+// --- Блочный кэш: буфер даётся снаружи ---
+//
+// По два блока каждому носителю - нынешний и упреждающий. Читают подряд,
+// поэтому третий блок попаданий не прибавляет: их и так за девяносто
+// процентов. Носители не делят блоки: иначе обе стороны карты вытесняли бы
+// друг друга.
+//
+// Память под буфер выделяет вызывающий: слой устройств не знает ни про
+// PSRAM, ни про арену, и не зависит от ядра синтезатора.
+inline constexpr uint32_t kBlockSectors     = 16; // 8 КБ: у флешки 455 мкс на сектор против 485 при восьми
+inline constexpr uint32_t kBlocksPerMedium  = 2;  // нынешний и упреждающий
+inline constexpr uint32_t kBlockMediumCount = 2;
+inline constexpr uint32_t kBlockBytes       = kBlockSectors * kSectorBytes;
+inline constexpr uint32_t kBlockCacheBytes  = kBlockMediumCount * kBlocksPerMedium * kBlockBytes;
+
+// Как получить адрес для записи в буфер. У PSRAM запись идёт мимо кэша XIP,
+// и его строки перед этим сбрасываются; у обычной памяти нужно вернуть тот
+// же указатель. nullptr значит "писать можно прямо".
+using BlockCacheWrite = uint8_t* (*)(uint8_t* p, size_t bytes);
+
+// Отдать буфер под блочный кэш. bytes меньше kBlockCacheBytes - буфер не
+// принимается. Без буфера блочного кэша нет вовсе: чтение идёт посекторно
+// через построчный кэш.
+void storage_attach_block_cache(uint8_t* buf, uint32_t bytes, BlockCacheWrite to_write);
 
 // Поднять носитель (карта на SPI1). Зовётся один раз при старте;
 // повторный вызов сбросит кэш и переинициализирует карту.
@@ -48,9 +83,40 @@ enum class Client : uint8_t { Host, Board };
 bool storage_present(Client who);
 uint32_t storage_sector_count(Client who);
 
-// Прочитать сектор, из кэша или с носителя. false - носителя нет или он
-// не ответил.
-bool storage_read(uint32_t lba, uint8_t* dst);
+// Записать сектор на носитель платы. Зовётся только механизмом настроек
+// при старте: в работе код платы носитель не меняет.
+bool storage_write_board(uint32_t lba, const uint8_t* src);
+
+// --- Носитель эмулятора карты ---
+//
+// Хозяев двое, и смотреть они могут в разное: DivMMC на карту, а
+// Z-Controller на флешку, или наоборот. Выбор приходит настройками при
+// старте и на ходу не меняется - машина в этот момент думает, что карта у
+// неё та же.
+//
+// Носителя нет физически - эмулятор отвечает "карты нет", а не подставляет
+// другой: подмена выглядела бы как чужая файловая система.
+// Номер хозяина - это devices::sd::SdOwner как число: нулевой - DivMMC,
+// первый - Z-Controller. Своей нумерации здесь нет намеренно: она
+// разошлась бы с SdOwner молча.
+inline constexpr uint8_t kEmulatorCount = 2;
+
+void storage_set_emulator_medium(uint8_t owner, hal::Medium m);
+hal::Medium storage_emulator_medium(uint8_t owner);
+bool storage_emulator_present(uint8_t owner);
+uint32_t storage_emulator_sectors(uint8_t owner);
+
+// Поколение снимка носителей: растёт только на событиях. Сверке эмулятора
+// оно заменяет обход всех сторон - одно слово из SRAM вместо опроса
+// драйверов, а зовут её с каждого витка цикла Core1.
+uint32_t storage_media_generation();
+
+// Шаг предвыборки: наполнить заказанный блок, если заказ есть. Зовётся
+// из свободного времени цикла Core1 и только изнутри sd_spi_task - её
+// защита от повторного входа не даёт начать обмен с носителем, пока идёт
+// этот: иначе вложенное чтение получило бы отказ занятости.
+void storage_prefetch_step();
+bool storage_emulator_read(uint8_t owner, uint32_t lba, uint8_t* dst);
 
 // То же для фоновых клиентов (банк .mid): перед обращением к носителю
 // ждущие заказы хоста уходят первыми, хост ждёт не дольше одного сектора.

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 #pragma once
 
 // Вывод I2S (PIO и DMA ping-pong). Буферы из BufferPool забирает DMA ISR

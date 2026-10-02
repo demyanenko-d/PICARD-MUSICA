@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 #include "testing.h"
 
 #include <cstdio>
@@ -17,7 +18,7 @@ void test_mode_c_three_samples() {
     std::printf("test_it_decompress_mode_c_three_samples\n");
 
     const uint8_t bitstream[4] = {0x05, 0xF0, 0x35, 0x00};
-    int16_t out[3] = {};
+    int16_t out[3]             = {};
     DecompressState state{};
     const uint32_t written = decompress_step(state, bitstream, sizeof(bitstream), 3, out);
 
@@ -31,7 +32,7 @@ void test_truncated_stream_stops_early() {
     std::printf("test_it_decompress_truncated_stream_stops_early\n");
 
     const uint8_t bitstream[1] = {0x05}; // недостаточно бит на 3 сэмпла по 9 бит
-    int16_t out[3] = {-1, -1, -1};
+    int16_t out[3]             = {-1, -1, -1};
     DecompressState state{};
     const uint32_t written = decompress_step(state, bitstream, sizeof(bitstream), 3, out);
 

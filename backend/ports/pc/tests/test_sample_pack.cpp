@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 #include "testing.h"
 
 #include <cstdio>
@@ -19,16 +20,15 @@ namespace {
 // locate_block и прямой decode_block. Оракул произвольного доступа -
 // голос позиционируется тем же locate_block. Возвращает записанное число
 // отсчётов (0, если блок за пределами сэмпла).
-uint32_t decode_block_from_checkpoint(memory::PsramStore& psram, uint16_t first_page, uint16_t checkpoint_first_page,
-                                      uint32_t block_index, uint32_t sample_length, int16_t* out) {
+uint32_t decode_block_from_checkpoint(memory::PsramStore& psram, uint16_t first_page, uint16_t checkpoint_first_page, uint32_t block_index,
+                                      uint32_t sample_length, int16_t* out) {
     const uint32_t block_start = block_index * dpcm8::kCheckpointIntervalSamples;
     if (block_start >= sample_length) return 0;
-    const uint32_t block_samples = (sample_length - block_start) < dpcm8::kCheckpointIntervalSamples
-                                       ? (sample_length - block_start)
-                                       : dpcm8::kCheckpointIntervalSamples;
+    const uint32_t block_samples =
+        (sample_length - block_start) < dpcm8::kCheckpointIntervalSamples ? (sample_length - block_start) : dpcm8::kCheckpointIntervalSamples;
 
     const dpcm8::BlockPosition pos = dpcm8::locate_block(psram, first_page, checkpoint_first_page, block_index);
-    const uint8_t* block_bytes = memory::psram_page_ptr(psram, pos.page) + pos.byte_offset;
+    const uint8_t* block_bytes     = memory::psram_page_ptr(psram, pos.page) + pos.byte_offset;
     dpcm8::decode_block(reinterpret_cast<const int8_t*>(block_bytes), block_samples, pos.state, out);
     return block_samples;
 }
@@ -36,17 +36,16 @@ uint32_t decode_block_from_checkpoint(memory::PsramStore& psram, uint16_t first_
 // Читает n сэмплов DPCM8, идя по цепочке страниц (см. memory::PsramStore),
 // как engine::Voice при воспроизведении; здесь - для сверки
 // результата упаковки с прямым dpcm8::decode_block.
-void decode_from_page_chain(memory::PsramStore& psram, uint16_t first_page, dpcm8::Dpcm8State state, uint32_t n,
-                             int16_t* out) {
-    uint16_t page = first_page;
+void decode_from_page_chain(memory::PsramStore& psram, uint16_t first_page, dpcm8::Dpcm8State state, uint32_t n, int16_t* out) {
+    uint16_t page     = first_page;
     uint32_t page_pos = 0;
     for (uint32_t i = 0; i < n; ++i) {
         if (page_pos >= memory::kPsramPageBytes) {
-            page = memory::psram_page_next(psram, page);
+            page     = memory::psram_page_next(psram, page);
             page_pos = 0;
         }
         const uint8_t byte = memory::psram_page_ptr(psram, page)[page_pos++];
-        out[i] = dpcm8::decode_delta(byte, state);
+        out[i]             = dpcm8::decode_delta(byte, state);
     }
 }
 
@@ -63,10 +62,9 @@ void test_dpcm8_multi_chunk_pack_matches_single_shot() {
     std::vector<int8_t> ref_dpcm(kN);
     dpcm8::Dpcm8State ref_state;
     uint32_t ref_cp_count = 0;
-    std::vector<dpcm8::Dpcm8Checkpoint> ref_checkpoints((kN + dpcm8::kCheckpointIntervalSamples - 1) /
-                                                          dpcm8::kCheckpointIntervalSamples);
-    ref_cp_count = dpcm8::encode_block(samples.data(), kN, 0, ref_state, ref_dpcm.data(), ref_checkpoints.data(),
-                                        static_cast<uint32_t>(ref_checkpoints.size()));
+    std::vector<dpcm8::Dpcm8Checkpoint> ref_checkpoints((kN + dpcm8::kCheckpointIntervalSamples - 1) / dpcm8::kCheckpointIntervalSamples);
+    ref_cp_count =
+        dpcm8::encode_block(samples.data(), kN, 0, ref_state, ref_dpcm.data(), ref_checkpoints.data(), static_cast<uint32_t>(ref_checkpoints.size()));
     std::vector<int16_t> ref_decoded(kN);
     dpcm8::decode_block(ref_dpcm.data(), kN, dpcm8::Dpcm8State{}, ref_decoded.data());
 
@@ -75,9 +73,10 @@ void test_dpcm8_multi_chunk_pack_matches_single_shot() {
     // вызовами add_samples(), а не сам DPCM8.
     memory::PsramStore psram;
     memory::psram_create(psram);
+    (void)memory::psram_freeze_pattern_zone(psram); // паттернов нет: блок трека - сэмплам
     sample_pack::SamplePacker packer(psram, sample_pack::ResidentEncoding::Dpcm8);
 
-    uint32_t pos = 0;
+    uint32_t pos                 = 0;
     const uint32_t chunk_sizes[] = {700, 1300, 2999};
     for (uint32_t cs : chunk_sizes) {
         CHECK(packer.add_samples(samples.data() + pos, cs));
@@ -119,19 +118,19 @@ void test_dpcm8_persisted_checkpoints_match_encoder_and_enable_random_access() {
     }
 
     std::vector<int16_t> ref_decoded(kN);
-    std::vector<dpcm8::Dpcm8Checkpoint> ref_checkpoints((kN + dpcm8::kCheckpointIntervalSamples - 1) /
-                                                          dpcm8::kCheckpointIntervalSamples);
+    std::vector<dpcm8::Dpcm8Checkpoint> ref_checkpoints((kN + dpcm8::kCheckpointIntervalSamples - 1) / dpcm8::kCheckpointIntervalSamples);
     {
         std::vector<int8_t> ref_dpcm(kN);
         dpcm8::Dpcm8State ref_state;
         uint32_t ref_cp_count = 0;
-        ref_cp_count = dpcm8::encode_block(samples.data(), kN, 0, ref_state, ref_dpcm.data(), ref_checkpoints.data(),
-                                            static_cast<uint32_t>(ref_checkpoints.size()));
+        ref_cp_count =
+            dpcm8::encode_block(samples.data(), kN, 0, ref_state, ref_dpcm.data(), ref_checkpoints.data(), static_cast<uint32_t>(ref_checkpoints.size()));
         dpcm8::decode_block(ref_dpcm.data(), kN, dpcm8::Dpcm8State{}, ref_decoded.data());
     }
 
     memory::PsramStore psram;
     memory::psram_create(psram);
+    (void)memory::psram_freeze_pattern_zone(psram); // паттернов нет: блок трека - сэмплам
     sample_pack::SamplePacker packer(psram, sample_pack::ResidentEncoding::Dpcm8);
     CHECK(packer.add_samples(samples.data(), kN));
     const sample_pack::PackResult result = packer.finish();
@@ -146,17 +145,14 @@ void test_dpcm8_persisted_checkpoints_match_encoder_and_enable_random_access() {
 
     // Случайный доступ: декодируем каждый блок независимо через чекпоинт,
     // не по порядку (последний -> первый -> середина).
-    const uint32_t block_count = result.checkpoint_count;
+    const uint32_t block_count  = result.checkpoint_count;
     std::vector<uint32_t> order = {block_count - 1, 0};
     if (block_count > 2) order.push_back(block_count / 2);
     for (uint32_t block_index : order) {
         int16_t block_out[dpcm8::kCheckpointIntervalSamples];
-        const uint32_t got = decode_block_from_checkpoint(psram, result.first_page, result.checkpoint_first_page,
-                                                          block_index, kN, block_out);
+        const uint32_t got         = decode_block_from_checkpoint(psram, result.first_page, result.checkpoint_first_page, block_index, kN, block_out);
         const uint32_t block_start = block_index * dpcm8::kCheckpointIntervalSamples;
-        const uint32_t expected = (kN - block_start) < dpcm8::kCheckpointIntervalSamples
-                                       ? (kN - block_start)
-                                       : dpcm8::kCheckpointIntervalSamples;
+        const uint32_t expected    = (kN - block_start) < dpcm8::kCheckpointIntervalSamples ? (kN - block_start) : dpcm8::kCheckpointIntervalSamples;
         CHECK_EQ(got, expected);
         for (uint32_t i = 0; i < got; ++i) {
             CHECK_EQ(block_out[i], ref_decoded[block_start + i]);
@@ -180,6 +176,7 @@ void test_raw8_direct_index_access() {
 
     memory::PsramStore psram;
     memory::psram_create(psram);
+    (void)memory::psram_freeze_pattern_zone(psram); // паттернов нет: блок трека - сэмплам
     sample_pack::SamplePacker packer(psram, sample_pack::ResidentEncoding::Raw8);
     CHECK(packer.add_samples(samples.data(), kN));
     const sample_pack::PackResult result = packer.finish();
@@ -193,9 +190,9 @@ void test_raw8_direct_index_access() {
     // делает engine/voice.cpp для Raw8-сэмплов.
     const uint32_t indices[] = {0, 1023, 1024, 2999, 1500};
     for (uint32_t idx : indices) {
-        const uint16_t page = memory::psram_page_advance(psram, result.first_page, idx / memory::kPsramPageBytes);
+        const uint16_t page        = memory::psram_page_advance(psram, result.first_page, idx / memory::kPsramPageBytes);
         const uint16_t byte_offset = static_cast<uint16_t>(idx % memory::kPsramPageBytes);
-        const int8_t raw = static_cast<int8_t>(memory::psram_page_ptr(psram, page)[byte_offset]);
+        const int8_t raw           = static_cast<int8_t>(memory::psram_page_ptr(psram, page)[byte_offset]);
         CHECK_EQ(static_cast<int16_t>(raw), samples[idx]);
     }
 
@@ -210,6 +207,7 @@ void test_decimation_averages_pairs_across_calls() {
 
     memory::PsramStore psram;
     memory::psram_create(psram);
+    (void)memory::psram_freeze_pattern_zone(psram); // паттернов нет: блок трека - сэмплам
     sample_pack::SamplePacker packer(psram, sample_pack::ResidentEncoding::Raw8, /*decimate=*/true);
 
     // 7 исходных сэмплов, поданных неровными кусками (граница вызова
@@ -227,9 +225,9 @@ void test_decimation_averages_pairs_across_calls() {
 
     const int16_t expected[4] = {15, 35, 55, 70};
     for (uint32_t i = 0; i < 4; ++i) {
-        const uint16_t page = memory::psram_page_advance(psram, result.first_page, i / memory::kPsramPageBytes);
+        const uint16_t page        = memory::psram_page_advance(psram, result.first_page, i / memory::kPsramPageBytes);
         const uint16_t byte_offset = static_cast<uint16_t>(i % memory::kPsramPageBytes);
-        const int8_t raw = static_cast<int8_t>(memory::psram_page_ptr(psram, page)[byte_offset]);
+        const int8_t raw           = static_cast<int8_t>(memory::psram_page_ptr(psram, page)[byte_offset]);
         CHECK_EQ(static_cast<int16_t>(raw), expected[i]);
     }
 
@@ -253,14 +251,16 @@ void test_checkpoints_share_the_sample_chain() {
 
     memory::PsramStore psram;
     memory::psram_create(psram);
+    (void)memory::psram_freeze_pattern_zone(psram); // паттернов нет: блок трека - сэмплам
     const uint32_t all_free = memory::psram_free_page_count(psram);
-    CHECK_EQ(all_free, psram.sample_page_count);
+    CHECK_EQ(all_free, memory::psram_sample_page_count(psram));
 
     // Достаточно длинный сэмпл, чтобы чекпоинтов было не ноль и они
     // заняли отдельные страницы.
     constexpr uint32_t kSamples = 40000;
     std::vector<int16_t> pcm(kSamples);
-    for (uint32_t i = 0; i < kSamples; ++i) pcm[i] = static_cast<int16_t>((i * 37) % 4096 - 2048);
+    for (uint32_t i = 0; i < kSamples; ++i)
+        pcm[i] = static_cast<int16_t>((i * 37) % 4096 - 2048);
 
     sample_pack::SamplePacker packer(psram, soundsinth::model::ResidentEncoding::Dpcm8);
     packer.add_samples(pcm.data(), kSamples);
@@ -288,40 +288,42 @@ void test_decimation_matches_manual_average_all_encodings() {
 
     constexpr uint32_t kN = 5001; // нечётно; после прореживания 2501 - больше двух страниц
     std::vector<int16_t> src(kN);
-    for (uint32_t i = 0; i < kN; ++i) src[i] = static_cast<int16_t>(((i * 7919) % 60000) - 30000);
+    for (uint32_t i = 0; i < kN; ++i)
+        src[i] = static_cast<int16_t>(((i * 7919) % 60000) - 30000);
     std::vector<int16_t> avg;
     for (uint32_t i = 0; i + 1 < kN; i += 2) {
         avg.push_back(static_cast<int16_t>((static_cast<int32_t>(src[i]) + static_cast<int32_t>(src[i + 1])) / 2));
     }
     avg.push_back(src[kN - 1]);
 
-    const sample_pack::ResidentEncoding modes[] = {sample_pack::ResidentEncoding::Raw8,
-                                                   sample_pack::ResidentEncoding::Raw16,
+    const sample_pack::ResidentEncoding modes[] = {sample_pack::ResidentEncoding::Raw8, sample_pack::ResidentEncoding::Raw16,
                                                    sample_pack::ResidentEncoding::Dpcm8};
     for (const sample_pack::ResidentEncoding mode : modes) {
-        std::vector<int16_t> input = src;
+        std::vector<int16_t> input  = src;
         std::vector<int16_t> expect = avg;
         if (mode == sample_pack::ResidentEncoding::Raw8) {
             // Raw8 ждёт 8-битную шкалу источника.
-            for (int16_t& v : input) v = static_cast<int16_t>(v / 256);
+            for (int16_t& v : input)
+                v = static_cast<int16_t>(v / 256);
             expect.clear();
             for (uint32_t i = 0; i + 1 < kN; i += 2) {
-                expect.push_back(
-                    static_cast<int16_t>((static_cast<int32_t>(input[i]) + static_cast<int32_t>(input[i + 1])) / 2));
+                expect.push_back(static_cast<int16_t>((static_cast<int32_t>(input[i]) + static_cast<int32_t>(input[i + 1])) / 2));
             }
             expect.push_back(input[kN - 1]);
         }
 
         memory::PsramStore psram_a, psram_b;
         memory::psram_create(psram_a);
+        (void)memory::psram_freeze_pattern_zone(psram_a); // паттернов нет: блок трека - сэмплам
         memory::psram_create(psram_b);
+        (void)memory::psram_freeze_pattern_zone(psram_b); // паттернов нет: блок трека - сэмплам
 
         sample_pack::SamplePacker dec(psram_a, mode, /*decimate=*/true);
         const uint32_t cuts[] = {1, 2, 3, 777, 1000, 1};
-        uint32_t pos = 0;
+        uint32_t pos          = 0;
         for (uint32_t c = 0; pos < kN; ++c) {
             const uint32_t want = cuts[c % 6];
-            const uint32_t n = want < kN - pos ? want : kN - pos;
+            const uint32_t n    = want < kN - pos ? want : kN - pos;
             CHECK(dec.add_samples(input.data() + pos, n));
             pos += n;
         }
@@ -338,8 +340,7 @@ void test_decimation_matches_manual_average_all_encodings() {
         uint16_t pa = ra.first_page, pb = rb.first_page;
         uint32_t pages = 0;
         while (pa != memory::kPageChainEnd && pb != memory::kPageChainEnd) {
-            CHECK(std::memcmp(memory::psram_page_ptr(psram_a, pa), memory::psram_page_ptr(psram_b, pb),
-                              memory::kPsramPageBytes) == 0);
+            CHECK(std::memcmp(memory::psram_page_ptr(psram_a, pa), memory::psram_page_ptr(psram_b, pb), memory::kPsramPageBytes) == 0);
             if (pa == ra.checkpoint_first_page) CHECK(pb == rb.checkpoint_first_page);
             pa = memory::psram_page_next(psram_a, pa);
             pb = memory::psram_page_next(psram_b, pb);
@@ -366,6 +367,13 @@ void test_free_page_counter_matches_walk() {
     auto same = [&]() { return memory::psram_free_page_count(psram) == memory::psram_free_list_length(psram); };
     CHECK(same());
 
+    // Паттерны заняли 3 КБ с хвостиком - заморозка отдаёт остаток блока
+    // сэмплам и меняет число страниц.
+    CHECK(memory::psram_pattern_alloc(psram, 3000) != memory::kPatternAllocFailed);
+    memory::psram_freeze_pattern_zone(psram);
+    CHECK(same());
+    CHECK_EQ(memory::psram_free_page_count(psram), memory::psram_sample_page_count(psram));
+
     // Две цепочки разной длины, одна освобождается в середине.
     uint16_t chain[2] = {memory::kPageChainEnd, memory::kPageChainEnd};
     for (int c = 0; c < 2; ++c) {
@@ -373,7 +381,10 @@ void test_free_page_counter_matches_walk() {
         for (int i = 0; i < 5 + c * 7; ++i) {
             const uint16_t p = memory::psram_alloc_page(psram);
             CHECK(p != memory::kPageChainEnd);
-            if (prev == memory::kPageChainEnd) chain[c] = p; else memory::psram_set_next(psram, prev, p);
+            if (prev == memory::kPageChainEnd)
+                chain[c] = p;
+            else
+                memory::psram_set_next(psram, prev, p);
             memory::psram_set_next(psram, p, memory::kPageChainEnd);
             prev = p;
             CHECK(same());
@@ -383,19 +394,17 @@ void test_free_page_counter_matches_walk() {
     CHECK(same());
     memory::psram_free_chain(psram, chain[1]);
     CHECK(same());
-    CHECK_EQ(memory::psram_free_page_count(psram), psram.sample_page_count);
+    CHECK_EQ(memory::psram_free_page_count(psram), memory::psram_sample_page_count(psram));
 
-    // Паттерны заняли 3 КБ с хвостиком - заморозка даёт другое число страниц.
-    CHECK(memory::psram_pattern_alloc(psram, 3000) != memory::kPatternAllocFailed);
-    memory::psram_freeze_pattern_zone(psram);
-    CHECK(same());
-    CHECK_EQ(memory::psram_free_page_count(psram), psram.sample_page_count);
-
+    // Смена размера хранилища и сброс трека: блок берётся заново, и первая
+    // же просьба о странице усекает его - временного в нём нет.
     memory::psram_set_track_bytes(psram, memory::kBankTableOffset);
     CHECK(same());
-    (void)memory::psram_alloc_page(psram);
+    CHECK(memory::psram_alloc_page(psram) != memory::kPageChainEnd);
     CHECK(same());
     memory::psram_reset_track(psram);
+    CHECK(same());
+    (void)memory::psram_freeze_pattern_zone(psram);
     CHECK(same());
 
     // Всё выбрать: счётчик доходит до нуля вместе со списком.
@@ -418,13 +427,15 @@ void test_finish_and_publish_frees_on_every_failure() {
 
     memory::PsramStore psram;
     memory::psram_create(psram);
+    (void)memory::psram_freeze_pattern_zone(psram); // паттернов нет: блок трека - сэмплам
     static memory::SampleCacheCatalog catalog;
     memory::sample_cache_reset(catalog);
     const uint32_t all_free = memory::psram_free_page_count(psram);
 
     constexpr uint32_t kSamples = 40000;
     std::vector<int16_t> pcm(kSamples);
-    for (uint32_t i = 0; i < kSamples; ++i) pcm[i] = static_cast<int16_t>((i * 37) % 4096 - 2048);
+    for (uint32_t i = 0; i < kSamples; ++i)
+        pcm[i] = static_cast<int16_t>((i * 37) % 4096 - 2048);
     auto pack = [&](sample_pack::SamplePacker& packer) { CHECK(packer.add_samples(pcm.data(), kSamples)); };
 
     // Успех: опубликован, страницы заняты.
@@ -470,12 +481,14 @@ void test_finish_and_publish_frees_on_every_failure() {
 // совпасть с полным проходом.
 void test_checkpoint_table_spans_pages() {
     std::printf("test_sample_pack_checkpoint_table_spans_pages\n");
-    constexpr uint32_t kN = 200000;
+    constexpr uint32_t kN      = 200000;
     constexpr uint32_t kPoints = (kN + dpcm8::kCheckpointIntervalSamples - 1) / dpcm8::kCheckpointIntervalSamples;
     std::vector<int16_t> src(kN);
-    for (uint32_t i = 0; i < kN; ++i) src[i] = static_cast<int16_t>(((i * 2654435761u) >> 16) % 20000 - 10000);
+    for (uint32_t i = 0; i < kN; ++i)
+        src[i] = static_cast<int16_t>(((i * 2654435761u) >> 16) % 20000 - 10000);
     memory::PsramStore psram;
     memory::psram_create(psram);
+    (void)memory::psram_freeze_pattern_zone(psram); // паттернов нет: блок трека - сэмплам
     std::vector<dpcm8::Dpcm8Checkpoint> cp(kPoints);
     {
         std::vector<int8_t> bytes(kN);
@@ -497,7 +510,8 @@ void test_checkpoint_table_spans_pages() {
         int16_t out[dpcm8::kCheckpointIntervalSamples];
         const uint32_t n = decode_block_from_checkpoint(psram, r.first_page, r.checkpoint_first_page, block, kN, out);
         CHECK(n > 0);
-        for (uint32_t i = 0; i < n; ++i) CHECK_EQ(out[i], full[block * dpcm8::kCheckpointIntervalSamples + i]);
+        for (uint32_t i = 0; i < n; ++i)
+            CHECK_EQ(out[i], full[block * dpcm8::kCheckpointIntervalSamples + i]);
     }
     memory::psram_destroy(psram);
 }
@@ -512,11 +526,17 @@ void test_checkpoint_page_failure_and_reason() {
     {
         constexpr uint32_t kN = 200000;
         std::vector<int16_t> src(kN);
-        for (uint32_t i = 0; i < kN; ++i) src[i] = static_cast<int16_t>((i * 37) % 4096 - 2048);
+        for (uint32_t i = 0; i < kN; ++i)
+            src[i] = static_cast<int16_t>((i * 37) % 4096 - 2048);
         memory::PsramStore psram;
         memory::psram_create(psram);
+        (void)memory::psram_freeze_pattern_zone(psram); // паттернов нет: блок трека - сэмплам
         memory::sample_cache_reset(catalog);
-        while (memory::psram_free_page_count(psram) > 130u) (void)memory::psram_alloc_page(psram);
+        // Блок трека - сэмплам, иначе первая же страница усечёт его сама и
+        // зажать память до 130 страниц не выйдет.
+        (void)memory::psram_freeze_pattern_zone(psram);
+        while (memory::psram_free_page_count(psram) > 130u)
+            (void)memory::psram_alloc_page(psram);
         const uint32_t before = memory::psram_free_page_count(psram);
         sample_pack::SamplePacker packer(psram, sample_pack::ResidentEncoding::Dpcm8);
         CHECK(!packer.add_samples(src.data(), 131073));
@@ -533,14 +553,16 @@ void test_checkpoint_page_failure_and_reason() {
         std::vector<int16_t> src(2049, 5);
         memory::PsramStore psram;
         memory::psram_create(psram);
+        (void)memory::psram_freeze_pattern_zone(psram); // паттернов нет: блок трека - сэмплам
         memory::sample_cache_reset(catalog);
-        while (memory::psram_free_page_count(psram) > 1u) (void)memory::psram_alloc_page(psram);
+        while (memory::psram_free_page_count(psram) > 1u)
+            (void)memory::psram_alloc_page(psram);
         const uint32_t before = memory::psram_free_page_count(psram);
         sample_pack::SamplePacker packer(psram, sample_pack::ResidentEncoding::Raw8, /*decimate=*/true);
         CHECK(packer.add_samples(src.data(), 2049));
         const char* why = nullptr;
         CHECK(!sample_pack::finish_and_publish(packer, true, psram, catalog, 4, &why));
-        CHECK(why != nullptr && std::strcmp(why, "PSRAM кончилась") == 0);
+        CHECK(why != nullptr && std::strcmp(why, "PSRAM exhausted") == 0);
         CHECK_EQ(memory::psram_free_page_count(psram), before);
         memory::psram_destroy(psram);
     }

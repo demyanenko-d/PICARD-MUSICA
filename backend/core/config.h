@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 #pragma once
 
 // Настраиваемые компромиссы точности, памяти и процессора. Исключение -
@@ -28,20 +29,20 @@
 //
 // 640, а не 768: при 768 зоне сэмплов не хватает 24 КБ на The HYBRID
 // Collage, и трек не грузится.
-#define SOUNDSINTH_BANK_SD_TABLE_BYTES      (640u * 1024u)
+#define SOUNDSINTH_BANK_SD_TABLE_BYTES (640u * 1024u)
 
 // --- Голоса ---
 
 // Слоты 0..channel_count-1 - живые каналы, за ними - фоновые голоса NNA.
 // Звучит не больше SOUNDSINTH_MAX_VOICES: живые каналы первыми, фоновые
 // добирают остаток. Лишние 32 слота - около 10 КБ статики.
-#define SOUNDSINTH_MAX_SLOTS                96u  // записей состояния: 64 канала и фоновые голоса NNA
-#define SOUNDSINTH_MAX_VOICES               64u  // физических голосов одновременно
+#define SOUNDSINTH_MAX_SLOTS  96u // записей состояния: 64 канала и фоновые голоса NNA
+#define SOUNDSINTH_MAX_VOICES 64u // физических голосов одновременно
 
 // Слотов под фоновые голоса NNA (IT и .mid); звучат в пределах
 // SOUNDSINTH_MAX_VOICES. SOUNDSINTH_MAX_SLOTS не меньше суммы с
 // SOUNDSINTH_MAX_VOICES - проверяет движок.
-#define SOUNDSINTH_MAX_NNA_VOICES           32u
+#define SOUNDSINTH_MAX_NNA_VOICES 32u
 
 // Антиклик: за сколько выходных отсчётов громкость голоса доходит до
 // нового значения; без него ступенька на границе тика щёлкает на каждой
@@ -127,7 +128,7 @@
 #endif
 
 // --- Вывод звука: пул буферов ---
-#define SOUNDSINTH_AUDIO_BUFFER_FRAMES      256u // размер одного буфера, стерео-фреймов
+#define SOUNDSINTH_AUDIO_BUFFER_FRAMES 256u // размер одного буфера, стерео-фреймов
 // --- Только .mid ---
 
 // На сколько выше основного тона держать срез фильтра у .mid, в единицах

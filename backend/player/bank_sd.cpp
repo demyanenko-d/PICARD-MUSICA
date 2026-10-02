@@ -1,4 +1,5 @@
-// Банк с карты памяти (bank_sd.h).
+// SPDX-License-Identifier: MIT
+// Банк с карты памяти.
 
 #include "player/bank_sd.h"
 
@@ -16,9 +17,9 @@ namespace player {
 namespace {
 
 FATFS s_fs;
-FIL   s_file;
-bool  s_open = false;
-uint32_t s_pcm_base = 0;   // смещение зоны PCM от начала файла
+FIL s_file;
+bool s_open         = false;
+uint32_t s_pcm_base = 0; // смещение зоны PCM от начала файла
 
 // Чтение PCM по требованию распаковщика, смещение от начала зоны PCM
 // (как BankSample::pcm_offset).
@@ -36,8 +37,8 @@ uint32_t pcm_read(void*, uint32_t offset, uint8_t* dst, uint32_t bytes) {
 
 } // namespace
 
-bool bank_sd_open(soundsinth::bank::Bank& out) {
-    namespace bank = soundsinth::bank;
+bool bank_sd_open(soundsinth::bank::Bank& out, void (*pump)()) {
+    namespace bank   = soundsinth::bank;
     namespace memory = soundsinth::memory;
 
     if (!devices::storage::storage_present(devices::storage::Client::Board)) return false;
@@ -46,18 +47,18 @@ bool bank_sd_open(soundsinth::bank::Bank& out) {
     // перенесло бы отказ в первое чтение, а решение "флеш или карта"
     // нужно здесь.
     if (f_mount(&s_fs, "", 1) != FR_OK) {
-        std::printf("boot: банк с карты — файловая система не смонтирована (FAT16/32?)\n");
+        std::printf("boot: bank from card - filesystem not mounted (FAT16/32?)\n");
         return false;
     }
     if (f_open(&s_file, SOUNDSINTH_BANK_SD_PATH, FA_READ) != FR_OK) {
-        std::printf("boot: банка на карте нет (%s) — берём из флеша\n", SOUNDSINTH_BANK_SD_PATH);
+        std::printf("boot: no bank on the card (%s) - taking the one in flash\n", SOUNDSINTH_BANK_SD_PATH);
         f_mount(nullptr, "", 0);
         return false;
     }
     s_open = true;
 
     auto give_up = [&](const char* why) {
-        std::printf("boot: банк с карты не взят: %s\n", why);
+        std::printf("boot: bank from card not taken: %s\n", why);
         f_close(&s_file);
         f_mount(nullptr, "", 0);
         s_open = false;
@@ -68,56 +69,55 @@ bool bank_sd_open(soundsinth::bank::Bank& out) {
     bank::BankHeader head{};
     UINT got = 0;
     if (f_read(&s_file, &head, sizeof(head), &got) != FR_OK || got != sizeof(head)) {
-        return give_up("заголовок не читается");
+        return give_up("header is unreadable");
     }
-    if (head.magic != bank::kMagic) return give_up("не банк: сигнатура не совпала");
+    if (head.magic != bank::kMagic) return give_up("not a bank: signature mismatch");
     // Версия проверяется здесь, с числами в логе: bank_open() скажет только
     // "версия формата банка не та", а сигнатура SSB1 у всех версий одна, и
     // старый банк иначе не отличить от испорченного файла или сбоя чтения.
     if (head.version != bank::kVersion) {
         char m[128];
-        std::snprintf(m, sizeof(m), "версия банка %u, а нужна %u — перепеките sf2bake",
-                      head.version, bank::kVersion);
+        std::snprintf(m, sizeof(m), "bank version %u, need %u - rebuild the bank with sf2bake", head.version, bank::kVersion);
         return give_up(m);
     }
     if (head.pcm_offset > memory::kBankTableBytes) {
         char m[128];
-        std::snprintf(m, sizeof(m), "таблицы %" PRIu32 " КБ, а места отведено %" PRIu32 " КБ (config.h)",
-                      head.pcm_offset / 1024u, memory::kBankTableBytes / 1024u);
+        std::snprintf(m, sizeof(m), "tables %" PRIu32 " KB, but %" PRIu32 " KB reserved (config.h)", head.pcm_offset / 1024u, memory::kBankTableBytes / 1024u);
         return give_up(m);
     }
-    if (f_size(&s_file) < head.total_bytes) return give_up("файл короче, чем говорит заголовок");
+    if (f_size(&s_file) < head.total_bytes) return give_up("file is shorter than the header says");
 
     // Таблицы - в конце чипа (kBankTableOffset); хранилище трека на них
     // ужимается при старте (psram_set_track_bytes), буфер GS режется уже
     // ниже, пересечения нет.
     uint8_t* tables = platform::psram_base_acquire(memory::kPsramChipBytes) + memory::kBankTableOffset;
-    if (f_lseek(&s_file, 0) != FR_OK) return give_up("перемотка к началу не удалась");
+    if (f_lseek(&s_file, 0) != FR_OK) return give_up("seek to the start failed");
     uint32_t done = 0;
     while (done < head.pcm_offset) {
         // По 32 КБ: накладные у f_read на вызов, а не на объём.
         constexpr uint32_t kTableChunkBytes = 32768u;
-        const uint32_t chunk = head.pcm_offset - done < kTableChunkBytes ? head.pcm_offset - done : kTableChunkBytes;
+        const uint32_t chunk                = head.pcm_offset - done < kTableChunkBytes ? head.pcm_offset - done : kTableChunkBytes;
         if (f_read(&s_file, tables + done, chunk, &got) != FR_OK || got != chunk) {
-            return give_up("таблицы не дочитались");
+            return give_up("tables were not read to the end");
         }
         done += chunk;
+        // Между куска́ми: перечисление USB двигается витком стека, и без
+        // этого клавиатура ждала бы все таблицы.
+        if (pump != nullptr) pump();
     }
     // Таблицы легли в кэшируемое окно; bank_open и движок читают тем же
     // кэшем, сброс не нужен.
     const char* err = nullptr;
     if (!bank::bank_open(tables, head.pcm_offset, out, &err, /*tables_only=*/true)) {
-        return give_up(err ? err : "причина не названа");
+        return give_up(err ? err : "reason not given");
     }
-    s_pcm_base = head.pcm_offset;
+    s_pcm_base     = head.pcm_offset;
     out.pcm_source = bank::BankPcmSource{pcm_read, nullptr};
 
     // Десятые мегабайта целыми: без плавающей точки в объекте.
     const uint32_t tenths_mb = head.total_bytes / (1048576u / 10u);
-    std::printf("boot: банк с карты %s: %" PRIu32 ".%" PRIu32 " МБ, таблицы %" PRIu32
-                " КБ, инструментов %u, сэмплов %u\n",
-                SOUNDSINTH_BANK_SD_PATH, tenths_mb / 10u, tenths_mb % 10u, head.pcm_offset / 1024u,
-                head.instrument_count, head.sample_count);
+    std::printf("boot: bank from card %s: %" PRIu32 ".%" PRIu32 " MB, tables %" PRIu32 " KB, instruments %u, samples %u\n", SOUNDSINTH_BANK_SD_PATH,
+                tenths_mb / 10u, tenths_mb % 10u, head.pcm_offset / 1024u, head.instrument_count, head.sample_count);
     return true;
 }
 

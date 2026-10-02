@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 #pragma once
 
 // HOSTLINK - связь платы расширения с хостом ZX Spectrum по шине Z80.
@@ -8,15 +9,8 @@
 //
 // --- Что нужно для переноса в другой проект ---
 //
-//   backend/ports/rp2350/hostlink/                - каталог
-//   backend/ports/rp2350/hw_config.h              - карта ресурсов PIO, DMA, IRQ
-//   backend/ports/rp2350/firmware_config.h        (порты протокола, ключи SOUNDSINTH_*)
-//   backend/ports/rp2350/storage/                 - эмулятор SD для divmmc, без него bus.cpp не собрать
-//   backend/player/protocol/host_protocol.h/.cpp
-//   backend/platform/log.h, log_rings.*         - журнал; консоль даёт порт
-//
-// Внешние зависимости: pico-sdk (hardware_pio/dma/irq/clocks, pico_time)
-// и debug_log().
+// Внешние зависимости: pico-sdk (hardware_pio/dma/irq/clocks, pico_time),
+// эмулятор SD-карты и журнал платы.
 //
 // --- Слои ---
 //
@@ -71,7 +65,6 @@ void service_and_wait();
 // Общая длительность и счётчики содержимого - хост показывает их сразу
 // после разбора метаданных, до первого звука. Через фасад, а не протокол:
 // зовёт и эмуляция GS, у которой протокола нет.
-void set_file_info(uint8_t minutes, uint8_t seconds, uint16_t num_samples, uint16_t num_patterns,
-                   uint16_t num_instruments);
+void set_file_info(uint8_t minutes, uint8_t seconds, uint16_t num_samples, uint16_t num_patterns, uint16_t num_instruments);
 
 } // namespace hostlink

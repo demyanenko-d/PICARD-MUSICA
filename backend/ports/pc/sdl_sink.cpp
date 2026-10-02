@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 #include "pc/sdl_sink.h"
 
 #include <SDL.h>
@@ -22,12 +23,12 @@ using player::audio::BufferPool;
 // той же очередью теряет или удваивает буфер. Пул вычерпывает задача
 // FreeRTOS в роли прерывания I2S и копирует буферы в кольцо на атомиках;
 // колбэк читает кольцо.
-constexpr uint32_t kRingSlots = 4;
-constexpr uint32_t kFrames = BufferPool::kFramesPerBuffer;
+constexpr uint32_t kRingSlots      = 4;
+constexpr uint32_t kFrames         = BufferPool::kFramesPerBuffer;
 constexpr uint32_t kFeedStackWords = 256;
 
 struct SdlSinkState {
-    BufferPool* pool = nullptr;
+    BufferPool* pool         = nullptr;
     SDL_AudioDeviceID device = 0;
     int16_t ring[kRingSlots][kFrames * 2];
     std::atomic<uint32_t> head{0}; // пишет задача
@@ -35,7 +36,7 @@ struct SdlSinkState {
     // Последний сыгранный буфер. При голодании колбэк повторяет его вместо
     // тишины, как DMA-ISR на плате.
     int16_t last[kFrames * 2];
-    bool have_last = false;
+    bool have_last          = false;
     uint32_t underrun_count = 0; // диагностика
     std::atomic<bool> quit{false};
     platform::Semaphore* exited = nullptr;
@@ -71,10 +72,10 @@ void feed_task(void* arg) {
 }
 
 void audio_callback(void* userdata, Uint8* stream, int len) {
-    auto* state = static_cast<SdlSinkState*>(userdata);
+    auto* state                    = static_cast<SdlSinkState*>(userdata);
     const uint32_t bytes_per_frame = 2 * sizeof(int16_t);
-    uint32_t frames_needed = static_cast<uint32_t>(len) / bytes_per_frame;
-    uint8_t* out = stream;
+    uint32_t frames_needed         = static_cast<uint32_t>(len) / bytes_per_frame;
+    uint8_t* out                   = stream;
 
     while (frames_needed > 0) {
         const uint32_t tail = state->tail.load(std::memory_order_relaxed);
@@ -94,7 +95,7 @@ void audio_callback(void* userdata, Uint8* stream, int len) {
         // здесь всегда take == frames_needed за один проход.
         const uint32_t take = kFrames < frames_needed ? kFrames : frames_needed;
         std::memcpy(out, state->last, static_cast<size_t>(take) * bytes_per_frame);
-        out += take * bytes_per_frame;
+        out           += take * bytes_per_frame;
         frames_needed -= take;
     }
 }
@@ -103,7 +104,7 @@ void audio_callback(void* userdata, Uint8* stream, int len) {
 
 bool sdl_sink_start(player::audio::BufferPool& pool) {
     SdlSinkState* state = &s_state;
-    state->pool = &pool;
+    state->pool         = &pool;
     state->head.store(0);
     state->tail.store(0);
     state->have_last = false;
@@ -113,10 +114,10 @@ bool sdl_sink_start(player::audio::BufferPool& pool) {
     }
 
     SDL_AudioSpec want{};
-    want.freq = 44100;
-    want.format = AUDIO_S16SYS;
+    want.freq     = 44100;
+    want.format   = AUDIO_S16SYS;
     want.channels = 2;
-    want.samples = static_cast<Uint16>(kFrames);
+    want.samples  = static_cast<Uint16>(kFrames);
     want.callback = audio_callback;
     want.userdata = state;
 

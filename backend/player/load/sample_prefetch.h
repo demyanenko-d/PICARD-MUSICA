@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 #pragma once
 
 // Планировщик порядка загрузки сэмплов (прогрессивная загрузка).
@@ -46,7 +47,7 @@ enum class LoadOrder : uint8_t {
 // Результат plan_playback_order: сколько индексов записано в out_indices
 // (не больше capacity) и сколько из них, с начала, - префетч.
 struct PlaybackPlan {
-    uint16_t count = 0;
+    uint16_t count          = 0;
     uint16_t prefetch_count = 0;
 };
 
@@ -76,10 +77,54 @@ struct PlaybackPlan {
 // kSampleNeverUsed. Нужен фоновой догрузке, чтобы не уходить дальше
 // заданного упреждения. Индексация по сэмплу, потому что план
 // пересортировывается по file_offset.
-PlaybackPlan plan_playback_order(const soundsinth::model::Song& song, soundsinth::memory::PsramStore& psram, uint16_t* out_indices,
-                                  uint16_t capacity, uint16_t* out_last_use_order_pos,
-                                  LoadOrder order = LoadOrder::ByFile,
-                                  uint16_t prefetch_positions = kPrefetchOrderPositions,
-                                  uint16_t* out_first_use_order_pos = nullptr);
+PlaybackPlan plan_playback_order(const soundsinth::model::Song& song, soundsinth::memory::PsramStore& psram, uint16_t* out_indices, uint16_t capacity,
+                                 uint16_t* out_last_use_order_pos, LoadOrder order = LoadOrder::ByFile, uint16_t prefetch_positions = kPrefetchOrderPositions,
+                                 uint16_t* out_first_use_order_pos = nullptr);
+
+// --- Тот же план, но проходом длительности ---
+//
+// До первой ноты песня обходилась дважды: проход длительности и отдельный
+// обход плана читали одни и те же строки. У трекерного файла второй обход -
+// повторная распаковка из PSRAM, у .mid - весь трек через конвертер заново,
+// потому что строк в памяти нет и их выдаёт источник.
+//
+// Сборщик цепляется наблюдателем к проходу длительности и заполняет те же
+// три массива. Отличие от линейного обхода в составе: проход идёт по
+// настоящему порядку воспроизведения, поэтому позиции, через которые
+// песня перепрыгивает, в план не попадают, а позиция может и убывать -
+// первая и последняя считаются минимумом и максимумом.
+//
+// Живёт на стеке вызывающего: инструмент канала переносится между
+// паттернами, и это состояние прохода, а не песни.
+struct PlanCollector {
+    const soundsinth::model::Song* song                              = nullptr;
+    uint16_t* indices                                                = nullptr;
+    uint16_t* last_use                                               = nullptr;
+    uint16_t* first_use                                              = nullptr;
+    uint16_t capacity                                                = 0;
+    uint16_t count                                                   = 0;
+    uint16_t prefetch_positions                                      = 0;
+    uint16_t prefetch_count                                          = 0;
+    uint16_t positions_seen                                          = 0;
+    uint16_t prev_order_pos                                          = 0xffffu;
+    uint16_t last_instrument[soundsinth::model::kMaxPatternChannels] = {};
+};
+
+void plan_collect_begin(PlanCollector& pc, const soundsinth::model::Song& song, uint16_t* out_indices, uint16_t capacity, uint16_t* out_last_use_order_pos,
+                        uint16_t* out_first_use_order_pos, uint16_t prefetch_positions);
+
+// Ставится RowObserver'ом в compute_song_total_frames, user - сборщик.
+void plan_collect_row(void* user, const soundsinth::model::PatternCell* cells, uint8_t channel_count, uint16_t order_pos);
+
+// Досортировать по стратегии и отдать результат. Проход кончился неполным
+// (упёрся в пределы или буфера не было) - план неполон, брать его нельзя.
+PlaybackPlan plan_collect_finish(PlanCollector& pc, LoadOrder order);
+
+// Разделить собранный план на префетч и хвост по первой позиции сэмпла и
+// отсортировать части по стратегии. Граница префетча известна только
+// вызывающему - у .mid она считается по времени, - поэтому деление идёт
+// отдельно от сбора.
+PlaybackPlan plan_split_prefetch(const soundsinth::model::Song& song, uint16_t* indices, uint16_t count, const uint16_t* first_use, uint16_t prefetch_positions,
+                                 LoadOrder order);
 
 } // namespace player::load

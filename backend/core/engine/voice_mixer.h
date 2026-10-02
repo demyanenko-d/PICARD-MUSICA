@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 #pragma once
 
 // Звуковая часть движка: то, что работает на каждом выходном отсчёте, -
@@ -53,7 +54,7 @@ struct VoiceRamp {
 
     bool fading() const { return tail_remaining != 0 || wave_remaining != 0; }
 };
-static_assert(sizeof(VoiceRamp) == 32, "VoiceRamp - 32 байта, адрес слота сдвигом");
+static_assert(sizeof(VoiceRamp) == 32, "VoiceRamp is 32 bytes, the slot address is a shift");
 
 // Цена голоса по модели SOUNDSINTH_VOICE_COST_*: из кодека, шага и
 // включённости фильтра. Абсолютные наносекунды приблизительны, соотношение
@@ -94,7 +95,7 @@ public:
     // сводится и до того, как тик впервые задал ему маршрут, а discard_l без
     // solo - нулевой указатель.
     uint8_t reverb_send[SOUNDSINTH_MAX_SLOTS] = {};
-    bool discard[SOUNDSINTH_MAX_SLOTS] = {};
+    bool discard[SOUNDSINTH_MAX_SLOTS]        = {};
     // Голоса, которые сводятся на этом тике.
     uint8_t active[SOUNDSINTH_MAX_SLOTS];
     uint8_t active_count = 0;
@@ -108,15 +109,15 @@ public:
     // занятым ramp_samples отсчётов. Понадобился слот раньше - хвост
     // обрывается: started сколько начато, cut_note сколько убито новой нотой
     // слота, cut_move переездом голоса NNA.
-    uint32_t wave_tail_started = 0;
+    uint32_t wave_tail_started  = 0;
     uint32_t wave_tail_cut_note = 0;
     uint32_t wave_tail_cut_move = 0;
 
     // --- Постоянное на трек ---
     uint32_t ramp_samples = 0;
-    int32_t* reverb_bus = nullptr; // nullptr - посылов нет
-    int32_t* discard_l = nullptr;
-    int32_t* discard_r = nullptr;
+    int32_t* reverb_bus   = nullptr; // nullptr - посылов нет
+    int32_t* discard_l    = nullptr;
+    int32_t* discard_r    = nullptr;
 
     // --- Команды тика на голос слота ---
 
@@ -129,8 +130,8 @@ public:
     // память фильтра с нуля - как в OpenMPT: иначе новая нота стартует с
     // хвоста прошлой в обратной связи. Начало ноты разобрано тиком, шаг ему
     // же ставить: высота приходит отдельной командой до рендера.
-    void trigger(uint8_t slot, memory::PsramStore& psram, const soundsinth::model::SampleDescriptor& sample,
-                 uint16_t first_page, uint16_t checkpoint_first_page, const TriggerStart& start, bool hermite) {
+    void trigger(uint8_t slot, memory::PsramStore& psram, const soundsinth::model::SampleDescriptor& sample, uint16_t first_page,
+                 uint16_t checkpoint_first_page, const TriggerStart& start, bool hermite) {
         voice_trigger_prepared(voices[slot], psram, sample, first_page, checkpoint_first_page, start, hermite);
         ramp[slot].restart = true;
         filter_state[slot] = FilterState{};
@@ -188,7 +189,7 @@ public:
     void filter_off(uint8_t slot) { filter_coeffs[slot].active = false; }
     void set_filter(uint8_t slot, const FilterCoeffs& c) { filter_coeffs[slot] = c; }
     void set_route(uint8_t slot, bool to_discard, uint8_t send) {
-        discard[slot] = to_discard;
+        discard[slot]     = to_discard;
         reverb_send[slot] = send;
     }
 
@@ -224,8 +225,7 @@ public:
     // Свести batch отсчётов голосов списка в mix_l/mix_r начиная с отсчёта
     // at; посыл - в reverb_bus не дальше reverb_frames. Внутри батча
     // границы тика нет.
-    void mix(memory::PsramStore& psram, int32_t* mix_l, int32_t* mix_r, uint32_t at, uint32_t batch,
-             uint32_t reverb_frames);
+    void mix(memory::PsramStore& psram, int32_t* mix_l, int32_t* mix_r, uint32_t at, uint32_t batch, uint32_t reverb_frames);
 };
 
 } // namespace soundsinth::engine

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 #include "testing.h"
 
 #include <cstdio>
@@ -17,20 +18,18 @@ namespace {
 // ведёт тот же код, что у прошивки (host_frame.h), слово ответа - сам байт.
 struct Host {
     HostProtocol* p;
-    uint8_t status = HostProtocol::kStNone; // слово порта статуса
-    uint8_t dat = 0;                        // слово порта данных
+    uint8_t status                     = HostProtocol::kStNone; // слово порта статуса
+    uint8_t dat                        = 0;                     // слово порта данных
     uint32_t words[host_frame::kWords] = {};
-    uint8_t pos = 0;
-    int arms = 0;
+    uint8_t pos                        = 0;
+    int arms                           = 0;
 
-    explicit Host(HostProtocol& proto) : p(&proto) {
-        p->set_arm(&arm_cb, this, &hide_cb);
-    }
+    explicit Host(HostProtocol& proto) : p(&proto) { p->set_arm(&arm_cb, this, &hide_cb); }
 
     // Байты команды хоста, которые придут "во время вооружения": ISR
     // принимает их между записью аргументов и статуса.
     const uint8_t* inject = nullptr;
-    uint8_t inject_n = 0;
+    uint8_t inject_n      = 0;
     std::vector<uint8_t> executed; // коды, которые хост видел и исполнил бы
 
     // Приёмник кадра. Барьер публикации - то место, где на железе байт хоста
@@ -39,16 +38,15 @@ struct Host {
         static constexpr uint8_t kCmd = 0;
         static constexpr uint8_t kDat = 1;
         Host* host;
-        void set(uint8_t port, uint32_t word) {
-            (port == kCmd ? host->status : host->dat) = static_cast<uint8_t>(word);
-        }
+        void set(uint8_t port, uint32_t word) { (port == kCmd ? host->status : host->dat) = static_cast<uint8_t>(word); }
         uint32_t encode(uint8_t byte) { return byte; }
         void publish_fence() {
             const uint8_t* bytes = host->inject;
-            const uint8_t count = host->inject_n;
-            host->inject = nullptr;
-            host->inject_n = 0;
-            for (uint8_t i = 0; i < count; ++i) host_frame::command_byte(*this, host->p, bytes[i]);
+            const uint8_t count  = host->inject_n;
+            host->inject         = nullptr;
+            host->inject_n       = 0;
+            for (uint8_t i = 0; i < count; ++i)
+                host_frame::command_byte(*this, host->p, bytes[i]);
         }
     };
 
@@ -65,9 +63,7 @@ struct Host {
     }
 
     // Хост опрашивает статус. 0xFF трактуется как 0 (шина без платы).
-    uint8_t poll_status() const {
-        return (status == HostProtocol::kStNoneAlt) ? HostProtocol::kStNone : status;
-    }
+    uint8_t poll_status() const { return (status == HostProtocol::kStNoneAlt) ? HostProtocol::kStNone : status; }
 
     // Чтение аргументов: байт на шине, после чтения плата готовит следующий.
     uint8_t read_arg() {
@@ -79,16 +75,18 @@ struct Host {
 
     bool read_args(uint8_t* dst, uint8_t n) {
         uint8_t sum = 0;
-        for (uint8_t i = 0; i < n; ++i) dst[i] = read_arg();
-        for (uint8_t i = 0; i + 1 < n; ++i) sum = static_cast<uint8_t>(sum + dst[i]);
+        for (uint8_t i = 0; i < n; ++i)
+            dst[i] = read_arg();
+        for (uint8_t i = 0; i + 1 < n; ++i)
+            sum = static_cast<uint8_t>(sum + dst[i]);
         return sum == dst[n - 1];
     }
 
-    void command(uint8_t code, uint8_t b1 = 0, uint8_t b2 = 0, uint8_t b3 = 0, uint8_t b4 = 0, uint8_t b5 = 0,
-                  uint8_t b6 = 0, uint8_t b7 = 0) {
+    void command(uint8_t code, uint8_t b1 = 0, uint8_t b2 = 0, uint8_t b3 = 0, uint8_t b4 = 0, uint8_t b5 = 0, uint8_t b6 = 0, uint8_t b7 = 0) {
         const uint8_t bytes[8] = {code, b1, b2, b3, b4, b5, b6, b7};
         Sink sink{this};
-        for (uint8_t b : bytes) host_frame::command_byte(sink, p, b);
+        for (uint8_t b : bytes)
+            host_frame::command_byte(sink, p, b);
         p->poll();
     }
 
@@ -98,21 +96,21 @@ struct Host {
     void command_bytes(uint8_t code, uint8_t b1, uint8_t count) {
         const uint8_t bytes[8] = {code, b1, 0, 0, 0, 0, 0, 0};
         Sink sink{this};
-        for (uint8_t i = 0; i < count; ++i) host_frame::command_byte(sink, p, bytes[i]);
+        for (uint8_t i = 0; i < count; ++i)
+            host_frame::command_byte(sink, p, bytes[i]);
     }
 
     void send_data(const uint8_t* data, uint16_t n) {
-        for (uint16_t i = 0; i < n; ++i) p->on_data_byte(data[i]);
+        for (uint16_t i = 0; i < n; ++i)
+            p->on_data_byte(data[i]);
     }
 
-    void done(uint16_t written) {
-        command(HostProtocol::kHcDone, static_cast<uint8_t>(written), static_cast<uint8_t>(written >> 8));
-    }
+    void done(uint16_t written) { command(HostProtocol::kHcDone, static_cast<uint8_t>(written), static_cast<uint8_t>(written >> 8)); }
 };
 
 // Доставка окна ожидающему: take_received после шага, как цикл источника.
 struct Received {
-    int calls = 0;
+    int calls       = 0;
     uint16_t length = 0xFFFF;
     std::vector<uint8_t> bytes;
     void collect(HostProtocol& p) {
@@ -167,7 +165,8 @@ void test_end_session_mid_command_keeps_frame() {
     Host h(p);
     h.command_bytes(HostProtocol::kHcDone, 0, 3);
     p.end_session();
-    for (uint8_t i = 3; i < 8; ++i) p.on_command_byte(0);
+    for (uint8_t i = 3; i < 8; ++i)
+        p.on_command_byte(0);
     p.poll();
     h.command(HostProtocol::kHcReset);
     CHECK_EQ(h.poll_status(), static_cast<uint8_t>(HostProtocol::kStResetDone));
@@ -212,7 +211,8 @@ void test_command_ring_keeps_two_frames() {
     CHECK_EQ(h.poll_status(), static_cast<uint8_t>(HostProtocol::kStResetDone));
     auto frame = [&](uint8_t code, uint8_t b1) {
         const uint8_t bytes[8] = {code, b1, 0, 0, 0, 0, 0, 0};
-        for (uint8_t b : bytes) p.on_command_byte(b);
+        for (uint8_t b : bytes)
+            p.on_command_byte(b);
     };
     h.status = HostProtocol::kStNone;
     frame(HostProtocol::kHcDone, 0);  // имя платы принято
@@ -245,13 +245,14 @@ void test_file_request_round_trip() {
 
     uint8_t a[13];
     CHECK(h.read_args(a, 13));
-    const uint32_t off = static_cast<uint32_t>(a[0]) | (static_cast<uint32_t>(a[1]) << 8) |
-                          (static_cast<uint32_t>(a[2]) << 16) | (static_cast<uint32_t>(a[3]) << 24);
+    const uint32_t off =
+        static_cast<uint32_t>(a[0]) | (static_cast<uint32_t>(a[1]) << 8) | (static_cast<uint32_t>(a[2]) << 16) | (static_cast<uint32_t>(a[3]) << 24);
     CHECK_EQ(off, 8192u);
     CHECK_EQ(static_cast<uint16_t>(a[4] | (a[5] << 8)), static_cast<uint16_t>(4096));
 
     std::vector<uint8_t> data(4096);
-    for (size_t i = 0; i < data.size(); ++i) data[i] = static_cast<uint8_t>(i * 7 + 3);
+    for (size_t i = 0; i < data.size(); ++i)
+        data[i] = static_cast<uint8_t>(i * 7 + 3);
     h.send_data(data.data(), 4096);
     h.done(4096);
 
@@ -300,7 +301,8 @@ void test_no_arm_over_unacked_command() {
     CHECK_EQ(got.calls, 0);
 
     // Хост дописывает подтверждение.
-    for (uint8_t i = 1; i < 8; ++i) p.on_command_byte(0);
+    for (uint8_t i = 1; i < 8; ++i)
+        p.on_command_byte(0);
     p.poll();
 
     // Пустого окна наверх не ушло, и только теперь выставлено чтение.
@@ -347,8 +349,8 @@ void test_read_frame_echoes_offset() {
 
     // И копии - это запрошенные значения, а не что попало, совпавшее само с
     // собой.
-    const uint32_t echo = static_cast<uint32_t>(a[6]) | (static_cast<uint32_t>(a[7]) << 8) |
-                           (static_cast<uint32_t>(a[8]) << 16) | (static_cast<uint32_t>(a[9]) << 24);
+    const uint32_t echo =
+        static_cast<uint32_t>(a[6]) | (static_cast<uint32_t>(a[7]) << 8) | (static_cast<uint32_t>(a[8]) << 16) | (static_cast<uint32_t>(a[9]) << 24);
     CHECK_EQ(echo, 0x003B8200u);
     CHECK_EQ(static_cast<uint16_t>(a[10] | (a[11] << 8)), static_cast<uint16_t>(4096));
 }
@@ -392,9 +394,11 @@ void test_debug_event_ring_counts_losses() {
     HostProtocol::DebugEvent e;
     while (p.try_pop_debug_event(e)) {
     }
-    for (int i = 0; i < 40; ++i) p.reset(); // каждый reset - событие Reset
+    for (int i = 0; i < 40; ++i)
+        p.reset(); // каждый reset - событие Reset
     uint32_t read = 0;
-    while (p.try_pop_debug_event(e)) ++read;
+    while (p.try_pop_debug_event(e))
+        ++read;
     CHECK_EQ(read, 32u);
     CHECK_EQ(p.debug_events_lost(), 8u);
     for (int i = 0; i < 300; ++i) {
@@ -438,7 +442,8 @@ void test_nak_gives_up_after_limit() {
     p.request_file_chunk(4096, 4096);
     p.poll();
 
-    for (uint8_t i = 0; i < HostProtocol::kMaxNak; ++i) h.command(HostProtocol::kHcNak);
+    for (uint8_t i = 0; i < HostProtocol::kMaxNak; ++i)
+        h.command(HostProtocol::kHcNak);
 
     // Сдались: команда снята, наверх ушло короткое чтение - загрузка
     // провалится явно, а не повиснет в ожидании данных, которых не будет.
@@ -469,7 +474,8 @@ void test_ended_position_survives_giveup() {
     p.set_position(3, 12, PlaybackState::Playing);
     p.poll();
     CHECK_EQ(h.poll_status(), static_cast<uint8_t>(HostProtocol::kStPosition));
-    for (uint8_t i = 0; i < HostProtocol::kMaxNak; ++i) h.command(HostProtocol::kHcNak);
+    for (uint8_t i = 0; i < HostProtocol::kMaxNak; ++i)
+        h.command(HostProtocol::kHcNak);
     CHECK_EQ(p.nak_giveups(), 1u);
     p.poll();
     CHECK_EQ(h.poll_status(), static_cast<uint8_t>(HostProtocol::kStNone));
@@ -477,7 +483,8 @@ void test_ended_position_survives_giveup() {
     p.set_position(3, 13, PlaybackState::Ended);
     p.poll();
     CHECK_EQ(h.poll_status(), static_cast<uint8_t>(HostProtocol::kStPosition));
-    for (uint8_t i = 0; i < HostProtocol::kMaxNak; ++i) h.command(HostProtocol::kHcNak);
+    for (uint8_t i = 0; i < HostProtocol::kMaxNak; ++i)
+        h.command(HostProtocol::kHcNak);
     CHECK_EQ(p.nak_giveups(), 2u);
     p.poll();
     CHECK_EQ(h.poll_status(), static_cast<uint8_t>(HostProtocol::kStPosition));
@@ -534,19 +541,17 @@ void test_fast_path_table() {
         bool fast;
     };
     const Case cases[] = {
-        {8192, 2, 4096, 4096, true},     // окно ровно до конца файла
-        {8191, 2, 4096, 4096, false},    // байта не хватает
-        {100000, 2, 4097, 4096, false},  // не с начала сектора
-        {1000, 2, 4096, 4096, false},    // смещение за концом, без заворота разности
-        {100000, 2, 4096, 3071, false},  // короче порога
-        {100000, 2, 4096, 3072, true},   // ровно порог
-        {100000, 0, 128, 4096, true},    // сектор 128
-        {100000, 1, 128, 4096, false},   // сектор 256
-        {100000, 1, 256, 4096, true},
-        {100000, 2, 256, 4096, false},   // сектор 512
-        {100000, 3, 512, 4096, false},   // сектор 1024
-        {100000, 3, 1024, 4096, true},
-        {100000, 0xff, 4096, 4096, false}, // до старта сессии сектора нет
+        {8192, 2, 4096, 4096, true},                                       // окно ровно до конца файла
+        {8191, 2, 4096, 4096, false},                                      // байта не хватает
+        {100000, 2, 4097, 4096, false},                                    // не с начала сектора
+        {1000, 2, 4096, 4096, false},                                      // смещение за концом, без заворота разности
+        {100000, 2, 4096, 3071, false},                                    // короче порога
+        {100000, 2, 4096, 3072, true},                                     // ровно порог
+        {100000, 0, 128, 4096, true},                                      // сектор 128
+        {100000, 1, 128, 4096, false},                                     // сектор 256
+        {100000, 1, 256, 4096, true},   {100000, 2, 256, 4096, false},     // сектор 512
+        {100000, 3, 512, 4096, false},                                     // сектор 1024
+        {100000, 3, 1024, 4096, true},  {100000, 0xff, 4096, 4096, false}, // до старта сессии сектора нет
     };
     for (const Case& c : cases) {
         HostProtocol p;
@@ -554,15 +559,14 @@ void test_fast_path_table() {
         p.set_callbacks(cb);
         Host h(p);
         if (c.sector != 0xff) {
-            h.command(HostProtocol::kHcStart, static_cast<uint8_t>(c.file), static_cast<uint8_t>(c.file >> 8),
-                      static_cast<uint8_t>(c.file >> 16), static_cast<uint8_t>(c.file >> 24), c.sector, 0);
+            h.command(HostProtocol::kHcStart, static_cast<uint8_t>(c.file), static_cast<uint8_t>(c.file >> 8), static_cast<uint8_t>(c.file >> 16),
+                      static_cast<uint8_t>(c.file >> 24), c.sector, 0);
         }
         p.request_file_chunk(c.off, c.len);
         p.poll();
         const uint8_t want = c.fast ? HostProtocol::kStReadFast : HostProtocol::kStReadSlow;
         if (h.poll_status() != want) {
-            std::printf("  файл %u сектор %u смещение %u длина %u: ждали %s\n", c.file, c.sector, c.off, c.len,
-                        c.fast ? "быстрый" : "медленный");
+            std::printf("  file %u sector %u offset %u length %u: expected %s\n", c.file, c.sector, c.off, c.len, c.fast ? "fast" : "slow");
         }
         CHECK_EQ(h.poll_status(), want);
     }
@@ -576,7 +580,7 @@ void test_fast_path_table() {
 void test_session_start_fields() {
     std::printf("test_session_start_fields\n");
     struct Got {
-        int calls = 0;
+        int calls          = 0;
         uint8_t load_order = 0xff;
     };
     auto on_start = [](void* user, uint32_t, uint32_t, uint8_t, uint8_t load_order) {
@@ -588,7 +592,7 @@ void test_session_start_fields() {
         HostProtocol p;
         Got g;
         HostProtocol::Callbacks cb;
-        cb.user = &g;
+        cb.user             = &g;
         cb.on_session_start = on_start;
         p.set_callbacks(cb);
         Host h(p);
@@ -598,7 +602,7 @@ void test_session_start_fields() {
         h.command(HostProtocol::kHcStart, 0x00, 0x10, 0x00, 0x00, 4, 0, 0);
         CHECK_EQ(g.calls, 1); // сектор 4 - колбэка нет, но есть событие отказа
         HostProtocol::DebugEvent e{};
-        bool rejected = false;
+        bool rejected       = false;
         uint16_t start_arg1 = 0;
         while (p.try_pop_debug_event(e)) {
             if (e.kind == HostProtocol::DebugEventKind::SessionRejected && e.arg0 == 4) rejected = true;
@@ -612,7 +616,7 @@ void test_session_start_fields() {
         HostProtocol p;
         Got g;
         HostProtocol::Callbacks cb;
-        cb.user = &g;
+        cb.user             = &g;
         cb.on_session_start = on_start;
         p.set_callbacks(cb);
         Host h(p);
@@ -676,7 +680,8 @@ void test_telemetry_round_robin_order() {
     p.set_psram_stats(1, 2, 3);
     p.set_engine_load(1, 2, 3, 4);
     h.command(HostProtocol::kHcStart, 0x00, 0x00, 0x10, 0x00, 2, 0x3f); // позицию взводит сам старт
-    for (uint8_t code = HostProtocol::kStFileInfo; code <= HostProtocol::kStEngineLoad; ++code) expect_then_ack(code);
+    for (uint8_t code = HostProtocol::kStFileInfo; code <= HostProtocol::kStEngineLoad; ++code)
+        expect_then_ack(code);
     CHECK_EQ(h.poll_status(), static_cast<uint8_t>(HostProtocol::kStNone));
 
     // Курсор после EngineLoad - на FileInfo.
@@ -754,8 +759,8 @@ void test_host_byte_during_arming_hides_command() {
     p.set_position(1, 2, PlaybackState::Playing);
     h.command_bytes(HostProtocol::kHcTrace, 7, 7);
     static const uint8_t kLast = 0;
-    h.inject = &kLast;
-    h.inject_n = 1;
+    h.inject                   = &kLast;
+    h.inject_n                 = 1;
     p.poll();
     CHECK_EQ(h.poll_status(), static_cast<uint8_t>(HostProtocol::kStNone)); // спрятана до разбора маркера
 
@@ -797,8 +802,9 @@ void test_start_during_arming_returns_hidden_command() {
 
     p.set_position(0, 5, PlaybackState::Playing);
     const uint8_t start[8] = {HostProtocol::kHcStart, 0x00, 0x00, 0x10, 0x00, 2, HostProtocol::kTelemetryPosition, 0};
-    for (uint8_t i = 0; i < 7; ++i) p.on_command_byte(start[i]);
-    h.inject = &start[7];
+    for (uint8_t i = 0; i < 7; ++i)
+        p.on_command_byte(start[i]);
+    h.inject   = &start[7];
     h.inject_n = 1;
     p.poll();
     CHECK_EQ(h.poll_status(), static_cast<uint8_t>(HostProtocol::kStNone));
@@ -833,8 +839,8 @@ void test_frame_publish_order() {
 
     RecordingSink sink;
     uint32_t words[host_frame::kWords] = {};
-    uint8_t pos = 7;
-    const uint8_t args[5] = {11, 12, 13, 14, 15};
+    uint8_t pos                        = 7;
+    const uint8_t args[5]              = {11, 12, 13, 14, 15};
     host_frame::arm(sink, words, pos, HostProtocol::kStPosition, args, 5);
     CHECK_EQ(sink.log.size(), static_cast<size_t>(2));
     CHECK_EQ(sink.log[0].port, RecordingSink::kDat);
@@ -937,7 +943,8 @@ void test_unknown_command_rearms_unacked() {
     CHECK(h.read_args(again, 13));
     CHECK_EQ(std::memcmp(first, again, sizeof(first)), 0);
 
-    for (uint8_t i = 1; i < HostProtocol::kMaxNak; ++i) h.command(0x7E);
+    for (uint8_t i = 1; i < HostProtocol::kMaxNak; ++i)
+        h.command(0x7E);
     CHECK_EQ(p.nak_giveups(), 1u);
     got.collect(p);
     CHECK_EQ(got.calls, 1);
@@ -964,8 +971,10 @@ void test_nak_mid_data_restarts_window() {
 
     // Без периода 256: сдвиг повтора на 1024 байта на таком шаблоне виден.
     std::vector<uint8_t> first(1024), data(4096);
-    for (size_t i = 0; i < first.size(); ++i) first[i] = static_cast<uint8_t>(0xA5u ^ i);
-    for (size_t i = 0; i < data.size(); ++i) data[i] = static_cast<uint8_t>(i * 7 + (i >> 8) * 13 + 3);
+    for (size_t i = 0; i < first.size(); ++i)
+        first[i] = static_cast<uint8_t>(0xA5u ^ i);
+    for (size_t i = 0; i < data.size(); ++i)
+        data[i] = static_cast<uint8_t>(i * 7 + (i >> 8) * 13 + 3);
 
     h.send_data(first.data(), 1024);
     h.command(HostProtocol::kHcNak);
@@ -1027,7 +1036,8 @@ void test_reset_mid_window_drops_old_window() {
     CHECK(h.read_args(a, 13));
     CHECK_EQ(a[1], 0x20u); // смещение 8192
     std::vector<uint8_t> data(4096);
-    for (size_t i = 0; i < data.size(); ++i) data[i] = static_cast<uint8_t>(i * 5 + 1);
+    for (size_t i = 0; i < data.size(); ++i)
+        data[i] = static_cast<uint8_t>(i * 5 + 1);
     h.send_data(data.data(), 4096);
     h.done(4096);
     got.collect(p);

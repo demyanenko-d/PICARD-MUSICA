@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 // Поток живого MIDI (midi_in/live_stream): событие ждёт свою фору, порядок
 // не меняется, нота подготовлена до того, как зазвучит, а переполненное
 // кольцо теряет и считает.
@@ -34,19 +35,17 @@ std::vector<uint8_t> read_bank(const char* path) {
 
 struct Requests {
     formats::midi::LiveMidi* live = nullptr;
-    uint32_t count = 0;
-    static void on_retire(void* user, uint16_t song_sample) {
-        static_cast<Requests*>(user)->live->record_retired(song_sample);
-    }
+    uint32_t count                = 0;
+    static void on_retire(void* user, uint16_t song_sample) { static_cast<Requests*>(user)->live->record_retired(song_sample); }
     static void on_request(void* user, uint16_t) { ++static_cast<Requests*>(user)->count; }
 };
 
 // Живая песня поверх памяти трека: банк, память, песня и поток.
 struct Session {
-    std::unique_ptr<memory::TrackMemory> mem = std::make_unique<memory::TrackMemory>();
+    std::unique_ptr<memory::TrackMemory> mem      = std::make_unique<memory::TrackMemory>();
     std::unique_ptr<soundsinth::model::Song> song = std::make_unique<soundsinth::model::Song>();
     std::unique_ptr<formats::midi::LiveMidi> live = std::make_unique<formats::midi::LiveMidi>();
-    std::unique_ptr<midi_in::LiveStream> stream = std::make_unique<midi_in::LiveStream>();
+    std::unique_ptr<midi_in::LiveStream> stream   = std::make_unique<midi_in::LiveStream>();
     Requests req;
 
     bool begin(const bank::Bank& bnk) {
@@ -74,7 +73,7 @@ bool row_has_note(const soundsinth::model::PatternCell* row, uint8_t note) {
 void render(engine::TrackerEngine& e, std::vector<int32_t>& l, std::vector<int32_t>& r, uint32_t n) {
     l.assign(n, 0);
     r.assign(n, 0);
-    mixbus::SoundSource* s = e.as_sound_source();
+    mixbus::SoundSource* s    = e.as_sound_source();
     constexpr uint32_t kChunk = 1000;
     for (uint32_t d = 0; d < n; d += kChunk) {
         const uint32_t k = (n - d) < kChunk ? (n - d) : kChunk;
@@ -89,18 +88,18 @@ void test_live_stream_lookahead() {
     std::vector<uint8_t> blob = read_bank(kBankPath);
     bank::Bank bnk;
     if (blob.empty() || !bank::bank_open(blob.data(), static_cast<uint32_t>(blob.size()), bnk, nullptr)) {
-        std::printf("  ПРОПУСК: банка нет\n");
+        std::printf("  SKIP: no bank\n");
         return;
     }
     Session s;
     CHECK(s.begin(bnk));
 
     // Событие пришло на 1000 мс; играть его тику после 1100.
-    CHECK(s.stream->push(1000, 0xc0, 48, 0));  // смена программы
+    CHECK(s.stream->push(1000, 0xc0, 48, 0));   // смена программы
     CHECK(s.stream->push(1000, 0x90, 60, 100)); // нота
 
     // Тик сразу после прихода: играть нечего, но сэмплы уже заказаны.
-    const uint32_t requests_before = s.req.count;
+    const uint32_t requests_before            = s.req.count;
     const soundsinth::model::PatternCell* row = s.stream->tick(1010);
     CHECK(!row_has_note(row, 60));
     CHECK(s.req.count > requests_before); // упреждение сработало
@@ -137,7 +136,7 @@ void test_live_stream_order_and_overflow() {
     std::vector<uint8_t> blob = read_bank(kBankPath);
     bank::Bank bnk;
     if (blob.empty() || !bank::bank_open(blob.data(), static_cast<uint32_t>(blob.size()), bnk, nullptr)) {
-        std::printf("  ПРОПУСК: банка нет\n");
+        std::printf("  SKIP: no bank\n");
         return;
     }
     Session s;
@@ -170,7 +169,6 @@ void test_live_stream_order_and_overflow() {
     CHECK(row_has_note(row, 64));
 }
 
-
 // Живой режим движка: строки берутся из потока, а не из паттернов. Нота
 // молчит свою фору, потом звучит, а после снятия затихает.
 void test_live_stream_engine_plays() {
@@ -178,14 +176,14 @@ void test_live_stream_engine_plays() {
     std::vector<uint8_t> blob = read_bank(kBankPath);
     bank::Bank bnk;
     if (blob.empty() || !bank::bank_open(blob.data(), static_cast<uint32_t>(blob.size()), bnk, nullptr)) {
-        std::printf("  ПРОПУСК: банка нет\n");
+        std::printf("  SKIP: no bank\n");
         return;
     }
 
     // Подгрузка PCM - прямо в ответ на заказ: на ПК ждать нечего.
     struct Loader {
-        const bank::Bank* bank = nullptr;
-        memory::TrackMemory* mem = nullptr;
+        const bank::Bank* bank        = nullptr;
+        memory::TrackMemory* mem      = nullptr;
         soundsinth::model::Song* song = nullptr;
         formats::midi::LiveMidi* live = nullptr;
         uint32_t loaded = 0, failed = 0;
@@ -197,20 +195,18 @@ void test_live_stream_engine_plays() {
                 ++l->failed;
             }
         }
-        static void on_retire(void* user, uint16_t song_sample) {
-            static_cast<Loader*>(user)->live->record_retired(song_sample);
-        }
+        static void on_retire(void* user, uint16_t song_sample) { static_cast<Loader*>(user)->live->record_retired(song_sample); }
     };
 
     auto mem = std::make_unique<memory::TrackMemory>();
     memory::track_memory_create(*mem);
     memory::track_memory_reset_for_new_track(*mem);
-    auto song = std::make_unique<soundsinth::model::Song>();
-    auto live = std::make_unique<formats::midi::LiveMidi>();
+    auto song   = std::make_unique<soundsinth::model::Song>();
+    auto live   = std::make_unique<formats::midi::LiveMidi>();
     auto stream = std::make_unique<midi_in::LiveStream>();
     Loader loader;
     loader.bank = &bnk;
-    loader.mem = mem.get();
+    loader.mem  = mem.get();
     loader.song = song.get();
     loader.live = live.get();
     // Строка = тик: темп 250 даёт ровно 10 мс на тик.
@@ -221,7 +217,7 @@ void test_live_stream_engine_plays() {
     // сколько времени прошло.
     struct Clock {
         midi_in::LiveStream* stream = nullptr;
-        uint32_t tick = 0;
+        uint32_t tick               = 0;
         static const soundsinth::model::PatternCell* row(void* user) {
             auto* c = static_cast<Clock*>(user);
             return c->stream->tick(c->tick++ * 10u);
@@ -244,7 +240,8 @@ void test_live_stream_engine_plays() {
         const uint32_t frames = ms / 10u * kFramesPer10ms;
         render(e, l, r, frames);
         int64_t acc = 0;
-        for (uint32_t i = 0; i < frames; ++i) acc += std::abs(l[i]) + std::abs(r[i]);
+        for (uint32_t i = 0; i < frames; ++i)
+            acc += std::abs(l[i]) + std::abs(r[i]);
         return acc / static_cast<int64_t>(frames == 0 ? 1 : frames);
     };
 
@@ -256,8 +253,8 @@ void test_live_stream_engine_plays() {
     render_ms(300);
     const int64_t released = render_ms(160);
 
-    std::printf("  уровень: фора %lld, нота %lld, после снятия %lld; сэмплов подгружено %u, отказов %u\n",
-                (long long)silent, (long long)sounding, (long long)released, loader.loaded, loader.failed);
+    std::printf("  level: lookahead %lld, note %lld, after the release %lld; samples loaded %u, failures %u\n", (long long)silent, (long long)sounding,
+                (long long)released, loader.loaded, loader.failed);
     CHECK_EQ(silent, 0);
     CHECK(sounding > 0);
     CHECK_EQ(loader.failed, 0u);
@@ -273,7 +270,8 @@ void test_live_requests_ring() {
     ring.clear();
     uint16_t got = 0;
     CHECK(!ring.pop(got));
-    for (uint16_t i = 0; i < player::live::kLiveRequestCapacity; ++i) CHECK(ring.push(i));
+    for (uint16_t i = 0; i < player::live::kLiveRequestCapacity; ++i)
+        CHECK(ring.push(i));
     CHECK(!ring.push(999)); // полно
     CHECK_EQ(ring.lost(), 1u);
     CHECK_EQ(ring.pending(), player::live::kLiveRequestCapacity);

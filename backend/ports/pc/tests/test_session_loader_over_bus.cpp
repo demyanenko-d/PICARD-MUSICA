@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 // Загрузка по протоколу v2: реальный HostProtocol (не старая заглушка из
 // test_bus_byte_source.cpp), синхронный насос fake-хоста в стиле
 // test_host_protocol.cpp (testing_host::Link и host_step из
@@ -32,9 +33,9 @@ namespace {
 // Открыть сессию так, как это делает плагин: команда HcStart с длиной
 // файла, размером сектора и флагами телеметрии.
 void start_session(testing_host::Link& link, uint32_t file_size, uint8_t telemetry_flags) {
-    link.command(HostProtocol::kHcStart, static_cast<uint8_t>(file_size), static_cast<uint8_t>(file_size >> 8),
-                  static_cast<uint8_t>(file_size >> 16), static_cast<uint8_t>(file_size >> 24),
-                  /*sector=512*/ 2, telemetry_flags);
+    link.command(HostProtocol::kHcStart, static_cast<uint8_t>(file_size), static_cast<uint8_t>(file_size >> 8), static_cast<uint8_t>(file_size >> 16),
+                 static_cast<uint8_t>(file_size >> 24),
+                 /*sector=512*/ 2, telemetry_flags);
 }
 
 // "Хост" держит файл целиком у себя (как WC-хост на своём накопителе) и
@@ -45,26 +46,26 @@ void start_session(testing_host::Link& link, uint32_t file_size, uint8_t telemet
 struct FakeHost {
     testing_host::Link link;
     const uint8_t* file_data = nullptr;
-    uint32_t file_size = 0;
-    uint32_t round_trips = 0;
+    uint32_t file_size       = 0;
+    uint32_t round_trips     = 0;
 
     // Как на железе: основной поток крутит poll() во время ожидания файлового
     // чанка, а хост вычитывает телеметрию, то есть между запросом файла и
     // ответом по той же паре портов ходит посторонний трафик. Без этого стенд
     // проверял бы загрузку в вакууме.
-    uint32_t telemetry_frames = 0;
+    uint32_t telemetry_frames                       = 0;
     uint8_t scratch[HostProtocol::kDataBufferBytes] = {};
     // Телеметрия меняется во время загрузки, как у оркестратора: кадры
     // телеметрии чередуются с кадрами чтения.
     bool live_telemetry = false;
-    uint32_t pumps = 0;
+    uint32_t pumps      = 0;
 
     static void read_window(void* user, uint32_t offset, uint16_t len, uint8_t* dst) {
         auto* self = static_cast<FakeHost*>(user);
         ++self->round_trips;
         for (uint16_t i = 0; i < len; ++i) {
             const uint32_t pos = offset + i;
-            dst[i] = pos < self->file_size ? self->file_data[pos] : 0;
+            dst[i]             = pos < self->file_size ? self->file_data[pos] : 0;
         }
     }
 
@@ -72,8 +73,7 @@ struct FakeHost {
         auto* self = static_cast<FakeHost*>(user);
         if (self->live_telemetry) {
             ++self->pumps;
-            self->link.p->set_position(0, static_cast<uint8_t>((self->pumps / 8u) % 60u),
-                                       player::protocol::PlaybackState::Loading);
+            self->link.p->set_position(0, static_cast<uint8_t>((self->pumps / 8u) % 60u), player::protocol::PlaybackState::Loading);
             self->link.p->set_psram_stats(100, static_cast<uint16_t>(self->pumps % 100u), 0);
         }
         self->link.p->poll(); // плата вооружает следующую команду
@@ -105,10 +105,10 @@ struct FakeHost {
 // избыточным: иначе тест зеленеет там, где железо красное.
 struct SeekingHost {
     testing_host::Link link;
-    const uint8_t* file_data = nullptr;
-    uint32_t file_size = 0;
-    uint32_t round_trips = 0;
-    uint32_t telemetry_frames = 0;
+    const uint8_t* file_data                        = nullptr;
+    uint32_t file_size                              = 0;
+    uint32_t round_trips                            = 0;
+    uint32_t telemetry_frames                       = 0;
     uint8_t scratch[HostProtocol::kDataBufferBytes] = {};
     // Сколько раз хост отдал не то, что у него просили. На железе такого
     // счётчика нет и быть не может (в кадре данных нет поля с фактическим
@@ -116,7 +116,7 @@ struct SeekingHost {
     uint32_t served_wrong_offset = 0;
 
     uint32_t stream_pos = 0;
-    uint32_t rewinds = 0; // прыжков назад - у WC перечитывание файла с начала
+    uint32_t rewinds    = 0; // прыжков назад - у WC перечитывание файла с начала
 
     // Байт из потока: то, что лежит по позиции потока, а не по запрошенному
     // смещению. Разница между ними и есть искомый баг.
@@ -140,12 +140,12 @@ struct SeekingHost {
         if (aligned_offset < stream_pos) {
             ++rewinds;
             stream_pos = 0; // wc_gipagpl()
-            primed = false;
+            primed     = false;
             // Порт исправления из плагина (stream_prime в frontend/plugin/src/main.c):
             // прогрев настоящим односекторным чтением вместо пропуска.
             if (aligned_offset >= 512u) {
                 stream_pos = 512u;
-                primed = true;
+                primed     = true;
             }
         }
         uint32_t delta_blocks = (aligned_offset - stream_pos) / 512u;
@@ -160,9 +160,9 @@ struct SeekingHost {
     // wc_load512(dest, blocks): читает blocks*512 байт с текущей позиции
     // потока и двигает её. Возвращает начало прочитанного окна.
     uint32_t load512(uint8_t blocks) {
-        const uint32_t from = stream_pos;
-        stream_pos += static_cast<uint32_t>(blocks) * 512u;
-        primed = true;
+        const uint32_t from  = stream_pos;
+        stream_pos          += static_cast<uint32_t>(blocks) * 512u;
+        primed               = true;
         return from;
     }
 
@@ -173,17 +173,18 @@ struct SeekingHost {
         auto* self = static_cast<SeekingHost*>(user);
         ++self->round_trips;
 
-        const uint16_t pad = static_cast<uint16_t>(offset % 512u);
+        const uint16_t pad     = static_cast<uint16_t>(offset % 512u);
         const uint32_t aligned = offset - pad;
-        const uint16_t need = static_cast<uint16_t>(pad + len);
-        const uint8_t blocks = static_cast<uint8_t>((need + 511u) / 512u);
+        const uint16_t need    = static_cast<uint16_t>(pad + len);
+        const uint8_t blocks   = static_cast<uint8_t>((need + 511u) / 512u);
 
         self->seek_to_aligned(aligned);
         const uint32_t from = self->load512(blocks);
         CHECK_EQ(from, aligned); // хост должен отдать запрошенное окно
         if (from != aligned) ++self->served_wrong_offset;
 
-        for (uint16_t i = 0; i < len; ++i) dst[i] = self->stream_byte(from + pad + i);
+        for (uint16_t i = 0; i < len; ++i)
+            dst[i] = self->stream_byte(from + pad + i);
     }
 
     static void pump(void* user) {
@@ -207,7 +208,7 @@ std::vector<uint8_t> read_whole_file(const char* path) {
 void check_file_loads_over_bus(const char* path) {
     const std::vector<uint8_t> file_bytes = read_whole_file(path);
     if (file_bytes.empty()) {
-        std::printf("  ПРОПУСК (файл не найден): %s\n", path);
+        std::printf("  SKIP (file not found): %s\n", path);
         return;
     }
     const uint32_t file_size = static_cast<uint32_t>(file_bytes.size());
@@ -222,7 +223,7 @@ void check_file_loads_over_bus(const char* path) {
         const bool ok = player::load::run_session_load(mbs.as_byte_source(), mem_ref, song_ref, load);
         CHECK(ok);
         if (!ok) {
-            std::printf("  ошибка эталонной загрузки %s: %s\n", path, load.error ? load.error : "?");
+            std::printf("  reference load failed %s: %s\n", path, load.error ? load.error : "?");
             soundsinth::memory::track_memory_destroy(mem_ref);
             return;
         }
@@ -247,14 +248,13 @@ void check_file_loads_over_bus(const char* path) {
     const bool ok = player::load::run_session_load(bus_src.as_byte_source(), mem_bus, song_bus, load);
     CHECK(ok);
     if (!ok) {
-        std::printf("  ошибка загрузки через шину %s: %s\n", path, load.error ? load.error : "?");
+        std::printf("  load over the bus failed %s: %s\n", path, load.error ? load.error : "?");
         soundsinth::memory::track_memory_destroy(mem_ref);
         soundsinth::memory::track_memory_destroy(mem_bus);
         return;
     }
 
-    song_compare::check_songs_equal(song_ref, mem_ref.psram, song_bus, mem_bus.psram, &mem_ref.sample_cache,
-                                    &mem_bus.sample_cache);
+    song_compare::check_songs_equal(song_ref, mem_ref.psram, song_bus, mem_bus.psram, &mem_ref.sample_cache, &mem_bus.sample_cache);
 
     // Регрессия на кэш с чтением вперёд (без него - сотни и тысячи
     // round-trip'ов).
@@ -262,16 +262,15 @@ void check_file_loads_over_bus(const char* path) {
     CHECK(host.round_trips < expected_upper_bound);
     CHECK_EQ(host.link.unaligned, 0u);
     CHECK(host.link.slow <= 1u);
-    std::printf("  %s: %u байт, %u round-trip(ов) (ожидалось < %u)\n", path, file_size, host.round_trips,
-                expected_upper_bound);
+    std::printf("  %s: %u bytes, %u round trip(s) (expected < %u)\n", path, file_size, host.round_trips, expected_upper_bound);
 
     // --- Телеметрия file_info ---
     // Выставляет вызывающий (на плате - player::publish_file_info): минуты и
     // секунды из длительности, счётчики из Song.
     CHECK(load.total_frames > 0);
     const uint32_t total_seconds = load.total_frames / soundsinth::engine::kSampleRateHz;
-    protocol.set_file_info(static_cast<uint8_t>((total_seconds / 60u) % 100u), static_cast<uint8_t>(total_seconds % 60u),
-                           song_bus.sample_count, song_bus.pattern_count, song_bus.instrument_count);
+    protocol.set_file_info(static_cast<uint8_t>((total_seconds / 60u) % 100u), static_cast<uint8_t>(total_seconds % 60u), song_bus.sample_count,
+                           song_bus.pattern_count, song_bus.instrument_count);
     protocol.mark_session_ready();
     // В v2 телеметрия - обычная команда: крутим сторону хоста, пока плата
     // не выставит kStFileInfo, и читаем её аргументы как любые другие.
@@ -286,18 +285,17 @@ void check_file_loads_over_bus(const char* path) {
     uint8_t info[9]; // 8 байт + контрольный
     CHECK(host.link.read_args(info, sizeof(info)));
     // minutes/seconds - всегда BCD.
-    const uint8_t minutes = static_cast<uint8_t>(((info[0] >> 4) & 0x0F) * 10 + (info[0] & 0x0F));
-    const uint8_t seconds = static_cast<uint8_t>(((info[1] >> 4) & 0x0F) * 10 + (info[1] & 0x0F));
-    const uint16_t num_samples = static_cast<uint16_t>(info[2] | (info[3] << 8));
-    const uint16_t num_patterns = static_cast<uint16_t>(info[4] | (info[5] << 8));
+    const uint8_t minutes          = static_cast<uint8_t>(((info[0] >> 4) & 0x0F) * 10 + (info[0] & 0x0F));
+    const uint8_t seconds          = static_cast<uint8_t>(((info[1] >> 4) & 0x0F) * 10 + (info[1] & 0x0F));
+    const uint16_t num_samples     = static_cast<uint16_t>(info[2] | (info[3] << 8));
+    const uint16_t num_patterns    = static_cast<uint16_t>(info[4] | (info[5] << 8));
     const uint16_t num_instruments = static_cast<uint16_t>(info[6] | (info[7] << 8));
 
     CHECK_EQ(num_samples, song_bus.sample_count);
     CHECK_EQ(num_patterns, song_bus.pattern_count);
     CHECK_EQ(num_instruments, song_bus.instrument_count);
     CHECK(minutes < 60); // разумная длительность, а не 0 без вычисления
-    std::printf("  %s: file_info %u:%02u, samples=%u patterns=%u instruments=%u\n", path, minutes, seconds,
-                num_samples, num_patterns, num_instruments);
+    std::printf("  %s: file_info %u:%02u, samples=%u patterns=%u instruments=%u\n", path, minutes, seconds, num_samples, num_patterns, num_instruments);
 
     soundsinth::memory::track_memory_destroy(mem_ref);
     soundsinth::memory::track_memory_destroy(mem_bus);
@@ -329,7 +327,7 @@ void test_bus_session_load_matches_direct_load() {
 void check_loads_with_live_telemetry(const char* path) {
     const std::vector<uint8_t> file_bytes = read_whole_file(path);
     if (file_bytes.empty()) {
-        std::printf("  ПРОПУСК (файл не найден): %s\n", path);
+        std::printf("  SKIP (file not found): %s\n", path);
         return;
     }
     const uint32_t file_size = static_cast<uint32_t>(file_bytes.size());
@@ -360,9 +358,10 @@ void check_loads_with_live_telemetry(const char* path) {
     CHECK_EQ(protocol.data_overflow(), 0u);
     CHECK_EQ(host.link.unaligned, 0u);
     CHECK(host.link.slow <= 1u);
-    if (!ok) std::printf("  ЗАГРУЗКА ПРОВАЛИЛАСЬ %s: %s\n", path, load.error ? load.error : "?");
-    else std::printf("  %s: OK, %u round-trip(ов), кадров телеметрии %u\n", path, host.round_trips,
-                     host.telemetry_frames);
+    if (!ok)
+        std::printf("  LOAD FAILED %s: %s\n", path, load.error ? load.error : "?");
+    else
+        std::printf("  %s: OK, %u round trip(s), telemetry frames %u\n", path, host.round_trips, host.telemetry_frames);
     // в v2 хост не разбирает код команды вручную, этим занят host_step.
 
     soundsinth::memory::track_memory_destroy(mem);
@@ -373,7 +372,7 @@ void check_loads_with_live_telemetry(const char* path) {
 // запрос, а не просит то же окно без конца.
 struct ShortDoneHost {
     testing_host::Link link;
-    uint32_t requests = 0;
+    uint32_t requests                               = 0;
     uint8_t scratch[HostProtocol::kDataBufferBytes] = {};
 
     static void pump(void* user) {
@@ -387,7 +386,7 @@ struct ShortDoneHost {
         uint8_t a[13];
         self->link.read_args(a, sizeof(a));
         const uint16_t length = static_cast<uint16_t>(a[4] | (a[5] << 8));
-        const uint16_t sent = st == HostProtocol::kStReadFast ? HostProtocol::kDataBufferBytes : length;
+        const uint16_t sent   = st == HostProtocol::kStReadFast ? HostProtocol::kDataBufferBytes : length;
         ++self->requests;
         // После пятого запроса - честное окно, чтобы тест не висел, если
         // защита сломана.
@@ -426,7 +425,7 @@ void test_bus_session_load_aborts_cleanly_on_reset() {
     std::printf("test_bus_session_load_aborts_cleanly_on_reset\n");
     const std::vector<uint8_t> file_bytes = read_whole_file("SD/test_music/xm/001.xm");
     if (file_bytes.empty()) {
-        std::printf("  ПРОПУСК (файл не найден)\n");
+        std::printf("  SKIP (file not found)\n");
         return;
     }
     const uint32_t file_size = static_cast<uint32_t>(file_bytes.size());
@@ -450,7 +449,8 @@ void test_bus_session_load_aborts_cleanly_on_reset() {
             auto* self = static_cast<AbortAfterN*>(user);
             if (self->host->round_trips >= 3) {
                 uint8_t reset_cmd[8] = {0x01, 0, 0, 0, 0, 0, 0, 0};
-                for (uint8_t b : reset_cmd) self->protocol->on_command_byte(b);
+                for (uint8_t b : reset_cmd)
+                    self->protocol->on_command_byte(b);
                 // В v2 команда хоста разбирается в poll(), а не в момент записи байта:
                 // приём в ISR должен быть тривиальным. Без этого вызова сброс не
                 // применится, и ожидание данных станет вечным.
@@ -464,7 +464,7 @@ void test_bus_session_load_aborts_cleanly_on_reset() {
     BusByteSource bus_src(protocol, file_size, &AbortAfterN::pump, &abort_pump);
 
     HostProtocol::Callbacks cb;
-    cb.user = &bus_src;
+    cb.user     = &bus_src;
     cb.on_reset = [](void* user) { static_cast<BusByteSource*>(user)->on_reset(); };
     protocol.set_callbacks(cb);
 
@@ -472,7 +472,7 @@ void test_bus_session_load_aborts_cleanly_on_reset() {
     player::load::SessionLoadResult load;
     const bool ok = player::load::run_session_load(bus_src.as_byte_source(), mem, song, load);
     CHECK(!ok); // должно провалиться (сброс посреди загрузки), а не зависнуть
-    std::printf("  корректно провалилось после сброса: %s\n", load.error ? load.error : "?");
+    std::printf("  failed correctly after the reset: %s\n", load.error ? load.error : "?");
 
     soundsinth::memory::track_memory_destroy(mem);
 }
@@ -494,7 +494,7 @@ template <typename Host>
 void check_progressive_load_over_bus(const char* path) {
     const std::vector<uint8_t> file_bytes = read_whole_file(path);
     if (file_bytes.empty()) {
-        std::printf("  ПРОПУСК (файл не найден): %s\n", path);
+        std::printf("  SKIP (file not found): %s\n", path);
         return;
     }
     const uint32_t file_size = static_cast<uint32_t>(file_bytes.size());
@@ -536,9 +536,9 @@ void check_progressive_load_over_bus(const char* path) {
 
     std::vector<uint16_t> plan(song.sample_count == 0 ? 1 : song.sample_count);
     std::vector<uint16_t> last_use(plan.size());
-    const player::load::PlaybackPlan planned = player::load::plan_playback_order(
-        song, mem.psram, plan.data(), static_cast<uint16_t>(plan.size()), last_use.data());
-    const uint16_t count = planned.count;
+    const player::load::PlaybackPlan planned =
+        player::load::plan_playback_order(song, mem.psram, plan.data(), static_cast<uint16_t>(plan.size()), last_use.data());
+    const uint16_t count    = planned.count;
     const uint16_t prefetch = planned.prefetch_count;
 
     uint32_t mismatched = 0;
@@ -554,16 +554,15 @@ void check_progressive_load_over_bus(const char* path) {
         // вычитка предложенной телеметрии хостом. Внутри одного файлового
         // обмена телеметрия вклиниться не может (протокол их сериализует), а
         // в паузах идёт.
-        for (int t = 0; t < 4; ++t) Host::pump(&host);
+        for (int t = 0; t < 4; ++t)
+            Host::pump(&host);
         const uint16_t idx = plan[k];
-        const char* why = "?";
-        const bool loaded = player::load::load_track_sample(format, src.as_byte_source(), mem, song, idx, &why);
-        if (!loaded) std::printf("    сэмпл %u НЕ загружен: %s\n", idx, why);
+        const char* why    = "?";
+        const bool loaded  = player::load::load_track_sample(format, src.as_byte_source(), mem, song, idx, &why);
+        if (!loaded) std::printf("    sample %u NOT loaded: %s\n", idx, why);
         CHECK(loaded);
-        const std::vector<uint8_t> expect =
-            song_compare::collect_sample_bytes(mem_ref.psram, mem_ref.sample_cache, idx, song_ref.samples[idx]);
-        const std::vector<uint8_t> got =
-            song_compare::collect_sample_bytes(mem.psram, mem.sample_cache, idx, song.samples[idx]);
+        const std::vector<uint8_t> expect = song_compare::collect_sample_bytes(mem_ref.psram, mem_ref.sample_cache, idx, song_ref.samples[idx]);
+        const std::vector<uint8_t> got    = song_compare::collect_sample_bytes(mem.psram, mem.sample_cache, idx, song.samples[idx]);
         if (got != expect) {
             ++mismatched;
             // Печатаем первое расхождение с подробностями: по нему видно, сдвиг
@@ -573,9 +572,8 @@ void check_progressive_load_over_bus(const char* path) {
                 while (first_bad < got.size() && first_bad < expect.size() && got[first_bad] == expect[first_bad]) {
                     ++first_bad;
                 }
-                std::printf("    РАСХОЖДЕНИЕ сэмпл %u: got %u байт, ожидалось %u, первый плохой байт %u\n", idx,
-                            static_cast<unsigned>(got.size()), static_cast<unsigned>(expect.size()),
-                            static_cast<unsigned>(first_bad));
+                std::printf("    MISMATCH sample %u: got %u bytes, expected %u, first bad byte %u\n", idx, static_cast<unsigned>(got.size()),
+                            static_cast<unsigned>(expect.size()), static_cast<unsigned>(first_bad));
             }
         }
     }
@@ -591,13 +589,12 @@ void check_progressive_load_over_bus(const char* path) {
         CHECK(host.rewinds <= 2u);
     }
 
-    std::printf("  %s: прогрессивно через шину %u сэмплов (префетч %u), round-trip'ов %u метаданные + %u сэмплы"
-                " (последовательно %u)\n",
-                path, count, prefetch, metadata_round_trips, host.round_trips - metadata_round_trips,
-                host_ref.round_trips);
-    std::printf("    медленных запросов %u\n", host.link.slow);
-    if constexpr (std::is_same_v<Host, SeekingHost>) std::printf("    перемоток назад %u\n", host.rewinds);
-    std::printf("    кадров телеметрии в паузах обмена: %u\n", host.telemetry_frames);
+    std::printf("  %s: progressively over the bus %u samples (prefetch %u), round trips %u metadata + %u samples"
+                " (sequentially %u)\n",
+                path, count, prefetch, metadata_round_trips, host.round_trips - metadata_round_trips, host_ref.round_trips);
+    std::printf("    slow requests %u\n", host.link.slow);
+    if constexpr (std::is_same_v<Host, SeekingHost>) std::printf("    rewinds %u\n", host.rewinds);
+    std::printf("    telemetry frames during exchange pauses: %u\n", host.telemetry_frames);
 
     soundsinth::memory::track_memory_destroy(mem);
     soundsinth::memory::track_memory_destroy(mem_ref);
@@ -666,7 +663,7 @@ void test_attempt_errors_are_labelled() {
 
     soundsinth::memory::TrackMemory mem;
     soundsinth::memory::track_memory_create(mem);
-    const char* it_on_garbage = "";
+    const char* it_on_garbage                 = "";
     const std::vector<uint8_t>* const files[] = {&garbage, &it_cut, &mid_no_bank, &one_byte};
     for (const std::vector<uint8_t>* file : files) {
         soundsinth::model::Song song;
@@ -674,9 +671,10 @@ void test_attempt_errors_are_labelled() {
         player::load::SessionLoadResult load;
         CHECK(!player::load::run_session_load(src.as_byte_source(), mem, song, load));
         CHECK(load.format == player::load::TrackFormat::None);
-        for (const char* e : load.attempt_errors) CHECK(e != nullptr);
+        for (const char* e : load.attempt_errors)
+            CHECK(e != nullptr);
         CHECK(load.error == load.attempt_errors[player::load::kLoaderCount - 1]);
-        if (file == &mid_no_bank) CHECK(std::strstr(load.attempt_errors[0], "банк") != nullptr);
+        if (file == &mid_no_bank) CHECK(std::strstr(load.attempt_errors[0], "bank") != nullptr);
         // IMPM узнан: причина IT - не та, что на мусоре.
         if (file == &garbage) it_on_garbage = load.attempt_errors[1];
         if (file == &it_cut) CHECK(std::strcmp(load.attempt_errors[1], it_on_garbage) != 0);

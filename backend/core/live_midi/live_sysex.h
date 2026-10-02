@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 #pragma once
 
 // SysEx живого потока: ударность каналов и общая громкость.
@@ -15,15 +16,17 @@
 
 namespace soundsinth::midi_in {
 
-static_assert(kSysexKeep >= formats::midi::kSysexPrefix, "разборам SysEx нужно больше байт тела, чем держит поток");
+static_assert(kSysexKeep >= formats::midi::kSysexPrefix, "SysEx parsing needs more body bytes than the stream holds");
 
 class SysexTracker {
 public:
     // Умолчание GM: ударный только десятый канал - с него же начинает живая
     // песня, поэтому в очередь пойдёт лишь то, что объявит поток.
     void begin() {
-        for (uint32_t c = 0; c < 16; ++c) drums_[c] = (c == 9);
-        drum_changes_ = 0;
+        for (uint32_t c = 0; c < 16; ++c) {
+            drums_[c] = (c == 9);
+        }
+        drum_changes_   = 0;
         volume_changes_ = 0;
     }
 
@@ -31,7 +34,9 @@ public:
     // меньше.
     void apply(const uint8_t* body, uint32_t len, uint32_t at_ms, LiveStream& stream) {
         bool next[16];
-        for (uint32_t c = 0; c < 16; ++c) next[c] = drums_[c];
+        for (uint32_t c = 0; c < 16; ++c) {
+            next[c] = drums_[c];
+        }
         formats::midi::sysex_drum_channels(body, len, next);
         for (uint8_t c = 0; c < 16; ++c) {
             if (next[c] == drums_[c]) continue;
@@ -51,8 +56,8 @@ public:
     uint32_t volume_changes() const { return volume_changes_; }
 
 private:
-    bool drums_[16] = {};
-    uint32_t drum_changes_ = 0;
+    bool drums_[16]          = {};
+    uint32_t drum_changes_   = 0;
     uint32_t volume_changes_ = 0;
 };
 

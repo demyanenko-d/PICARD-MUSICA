@@ -1,5 +1,6 @@
 add_library(soundsinth_core STATIC
     audio/mixbus.cpp
+    memory/psram_alloc.cpp
     memory/psram_store.cpp
     memory/sample_cache_catalog.cpp
     memory/arena.cpp
@@ -33,6 +34,10 @@ add_library(soundsinth_core STATIC
     engine/voice_link.cpp
     engine/song_duration.cpp
     live_midi/ay_midi.cpp
+    config/config.cpp
+    config/config_store.cpp
+    config/config_ini.cpp
+    config/config_page.cpp
 )
 
 # Корень включений - родительский каталог: .h и .cpp лежат рядом, пути

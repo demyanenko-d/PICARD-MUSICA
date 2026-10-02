@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 #pragma once
 
 // Разбор SysEx: что из него берут и загрузчик .mid, и живой поток. Тело
@@ -36,7 +37,7 @@ inline void sysex_drum_channels(const uint8_t* s, uint32_t len, bool* drum_chann
             return;
         }
         if ((s[5] & 0xf0u) == 0x10 && s[6] == 0x15) {
-            const uint8_t n = static_cast<uint8_t>(s[5] & 0x0fu);
+            const uint8_t n  = static_cast<uint8_t>(s[5] & 0x0fu);
             const uint8_t ch = n == 0 ? 9 : (n <= 9 ? static_cast<uint8_t>(n - 1) : n);
             if (ch < 16) drum_channel[ch] = s[7] != 0;
         }

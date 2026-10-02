@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 #pragma once
 
 // Кадр ответа хосту на двух портах чтения (протокол v2): слова ответа на все
@@ -27,13 +28,12 @@ inline constexpr uint8_t kWords = HostProtocol::kArgBytes + 1;
 // публикуется последним. Пока хост не увидел статус, аргументы ему не нужны;
 // увидел - они уже готовы.
 template <typename Sink, typename Index>
-SOUNDSINTH_ALWAYS_INLINE void arm(Sink& sink, uint32_t (&words)[kWords], Index& pos, uint8_t code,
-                                  const uint8_t* args, uint8_t n) {
+SOUNDSINTH_ALWAYS_INLINE void arm(Sink& sink, uint32_t (&words)[kWords], Index& pos, uint8_t code, const uint8_t* args, uint8_t n) {
     for (uint8_t i = 0; i < kWords - 1; ++i) {
         words[i] = sink.encode(i < n ? args[i] : 0u);
     }
     words[kWords - 1] = sink.encode(0u);
-    pos = 0;
+    pos               = 0;
     sink.set(Sink::kDat, words[0]);
     sink.publish_fence();
     sink.set(Sink::kCmd, sink.encode(code));

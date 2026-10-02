@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 #pragma once
 
 // Поток живого MIDI: очередь событий с отметкой времени и строка на тик.
@@ -24,17 +25,16 @@ namespace soundsinth::midi_in {
 struct StampedEvent {
     uint32_t at_ms = 0;
     uint8_t status = 0;
-    uint8_t d1 = 0;
-    uint8_t d2 = 0;
+    uint8_t d1     = 0;
+    uint8_t d2     = 0;
 };
 
 // Ёмкость кольца: в очереди ждут все события, пришедшие за фору. Линия
 // 31250 бод, кадр 8N1 - десять бит на байт, 3125 байт в секунду. Самое
 // короткое сообщение канала - два байта (смена программы), то есть 1.6
 // события на миллисекунду; за фору и тик их набирается столько.
-inline constexpr uint32_t kLiveStreamPerMs = 2; // 1.6 вверх до целого
-inline constexpr uint32_t kLiveStreamNeeded =
-    (SOUNDSINTH_LIVE_MIDI_LOOKAHEAD_MS + 2500u / SOUNDSINTH_LIVE_MIDI_TEMPO) * kLiveStreamPerMs;
+inline constexpr uint32_t kLiveStreamPerMs    = 2; // 1.6 вверх до целого
+inline constexpr uint32_t kLiveStreamNeeded   = (SOUNDSINTH_LIVE_MIDI_LOOKAHEAD_MS + 2500u / SOUNDSINTH_LIVE_MIDI_TEMPO) * kLiveStreamPerMs;
 inline constexpr uint32_t kLiveStreamCapacity = 256;
 // Построек инструмента за одну строку. Подготовка ноты строит инструмент, и
 // это самая дорогая работа строки: на плате пачка из девяти построек (все с
@@ -48,8 +48,8 @@ inline constexpr uint32_t kLiveBuildsPerRow = 2;
 // доехать за считаные тики, а чтение сэмпла из флеша стоит 2 мс типичное и
 // 13 мс самое большое.
 inline constexpr uint32_t kLeadTightMs = 30;
-static_assert((kLiveStreamCapacity & (kLiveStreamCapacity - 1)) == 0, "ёмкость - степень двойки: индекс маской");
-static_assert(kLiveStreamCapacity >= kLiveStreamNeeded, "фора не помещается в кольцо: события будут теряться");
+static_assert((kLiveStreamCapacity & (kLiveStreamCapacity - 1)) == 0, "the capacity is a power of two: the index is a mask");
+static_assert(kLiveStreamCapacity >= kLiveStreamNeeded, "the lookahead does not fit the ring: events will be lost");
 
 class LiveStream {
 public:
@@ -57,19 +57,19 @@ public:
     // Накопленное в очереди сохраняется: по этим событиям режим и распознан,
     // а песне они нужны (выбор банка, программы, первые ноты).
     void begin(formats::midi::LiveMidi* live, uint32_t lookahead_ms) {
-        live_ = live;
-        lookahead_ms_ = lookahead_ms;
-        prefetched_ = read_.load(std::memory_order_relaxed); // упреждение - заново по всей очереди
-        lost_ = 0;
-        deferred_ = 0;
-        lead_min_ms_ = 0xFFFFFFFFu;
-        lead_tight_ = 0;
+        live_          = live;
+        lookahead_ms_  = lookahead_ms;
+        prefetched_    = read_.load(std::memory_order_relaxed); // упреждение - заново по всей очереди
+        lost_          = 0;
+        deferred_      = 0;
+        lead_min_ms_   = kLeadNotMeasured;
+        lead_tight_    = 0;
         last_event_ms_ = 0;
-        have_event_ = false;
+        have_event_    = false;
         for (uint32_t c = 0; c < 16; ++c) {
             ahead_program_[c] = 0;
-            ahead_bank_[c] = 0;
-            ahead_drum_[c] = live->drum_channel(static_cast<uint8_t>(c));
+            ahead_bank_[c]    = 0;
+            ahead_drum_[c]    = live->drum_channel(static_cast<uint8_t>(c));
         }
     }
 
@@ -84,10 +84,10 @@ public:
             return false;
         }
         StampedEvent& e = ring_[w & (kLiveStreamCapacity - 1)];
-        e.at_ms = at_ms;
-        e.status = status;
-        e.d1 = d1;
-        e.d2 = d2;
+        e.at_ms         = at_ms;
+        e.status        = status;
+        e.d1            = d1;
+        e.d2            = d2;
         write_.store(w + 1, std::memory_order_release);
         return true;
     }
@@ -103,7 +103,7 @@ public:
         prefetch_ahead();
         live_->begin_row();
         const uint32_t w = write_.load(std::memory_order_acquire);
-        uint32_t r = read_.load(std::memory_order_relaxed);
+        uint32_t r       = read_.load(std::memory_order_relaxed);
         while (r != w) {
             const StampedEvent& e = ring_[r & (kLiveStreamCapacity - 1)];
             // Знаковая разность: отметка события не бывает позже now, но
@@ -111,7 +111,7 @@ public:
             if (static_cast<int32_t>(now_ms - e.at_ms) < static_cast<int32_t>(lookahead_ms_)) break;
             live_->event(e.status, e.d1, e.d2, /*delay=*/0);
             last_event_ms_ = now_ms;
-            have_event_ = true;
+            have_event_    = true;
             ++r;
         }
         read_.store(r, std::memory_order_release);
@@ -140,9 +140,12 @@ public:
     // Докуда дошла подготовка (для проверок): не позади чтения.
     uint32_t prefetched() const { return prefetched_; }
 
+    // Запаса не измерено: ни одна нота ещё не готовилась.
+    static constexpr uint32_t kLeadNotMeasured = 0xffffffffu;
     // Сколько времени оставалось у ноты до звука, когда её готовили. Это и
-    // есть запас, за который PCM обязан доехать: полная фора, если подготовка
-    // идёт вровень с приходом событий, и почти ноль, если она отстала.
+    // есть запас, за который PCM обязан доехать: полное упреждение, если
+    // подготовка идёт вровень с приходом событий, и почти ноль, если она
+    // отстала. kLeadNotMeasured - нот ещё не было.
     uint32_t prefetch_lead_min_ms() const { return lead_min_ms_; }
     // Нот, подготовленных впритык: запаса осталось меньше kLeadTightMs.
     uint32_t prefetch_tight() const { return lead_tight_; }
@@ -168,7 +171,7 @@ private:
                 continue;
             }
             const uint8_t kind = e.status & 0xf0u;
-            const uint8_t ch = e.status & 0x0fu;
+            const uint8_t ch   = e.status & 0x0fu;
             if (kind == 0xc0u) {
                 ahead_program_[ch] = e.d1;
             } else if (kind == 0xb0u && e.d1 == 0) {
@@ -176,8 +179,8 @@ private:
             } else if (kind == 0x90u && e.d2 != 0) {
                 // Запас ноты: сколько ещё ждать её форы. Знаковая разность -
                 // событие бывает и старше форы, если подготовка отстала.
-                const int32_t waited = static_cast<int32_t>(now_ms_ - e.at_ms);
-                const int32_t lead = static_cast<int32_t>(lookahead_ms_) - waited;
+                const int32_t waited   = static_cast<int32_t>(now_ms_ - e.at_ms);
+                const int32_t lead     = static_cast<int32_t>(lookahead_ms_) - waited;
                 const uint32_t lead_ms = lead > 0 ? static_cast<uint32_t>(lead) : 0u;
                 if (lead_ms < lead_min_ms_) lead_min_ms_ = lead_ms;
                 if (lead_ms < kLeadTightMs) ++lead_tight_;
@@ -196,20 +199,20 @@ private:
     std::atomic<uint32_t> write_{0};
     std::atomic<uint32_t> read_{0};
     // Докуда дошло упреждение: всегда не позади read_.
-    uint32_t prefetched_ = 0;
-    uint32_t lost_ = 0;
-    uint32_t deferred_ = 0;
-    uint32_t now_ms_ = 0;         // время этого тика: подготовка считает по нему запас
-    uint32_t lead_min_ms_ = 0xFFFFFFFFu;
-    uint32_t lead_tight_ = 0;
-    uint32_t last_event_ms_ = 0;
-    bool have_event_ = false;
-    uint32_t lookahead_ms_ = 0;
+    uint32_t prefetched_           = 0;
+    uint32_t lost_                 = 0;
+    uint32_t deferred_             = 0;
+    uint32_t now_ms_               = 0; // время этого тика: подготовка считает по нему запас
+    uint32_t lead_min_ms_          = kLeadNotMeasured;
+    uint32_t lead_tight_           = 0;
+    uint32_t last_event_ms_        = 0;
+    bool have_event_               = false;
+    uint32_t lookahead_ms_         = 0;
     formats::midi::LiveMidi* live_ = nullptr;
     // Программа, банк и ударность канала на конец очереди, а не на сыгранное.
     uint8_t ahead_program_[16] = {};
-    uint8_t ahead_bank_[16] = {};
-    bool ahead_drum_[16] = {};
+    uint8_t ahead_bank_[16]    = {};
+    bool ahead_drum_[16]       = {};
 };
 
 } // namespace soundsinth::midi_in

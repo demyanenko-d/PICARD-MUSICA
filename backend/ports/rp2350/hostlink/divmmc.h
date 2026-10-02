@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 #pragma once
 
 // DivMMC: подстановка своего ПЗУ и ОЗУ в окно 0x0000-0x3FFF.
@@ -36,7 +37,6 @@ void divmmc_reset();
 // эмулятор SD (sd_spi_byte), apply_mapping и обработчики плагина.
 void divmmc_on_bus_write(uint32_t raw);
 
-
 // Чтение порта в режиме эмуляции ПЗУ состоялось: байт ушёл на шину,
 // готовить следующий. Вызывается из прерывания (port_rd_isr), только для
 // портов, у которых есть ответ в таблице.
@@ -65,6 +65,11 @@ uint32_t divmmc_remaps();
 // След переключений DivMMC с прошлого запуска (память переживает сброс
 // кнопкой): напечатать и начать заново. Только при загрузке, до запуска
 // Core1.
+//
+// Есть только при SOUNDSINTH_DIVMMC_TRACE: выключенный след не собирается
+// и не печатается, 1032 байта SRAM и 440 мс загрузки остаются плате.
+#if SOUNDSINTH_DIVMMC_TRACE
 void divmmc_trace_report();
+#endif
 
 } // namespace bus

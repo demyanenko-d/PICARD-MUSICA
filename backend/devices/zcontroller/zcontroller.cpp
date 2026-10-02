@@ -1,4 +1,5 @@
-// Обработчики портов 0x57/0x77 (zcontroller.h).
+// SPDX-License-Identifier: MIT
+// Обработчики портов 0x57/0x77.
 
 #include "devices/zcontroller/zcontroller.h"
 
@@ -11,17 +12,12 @@
 namespace devices::zcontroller {
 namespace {
 
-namespace sd = devices::sd;
+namespace sd  = devices::sd;
 namespace hal = devices::hal;
 
-constexpr uint8_t kPortData = 0x57;
-constexpr uint8_t kPortCtrl = 0x77;
-
-// Порт управления: запись - бит SSEL (ноль выбирает карту), чтение -
-// состояние карты.
+// Запись в порт управления: бит SSEL, ноль выбирает карту. Номера портов и
+// значения чтения - в заголовке: их сверяет тест.
 constexpr uint8_t kCtrlSselBit = 0x02;
-constexpr uint8_t kCtrlCardPresent = 0xfc;
-constexpr uint8_t kCtrlNoCard = 0xfe;
 
 // --- Защёлка ответа ---
 //
@@ -53,6 +49,17 @@ void SOUNDSINTH_HOT_PATH(port_write_ctrl)(uint8_t, uint8_t data) {
     sd::sd_spi_select(sd::SdOwner::ZController, (data & kCtrlSselBit) == 0u);
 }
 
+// -1 - ещё не публиковали: первая публикация нужна при любом состоянии.
+int8_t s_present_published = -1;
+bool s_running             = false;
+
+void SOUNDSINTH_HOT_PATH(publish_presence)(bool present) {
+    const int8_t now = present ? 1 : 0;
+    if (now == s_present_published) return;
+    s_present_published = now;
+    hal::z80_port_set_read(kPortCtrl, present ? kCtrlCardPresent : kCtrlNoCard);
+}
+
 void SOUNDSINTH_HOT_PATH(port_read_data_done)(uint8_t) {
     // Защёлкнутый байт уже ушёл на шину - запускается следующий холостой
     // обмен, его результат станет ответом на следующее чтение.
@@ -69,15 +76,22 @@ void zcontroller_init(bool emulator_up) {
     hal::z80_port_on_write(kPortCtrl, &port_write_ctrl);
     hal::z80_port_on_read_done(kPortData, &port_read_data_done);
 
-    // Состояние карты в порту управления. Значащий бит - бит 1: ноль -
-    // "карта на месте". Остальные единицы, как у рабочего контроллера на
-    // этой плате. Известный драйвер смотрит
-    // только бит 1, но чужой софт может смотреть и другие.
-    hal::z80_port_set_read(kPortCtrl, devices::storage::storage_present(devices::storage::Client::Host) ? kCtrlCardPresent : kCtrlNoCard);
+    // Состояние карты в порту управления: драйвер WC смотрит только бит 1,
+    // но чужой софт может смотреть и остальные.
+    publish_presence(devices::storage::storage_emulator_present(static_cast<uint8_t>(sd::SdOwner::ZController)));
 
     // До первого обмена защёлка пуста - отдаётся то же, что невыбранная
     // карта.
     latch(sd::kIdleByte);
+    s_running = true;
+}
+
+void SOUNDSINTH_HOT_PATH(zcontroller_tick)() {
+    if (!s_running) return;
+    // Опрос, а не событие: обе проверки читают готовый признак драйвера, ни
+    // одного обращения к носителю здесь нет. Публикация - запись байта в
+    // таблицу ответов, шину она не задерживает.
+    publish_presence(devices::storage::storage_emulator_present(static_cast<uint8_t>(sd::SdOwner::ZController)));
 }
 
 } // namespace devices::zcontroller

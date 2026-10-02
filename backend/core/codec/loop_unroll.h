@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 #pragma once
 
 // Как сэмплы трека лягут в зону сэмплов PSRAM: кодек, прореживание и какие

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 #pragma once
 
 // Независимый (от нашего порта OpenMPT в formats/it_decompress.h)

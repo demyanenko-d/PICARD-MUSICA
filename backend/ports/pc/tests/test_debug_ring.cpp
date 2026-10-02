@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 // Кольца строк лога прошивки на ПК: тот же debug_ring.h, что собирает
 // debug_log.cpp, приёмник - строка вместо TX FIFO UART. На плате кольца
 // уже ломались (строки ядер резались и склеивались), а видно это только по
@@ -38,16 +39,17 @@ void reset(Ring& r, uint32_t at) {
 uint32_t drain_all(Ring& r, uint32_t& left, Sink& k) {
     uint32_t total = 0;
     for (;;) {
-        bool full = false;
-        const uint32_t n = debug_ring::drain_line(r, UINT32_MAX, left, k, full);
-        total += n;
+        bool full         = false;
+        const uint32_t n  = debug_ring::drain_line(r, UINT32_MAX, left, k, full);
+        total            += n;
         if (full || n == 0) return total;
     }
 }
 
 std::string text(uint32_t len, uint32_t seed) {
     std::string s(len, ' ');
-    for (uint32_t i = 0; i < len; ++i) s[i] = static_cast<char>('a' + (seed + i) % 26);
+    for (uint32_t i = 0; i < len; ++i)
+        s[i] = static_cast<char>('a' + (seed + i) % 26);
     return s;
 }
 
@@ -129,15 +131,15 @@ void test_pair(uint32_t cap, uint32_t max) {
     }
     CHECK(!debug_ring::pending(rings, st));
     size_t next[2] = {0, 0};
-    char prev = 0;
+    char prev      = 0;
     bool alternate = true;
-    size_t pos = 0;
+    size_t pos     = 0;
     while (pos < out.size()) {
         const size_t end = out.find('\n', pos);
         if (end == std::string::npos) break;
         const std::string l = out.substr(pos, end - pos + 1);
-        pos = end + 1;
-        const uint32_t c = l[0] == 'B' ? 1 : 0;
+        pos                 = end + 1;
+        const uint32_t c    = l[0] == 'B' ? 1 : 0;
         CHECK(next[c] < sent[c].size() && l == sent[c][next[c]]);
         ++next[c];
         if (prev == l[0] && next[0] < sent[0].size() && next[1] < sent[1].size()) alternate = false;
@@ -167,21 +169,21 @@ void test_threads() {
     });
     std::string acc;
     uint32_t left = 0;
-    uint32_t got = 0;
+    uint32_t got  = 0;
     uint32_t torn = 0;
-    int64_t last = -1;
-    bool order = true;
+    int64_t last  = -1;
+    bool order    = true;
     for (;;) {
         const bool fin = done.load();
         Sink k;
         k.cap = 32;
         drain_all(r, left, k);
-        acc += k.out;
-        size_t pos = 0;
+        acc        += k.out;
+        size_t pos  = 0;
         for (size_t end; (end = acc.find('\n', pos)) != std::string::npos; pos = end + 1) {
             const std::string l = acc.substr(pos, end - pos);
-            unsigned n = 0;
-            int used = 0;
+            unsigned n          = 0;
+            int used            = 0;
             if (std::sscanf(l.c_str(), "#%u:%n", &n, &used) != 1 || l.substr(used) != text(n % 40, n)) {
                 ++torn;
                 continue;

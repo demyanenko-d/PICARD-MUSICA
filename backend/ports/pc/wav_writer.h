@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 #pragma once
 
 #include <cstdint>
@@ -14,7 +15,7 @@ public:
     void close();
 
 private:
-    std::FILE* file_ = nullptr;
+    std::FILE* file_     = nullptr;
     uint32_t data_bytes_ = 0;
 };
 

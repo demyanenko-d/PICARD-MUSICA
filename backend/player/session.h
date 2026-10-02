@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 #pragma once
 
 // Сеанс трека: единственный владелец Callbacks у HostProtocol. Крутится на
@@ -39,8 +40,8 @@ struct SessionOrchestrator {
     explicit SessionOrchestrator(player::protocol::HostProtocol& p) : protocol(p) {}
 
     player::protocol::HostProtocol& protocol;
-    bool session_pending = false;
-    bool aborted = false;
+    bool session_pending         = false;
+    bool aborted                 = false;
     uint32_t pending_file_length = 0;
     // Стратегию обхода файла выбирает хост (параметр команды начала
     // сессии): Wild Commander платит за прыжок назад перечитыванием файла с
@@ -52,14 +53,14 @@ struct SessionOrchestrator {
     player::load::BusByteSource* current_bus_source = nullptr;
     alignas(player::load::BusByteSource) unsigned char bus_source_storage[sizeof(player::load::BusByteSource)];
 
-    bool playing = false; // трек загружен и мог начать играть (звать ли set_position)
-    bool host_here = true; // клиент хоста опрашивает порт состояния (для строки лога)
+    bool playing   = false; // трек загружен и мог начать играть (звать ли set_position)
+    bool host_here = true;  // клиент хоста опрашивает порт состояния (для строки лога)
     // Итог связи этой сессии уже в журнале (конец плана или отказ); нет -
     // его печатает старт следующей сессии. До первой сессии печатать нечего.
     bool link_reported = true;
     // Самый долгий шаг фоновой догрузки сессии и его сэмпл - в строку конца
     // плана.
-    uint32_t longest_step_us = 0;
+    uint32_t longest_step_us     = 0;
     uint16_t longest_step_sample = 0;
 
     // Итог фазы A сессии: формат, длительность прохода (по ней виден конец
@@ -84,9 +85,9 @@ player::protocol::HostProtocol::Callbacks session_orchestrator_callbacks(Session
 // мост GS (модуль через плеер GS показывается так же).
 void publish_file_info(uint32_t total_frames, const soundsinth::model::Song& song);
 
-// Обслуживание карты и протокола без ожидания - насос для долгих работ
-// Core1, где ждать нечего (распаковка сэмпла банка, снос движка перед
-// разбором модуля GS): __wfi усыпил бы Core1 до следующего обращения хоста.
+// Обслужить карту и протокол и вернуться. Для долгих работ Core1, где
+// ждать нечего (распаковка сэмпла банка, снос движка перед разбором
+// модуля GS): __wfi усыпил бы Core1 до следующего обращения хоста.
 void serve_without_wait(void*);
 
 } // namespace player

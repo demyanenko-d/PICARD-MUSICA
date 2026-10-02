@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 // TickObserver движка (engine/tracker_engine.h) для прогрессивной
 // загрузки. Это единственный канал, по которому Core0 (звук) сообщает
 // Core1 (загрузка), где сейчас играет секвенсор и какие сэмплы держат
@@ -31,15 +32,15 @@ std::vector<uint8_t> read_whole_file(const char* path) {
 }
 
 struct Capture {
-    const soundsinth::model::Song* song = nullptr;
+    const soundsinth::model::Song* song   = nullptr;
     const std::vector<uint16_t>* last_use = nullptr;
 
-    uint32_t ticks = 0;
-    uint32_t bad_sample_index = 0;   // сэмпл вне диапазона Song::samples
-    uint32_t bad_order_pos = 0;      // позиция вне order-листа
+    uint32_t ticks               = 0;
+    uint32_t bad_sample_index    = 0; // сэмпл вне диапазона Song::samples
+    uint32_t bad_order_pos       = 0; // позиция вне order-листа
     uint32_t never_used_in_voice = 0; // звучит сэмпл, которого планировщик не нашёл вовсе
-    uint32_t outlived_last_use = 0;  // звучит сэмпл, чей last_use уже позади (NNA-хвост)
-    uint32_t max_voices = 0;
+    uint32_t outlived_last_use   = 0; // звучит сэмпл, чей last_use уже позади (NNA-хвост)
+    uint32_t max_voices          = 0;
     std::set<uint16_t> seen_samples;
     std::set<uint16_t> seen_order_pos;
 };
@@ -72,7 +73,7 @@ using LoadFn = bool (*)(formats::ByteSource, memory::TrackMemory&, soundsinth::m
 void check_tick_observer(LoadFn load, const char* path, uint32_t frames) {
     const std::vector<uint8_t> bytes = read_whole_file(path);
     if (bytes.empty()) {
-        std::printf("  ПРОПУСК (файл не найден): %s\n", path);
+        std::printf("  SKIP (file not found): %s\n", path);
         return;
     }
 
@@ -90,15 +91,15 @@ void check_tick_observer(LoadFn load, const char* path, uint32_t frames) {
     std::vector<uint16_t> plan(song.sample_count == 0 ? 1 : song.sample_count);
     std::vector<uint16_t> last_use(plan.size());
     const uint16_t prefetch =
-        player::load::plan_playback_order(song, mem.psram, plan.data(), static_cast<uint16_t>(plan.size()), last_use.data())
-            .prefetch_count;
+        player::load::plan_playback_order(song, mem.psram, plan.data(), static_cast<uint16_t>(plan.size()), last_use.data()).prefetch_count;
 
     Capture cap;
-    cap.song = &song;
+    cap.song     = &song;
     cap.last_use = &last_use;
 
     if (frames == 0) {
-        frames = engine::compute_song_total_frames(song, mem.psram, memory::scratch_take(mem.scratch, memory::Scratch::DurationPass, memory::kDurationPassBytes), memory::kDurationPassBytes);
+        frames = engine::compute_song_total_frames(
+            song, mem.psram, memory::scratch_take(mem.scratch, memory::Scratch::DurationPass, memory::kDurationPassBytes), memory::kDurationPassBytes);
         memory::scratch_leave(mem.scratch, memory::Scratch::DurationPass);
     }
     engine::TrackerEngine eng(song, mem);
@@ -125,9 +126,8 @@ void check_tick_observer(LoadFn load, const char* path, uint32_t frames) {
     // Карта сэмплов - по слотам: не больше числа слотов движка.
     CHECK(cap.max_voices <= SOUNDSINTH_MAX_SLOTS);
 
-    std::printf("  %s: тиков %u, голосов пик %u, сэмплов звучало %u, order-позиций %u, хвостов за last_use %u\n", path,
-                cap.ticks, cap.max_voices, static_cast<unsigned>(cap.seen_samples.size()),
-                static_cast<unsigned>(cap.seen_order_pos.size()), cap.outlived_last_use);
+    std::printf("  %s: ticks %u, voice peak %u, samples sounded %u, order positions %u, tails past last_use %u\n", path, cap.ticks, cap.max_voices,
+                static_cast<unsigned>(cap.seen_samples.size()), static_cast<unsigned>(cap.seen_order_pos.size()), cap.outlived_last_use);
 
     memory::track_memory_destroy(mem);
 }

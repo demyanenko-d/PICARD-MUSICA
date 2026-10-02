@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 #pragma once
 
 // GPIO платы в тестах ПК: значимо только gpio_put (CS карты), остальное -

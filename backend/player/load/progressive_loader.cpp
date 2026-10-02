@@ -1,31 +1,41 @@
+// SPDX-License-Identifier: MIT
 #include "player/load/progressive_loader.h"
 
 #include "core/bank/bank_reader.h"
+#include "core/formats/midi_live.h" // потолок сэмплов живого потока
 #include "player/load/sample_prefetch.h"
 #include "core/memory/psram_store.h"
 #include "core/memory/sample_cache_catalog.h"
 
 namespace player::load {
 
+// Заказ в кольце не повторяется (сторож plan_first_use), поэтому разных
+// заказов сразу не больше, чем сэмплов у живого потока. Кольцо обязано их
+// вмещать: переполнение - молчаливый отказ заказа и молчащая нота.
+static_assert(soundsinth::formats::midi::kLiveMaxSamples <= kDemandRingCapacity, "the request ring is smaller than the number of samples in the live stream");
+
 namespace {
 
-constexpr uint16_t kRingMask = kProgressiveMaxSamples - 1u;
+constexpr uint16_t kRingMask = kDemandRingCapacity - 1u;
 
 // Demand: дольше всех не звучавший из тех, кого не держит голос.
 bool evict_least_recent(ProgressiveLoader& pl, soundsinth::memory::TrackMemory& mem, const SamplesInUse& in_use) {
     soundsinth::memory::SampleCacheEntry* victim = nullptr;
-    uint16_t oldest_age = 0;
-    const uint16_t end = mem.sample_cache.used_end.load(std::memory_order_relaxed);
+    uint16_t oldest_age                          = 0;
+    const uint16_t end                           = mem.sample_cache.used_end.load(std::memory_order_relaxed);
     for (uint16_t i = 0; i < end; ++i) {
         soundsinth::memory::SampleCacheEntry& e = mem.sample_cache.entries[i];
-        const uint16_t idx = soundsinth::memory::sample_cache_slot_index(e);
+        const uint16_t idx                      = soundsinth::memory::sample_cache_slot_index(e);
         if (idx >= kProgressiveMaxSamples) continue;
-        if (in_use.is_busy(idx)) continue;
+        if (in_use.is_busy(idx)) {
+            if (in_use.over_cap(idx)) ++pl.evict_capped;
+            continue;
+        }
         const uint16_t last = pl.plan_last_use[idx];
         // Ни разу не отмечен - старше всех.
         const uint16_t age = last == kSampleNeverUsed ? 0xffffu : static_cast<uint16_t>(pl.clock - last);
         if (victim == nullptr || age > oldest_age) {
-            victim = &e;
+            victim     = &e;
             oldest_age = age;
         }
     }
@@ -38,13 +48,13 @@ bool evict_least_recent(ProgressiveLoader& pl, soundsinth::memory::TrackMemory& 
 } // namespace
 
 void progressive_start_demand(ProgressiveLoader& pl) {
-    pl.source = ProgressiveSource::Demand;
-    pl.plan_next = 0;
-    pl.plan_count = 0;
-    pl.clock = 0;
+    pl.source                = ProgressiveSource::Demand;
+    pl.plan_next             = 0;
+    pl.plan_count            = 0;
+    pl.clock                 = 0;
     pl.waiting_min_first_use = kSampleNeverUsed;
     for (uint16_t i = 0; i < kProgressiveMaxSamples; ++i) {
-        pl.plan_last_use[i] = kSampleNeverUsed;
+        pl.plan_last_use[i]  = kSampleNeverUsed;
         pl.plan_first_use[i] = kSampleNeverUsed;
     }
 }
@@ -52,16 +62,15 @@ void progressive_start_demand(ProgressiveLoader& pl) {
 bool progressive_request(ProgressiveLoader& pl, uint16_t sample_index) {
     if (pl.source != ProgressiveSource::Demand || sample_index >= kProgressiveMaxSamples) return false;
     if (pl.plan_first_use[sample_index] != kSampleNeverUsed) return true;
-    if (static_cast<uint16_t>(pl.plan_count - pl.plan_next) >= kProgressiveMaxSamples) return false;
+    if (static_cast<uint16_t>(pl.plan_count - pl.plan_next) >= kDemandRingCapacity) return false;
     pl.plan_indices[pl.plan_count & kRingMask] = sample_index;
     ++pl.plan_count;
     pl.plan_first_use[sample_index] = 0; // в кольце
     return true;
 }
 
-void progressive_note_in_use(ProgressiveLoader& pl, const soundsinth::memory::TrackMemory& mem, const SamplesInUse& in_use,
-                             uint16_t now) {
-    pl.clock = now;
+void progressive_note_in_use(ProgressiveLoader& pl, const soundsinth::memory::TrackMemory& mem, const SamplesInUse& in_use, uint16_t now) {
+    pl.clock           = now;
     const uint16_t end = mem.sample_cache.used_end.load(std::memory_order_relaxed);
     for (uint16_t i = 0; i < end; ++i) {
         const uint16_t idx = soundsinth::memory::sample_cache_slot_index(mem.sample_cache.entries[i]);
@@ -73,18 +82,29 @@ void progressive_note_in_use(ProgressiveLoader& pl, const soundsinth::memory::Tr
 // Plan: вытесняется сэмпл, чья последняя позиция пройдена, если его не держит
 // голос (голос переживает last_use на релизе и хвосте NNA). Цепочку PCM,
 // общую с другой записью (.mid), sample_cache_evict не освобождает.
-bool progressive_evict_one(ProgressiveLoader& pl, soundsinth::memory::TrackMemory& mem, uint16_t order_pos,
-                           const SamplesInUse& in_use) {
+bool progressive_evict_one(ProgressiveLoader& pl, soundsinth::memory::TrackMemory& mem, uint16_t order_pos, const SamplesInUse& in_use) {
     if (pl.no_eviction) return false;
     if (pl.source == ProgressiveSource::Demand) return evict_least_recent(pl, mem, in_use);
     if (pl.plan_count == 0 || order_pos == 0) return false;
-    for (auto& e : mem.sample_cache.entries) {
-        const uint16_t idx = soundsinth::memory::sample_cache_slot_index(e);
-        static_assert(soundsinth::memory::kSampleCacheFreeSlot >= kProgressiveMaxSamples, "свободный слот отсекается границей");
+    // До отметки занятых, а не по всему массиву: выше неё слотов нет по
+    // контракту каталога, а зовут это до kMaxEvictRetries раз на сэмпл.
+    //
+    // Начинать с места прошлой остановки (по кругу) пробовали - замером
+    // хуже: жертвой становится сэмпл, который скоро понадобится снова.
+    // Самый нижний подходящий слот держит тот, что загружен раньше всех и
+    // вероятнее отыграл.
+    const uint16_t end = mem.sample_cache.used_end.load(std::memory_order_relaxed);
+    for (uint16_t i = 0; i < end; ++i) {
+        soundsinth::memory::SampleCacheEntry& e = mem.sample_cache.entries[i];
+        const uint16_t idx                      = soundsinth::memory::sample_cache_slot_index(e);
+        static_assert(soundsinth::memory::kSampleCacheFreeSlot >= kProgressiveMaxSamples, "a free slot is cut off by the boundary");
         if (idx >= kProgressiveMaxSamples) continue;
         const uint16_t last = pl.plan_last_use[idx];
         if (last == kSampleNeverUsed || last >= order_pos) continue;
-        if (in_use.is_busy(idx)) continue;
+        if (in_use.is_busy(idx)) {
+            if (in_use.over_cap(idx)) ++pl.evict_capped;
+            continue;
+        }
         soundsinth::memory::sample_cache_evict(mem.sample_cache, mem.psram, &e);
         ++pl.evicted;
         return true;
@@ -92,9 +112,8 @@ bool progressive_evict_one(ProgressiveLoader& pl, soundsinth::memory::TrackMemor
     return false;
 }
 
-ProgressiveStep progressive_load_next(ProgressiveLoader& pl, soundsinth::memory::TrackMemory& mem, uint16_t order_pos,
-                                      const SamplesInUse& in_use, ProgressiveLoadFn load, void* user,
-                                      uint16_t* loaded_index, const char** reason_out) {
+ProgressiveStep progressive_load_next(ProgressiveLoader& pl, soundsinth::memory::TrackMemory& mem, uint16_t order_pos, const SamplesInUse& in_use,
+                                      ProgressiveLoadFn load, void* user, uint16_t* loaded_index, const char** reason_out) {
     const bool demand = pl.source == ProgressiveSource::Demand;
     if (demand) {
         if (pl.plan_next == pl.plan_count) return ProgressiveStep::Waiting;
@@ -106,17 +125,24 @@ ProgressiveStep progressive_load_next(ProgressiveLoader& pl, soundsinth::memory:
     // загрузку на весь трек.
     // Несвоевременный пропускается, а не держит очередь: в ByFile план идёт
     // по смещению, а не по первой ноте.
-    const uint32_t free_pages = soundsinth::memory::psram_free_page_count(mem.psram);
-    const bool memory_is_ample = free_pages > (mem.psram.sample_page_count / kAmpleFreeDivisor);
+    const uint32_t free_pages  = soundsinth::memory::psram_free_page_count(mem.psram);
+    const bool memory_is_ample = free_pages > (soundsinth::memory::psram_sample_page_count(mem.psram) / kAmpleFreeDivisor);
     if (!demand && pl.lead_positions != 0 && !memory_is_ample) {
         const uint16_t horizon = static_cast<uint16_t>(order_pos + pl.lead_positions);
         // Тот же план и та же голова: все оставшиеся не раньше запомненного.
-        if (pl.waiting_min_first_use != kSampleNeverUsed && pl.waiting_plan_next == pl.plan_next &&
-            horizon < pl.waiting_min_first_use) {
+        if (pl.waiting_min_first_use != kSampleNeverUsed && pl.waiting_plan_next == pl.plan_next && horizon < pl.waiting_min_first_use) {
             return ProgressiveStep::Waiting;
         }
-        uint16_t pick = pl.plan_next;
-        uint16_t min_first = kSampleNeverUsed;
+        // Пропущенное пересматривается, только когда горизонт дорос до
+        // самой ранней из пропущенных нот: иначе тот же префикс
+        // просматривался бы заново на каждом шаге.
+        uint16_t pick      = pl.plan_next;
+        uint16_t min_first = pl.lead_skip_min_first;
+        if (pl.lead_scan > pl.plan_next && horizon < pl.lead_skip_min_first) {
+            pick = pl.lead_scan < pl.plan_count ? pl.lead_scan : pl.plan_count;
+        } else {
+            min_first = kSampleNeverUsed;
+        }
         while (pick < pl.plan_count) {
             const uint16_t idx_peek = pl.plan_indices[pick];
             if (idx_peek >= kProgressiveMaxSamples) break;
@@ -127,15 +153,27 @@ ProgressiveStep progressive_load_next(ProgressiveLoader& pl, soundsinth::memory:
         }
         if (pick >= pl.plan_count) {
             pl.waiting_min_first_use = min_first;
-            pl.waiting_plan_next = pl.plan_next;
+            pl.waiting_plan_next     = pl.plan_next;
+            pl.lead_scan             = pl.plan_count;
+            pl.lead_skip_min_first   = min_first;
             return ProgressiveStep::Waiting;
         }
         pl.waiting_min_first_use = kSampleNeverUsed;
+        // Своевременный вынимается сдвигом, а не перестановкой с головой:
+        // план отсортирован по смещению в файле, и у плагина прыжок назад -
+        // перечитывание файла с начала. Сдвиг сохраняет порядок хвоста, и
+        // пропущенный префикс остаётся на месте относительно plan_next.
         if (pick != pl.plan_next) {
-            const uint16_t tmp = pl.plan_indices[pick];
-            pl.plan_indices[pick] = pl.plan_indices[pl.plan_next];
-            pl.plan_indices[pl.plan_next] = tmp;
+            const uint16_t idx_pick = pl.plan_indices[pick];
+            for (uint16_t i = pick; i > pl.plan_next; --i) {
+                pl.plan_indices[i] = pl.plan_indices[i - 1];
+            }
+            pl.plan_indices[pl.plan_next] = idx_pick;
         }
+        // Просмотрено включая pick; после сдвига пропущенные лежат на
+        // [plan_next + 1, pick], а plan_next вырастет на единицу ниже.
+        pl.lead_scan           = static_cast<uint16_t>(pick + 1u);
+        pl.lead_skip_min_first = min_first;
     }
 
     uint16_t idx;
@@ -152,7 +190,7 @@ ProgressiveStep progressive_load_next(ProgressiveLoader& pl, soundsinth::memory:
     if (soundsinth::memory::sample_cache_find(mem.sample_cache, idx) != nullptr) return ProgressiveStep::Loaded;
 
     const char* why = "?";
-    bool ok = load(user, idx, &why);
+    bool ok         = load(user, idx, &why);
     // Не влезло - освободить отыгравшее и попробовать снова, по одному. Банк
     // не читается с карты - вытеснение не поможет.
     // Повтор - только когда вытеснение что-то дало: страниц стало больше или
@@ -162,7 +200,9 @@ ProgressiveStep progressive_load_next(ProgressiveLoader& pl, soundsinth::memory:
     for (uint16_t tries = 0; !ok && why != soundsinth::bank::kBankReadError && tries < kMaxEvictRetries; ++tries) {
         const uint32_t free_before = soundsinth::memory::psram_free_page_count(mem.psram);
         if (!progressive_evict_one(pl, mem, order_pos, in_use)) break;
-        if (why != soundsinth::memory::kSampleCatalogFull && soundsinth::memory::psram_free_page_count(mem.psram) == free_before) continue;
+        if (why != soundsinth::memory::kSampleCatalogFull && soundsinth::memory::psram_free_page_count(mem.psram) == free_before) {
+            continue;
+        }
         ok = load(user, idx, &why);
     }
     if (reason_out) *reason_out = ok ? nullptr : why;

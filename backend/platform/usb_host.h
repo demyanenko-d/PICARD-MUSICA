@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 #pragma once
 
 // USB-хост глазами цикла Core1. Реализует порт: на плате встроенный

@@ -1,0 +1,138 @@
+; SPDX-License-Identifier: MIT
+; Триггер TR-DOS: сигнал DOS_N по выборке команды.
+;
+; Машина с интерфейсом Beta страничит ПЗУ TR-DOS по адресу выборки:
+; выборка в окне 0x3Dxx включает его, выборка по адресу 0x4000 и выше
+; выключает. Здесь этот признак ведёт плата линией DOS_N.
+;
+; Автоматов два, и они в разных блоках. Решает pio0: только он видит M1, RD
+; и адрес - его окно выводов 0..31. Ведёт pio2: только он достаёт до
+; DOS_N - его окно 16..47. Решение переносит канал DMA из очереди одного в
+; очередь другого; ядро не участвует.
+;
+; Через SIO путь не годится: он на шине IOPORT, у ядер, и DMA до него не
+; достаёт.
+;
+;   trdos_detect   смена уровня по выборке команды: ноль - включить, единица - снять
+;   trdos_drive    уровень на DOS_N
+
+.pio_version rp2350
+
+; Номера линий Z80 в wait gpio - числа в инструкциях, bus_setup.cpp сверяет
+; их с PIN_* (bus.h).
+.define public Z80_M1_N_GPIO 3
+.define public Z80_RD_N_GPIO 5
+
+; ---
+; IN_BASE = A0 (GPIO 8): разряд слова равен номеру линии адреса.
+;
+; Ждать RD, а не отмерять паузу: при выборке команды он падает на полтакта
+; позже адреса, и ожидание само даёт установившийся адрес на любой частоте
+; машины. Заодно отсекается подтверждение прерывания - там M1 низкий, а RD
+; высокий.
+;
+; Проверка M1 после RD - от чтения вектора в режиме 2: оно идёт сразу за
+; подтверждением, RD в нём низкий, а M1 уже снят.
+;
+; Y заряжен старшим байтом окна (0x3D) при запуске: в set он не влезает.
+;
+; Уровень линии автомат помнит сам - счётчиком команд, двумя копиями
+; цикла. Свободного регистра под него нет: X занят разбором адреса, Y -
+; окном. Каждая копия смотрит только свой переход и кладёт слово только на
+; смену уровня.
+;
+;   released   DOS_N = 1, ПЗУ TR-DOS не страничено; ждёт выборку в окне
+;   asserted   DOS_N = 0, страничено; ждёт выборку по 0x4000 и выше
+;
+; Начальное состояние - released: ровно то, что ставит на выводе
+; trdos_drive_program_init.
+;
+; Иначе слово шло бы на каждой выборке выше 0x4000, то есть всё время,
+; пока машина не в TR-DOS: сотни тысяч переносов DMA в секунду при
+; единицах настоящих смен.
+.program trdos_detect
+
+.wrap_target
+public released:
+    wait 0 gpio Z80_M1_N_GPIO   ; идёт выборка команды
+    wait 0 gpio Z80_RD_N_GPIO   ; адрес установился
+    jmp pin, released_end       ; M1 уже снят: не выборка
+    mov osr, pins
+    out null, 8                 ; A0..A7: окно задано старшим байтом
+    out x, 8                    ; X = A8..A15
+    jmp x != y, released_end    ; не окно - уровень прежний
+    mov isr, null               ; окно - включить DOS_N
+    push noblock                ; полная очередь теряет отметку, а не встаёт
+    wait 1 gpio Z80_M1_N_GPIO   ; конец выборки: иначе она разобралась бы дважды
+    jmp asserted
+released_end:
+    wait 1 gpio Z80_M1_N_GPIO
+    jmp released
+
+public asserted:
+    wait 0 gpio Z80_M1_N_GPIO
+    wait 0 gpio Z80_RD_N_GPIO
+    jmp pin, asserted_end
+    mov osr, pins
+    out null, 14                ; до A14
+    out x, 2                    ; X = A14, A15
+    jmp !x, asserted_end        ; оба нуля - ниже 0x4000, уровень прежний
+    set x, 1                    ; выше - снять DOS_N
+    mov isr, x
+    push noblock
+    wait 1 gpio Z80_M1_N_GPIO
+    jmp released
+asserted_end:
+    wait 1 gpio Z80_M1_N_GPIO
+    jmp asserted
+.wrap
+
+; ---
+.program trdos_drive
+
+.wrap_target
+    pull block
+    out pins, 1
+.wrap
+
+% c-sdk {
+#include "hardware/pio.h"
+
+// Решатель: адрес с A0, OUT сдвигает вправо (разряд слова равен номеру
+// линии), jmp pin смотрит на M1_N.
+//
+// window_hi - старший байт окна включения (0x3D). Кладётся в Y: в set
+// помещаются только пять разрядов.
+static inline void trdos_detect_program_init(PIO pio, uint sm, uint offset, uint pin_a0, uint pin_m1_n,
+                                             uint8_t window_hi) {
+    pio_sm_config c = trdos_detect_program_get_default_config(offset);
+    sm_config_set_in_pins(&c, pin_a0);
+    sm_config_set_jmp_pin(&c, pin_m1_n);
+    sm_config_set_out_shift(&c, /*shift_right=*/true, /*autopull=*/false, 32);
+    sm_config_set_in_shift(&c, /*shift_right=*/false, /*autopush=*/false, 32);
+    sm_config_set_clkdiv(&c, 1.0f);
+    pio_sm_init(pio, sm, offset, &c);
+    pio_sm_put_blocking(pio, sm, window_hi);
+    pio_sm_exec(pio, sm, pio_encode_pull(false, true));
+    pio_sm_exec(pio, sm, pio_encode_mov(pio_y, pio_osr));
+    // Состояние автомата - его счётчик команд, и начальное обязано совпасть
+    // с уровнем, который выставил выдатчик.
+    pio_sm_exec(pio, sm, pio_encode_jmp(offset + trdos_detect_offset_released));
+}
+
+// Выдатчик. Пин передаётся автомату уже в неактивном уровне: сперва
+// выходной регистр и направление, пока пин ещё у SIO, и только потом сам
+// пин - иначе в передаче он побывал бы плавающим.
+static inline void trdos_drive_program_init(PIO pio, uint sm, uint offset, uint pin_dos_n) {
+    pio_sm_config c = trdos_drive_program_get_default_config(offset);
+    sm_config_set_out_pins(&c, pin_dos_n, 1);
+    sm_config_set_set_pins(&c, pin_dos_n, 1);
+    sm_config_set_out_shift(&c, /*shift_right=*/true, /*autopull=*/false, 32);
+    sm_config_set_clkdiv(&c, 1.0f);
+    pio_sm_init(pio, sm, offset, &c);
+    pio_sm_exec(pio, sm, pio_encode_set(pio_pins, 1));
+    // Не маской: вывод старше 31, и разряд в ней не поместился бы.
+    pio_sm_set_consecutive_pindirs(pio, sm, pin_dos_n, 1, true);
+    pio_gpio_init(pio, pin_dos_n);
+}
+%}

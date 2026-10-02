@@ -8,7 +8,7 @@
 / Function Configurations
 /---------------------------------------------------------------------------*/
 
-#define FF_FS_READONLY	1
+#define FF_FS_READONLY	0
 /* SoundSinth: образ на ПК только читается (файлы модулей с
    карты, ничего не пишет - read-only меньше кода и без риска случайно
    испортить тестовый образ.
@@ -118,12 +118,17 @@
 
 
 #define FF_USE_LFN		1
-#define FF_MAX_LFN		255
-/* 1 = статический буфер: в тестовом корпусе (SD/test_music) полно длинных имён с
-/  пробелами/смешанным регистром - без LFN они были бы не читаемы (только
-/  8.3). "Не потокобезопасно" пока не проблема - файл к файлу мы обращаемся
-/  последовательно из одного места; вернуться к этому, если понадобится
-/  параллельный доступ к ФС из нескольких задач.
+#define FF_MAX_LFN		95
+/* 1 = статический буфер: имена на карте бывают с пробелами и смешанным
+/  регистром, без LFN они видны только как 8.3. "Не потокобезопасно" пока
+/  не проблема - файл к файлу мы обращаемся последовательно из одного
+/  места; вернуться к этому, если понадобится параллельный доступ к ФС из
+/  нескольких задач.
+/
+/  Предел 95, а не 255: буфер живёт в .bss, (95+1)*2 = 192 байта против 512.
+/  Плата открывает только короткие служебные пути; предел нужен разбору
+/  каталогов на ПК, где самое длинное имя корпуса - 55 символов.
+/  Имя длиннее предела не открывается и не показывается в перечислении.
 /  The FF_USE_LFN switches the support for LFN (long file name).
 /
 /   0: Disable LFN. FF_MAX_LFN has no effect.
@@ -154,7 +159,7 @@
 /  When LFN is not enabled, this option has no effect. */
 
 
-#define FF_LFN_BUF		255
+#define FF_LFN_BUF		95
 #define FF_SFN_BUF		12
 /* This set of options defines size of file name members in the FILINFO structure
 /  which is used to read out directory items. These values should be suffcient for
@@ -258,7 +263,7 @@
 /  Note that enabling exFAT discards ANSI C (C89) compatibility. */
 
 
-#define FF_FS_NORTC		0
+#define FF_FS_NORTC		1
 #define FF_NORTC_MON	1
 #define FF_NORTC_MDAY	1
 #define FF_NORTC_YEAR	2025

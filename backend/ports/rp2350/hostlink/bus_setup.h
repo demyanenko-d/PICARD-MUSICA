@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 // Внутренний заголовок шины: развязка монтажа и логики.
 //
 // Логика - в bus.cpp; то, чем она пользуется, но что к ней не относится, -
@@ -37,11 +38,11 @@ namespace bus {
 // прошивку.
 inline constexpr uint8_t PORT_CMD = SOUNDSINTH_BUS_PORT_CMD;
 inline constexpr uint8_t PORT_DAT = SOUNDSINTH_BUS_PORT_DAT;
-inline constexpr uint PIN_A8 = PIN_A0 + 8; // GPIO 16
+inline constexpr uint PIN_A8      = PIN_A0 + 8; // GPIO 16
 
 // Размеры таблиц здесь: на них ссылаются границы массивов в объявлениях
 // ниже.
-// Варианты таблицы (PAGE_TAB_VARIANTS, bus.h) заготовлены заранее. Смена
+// Варианты таблицы заготовлены заранее. Смена
 // банка приходит записью в порт 0xE3, и следующая команда процессора может
 // тут же читать из нового банка - срок порядка полумикросекунды. Перезапись региона в таблице - 64 записи в память;
 // замер: 196 тактов уже на 32 записях при бюджете 252. Не успеть.
@@ -56,12 +57,12 @@ inline constexpr uint PIN_A8 = PIN_A0 + 8; // GPIO 16
 //
 // Половины варианта по M1: выборка команды и чтение данных.
 inline constexpr uint32_t PAGE_TAB_HALVES = 2;
-inline constexpr uint32_t kFetchHalf = 0;
-inline constexpr uint32_t kDataHalf = 1;
+inline constexpr uint32_t kFetchHalf      = 0;
+inline constexpr uint32_t kDataHalf       = 1;
 // Страниц по 256 байт на 0x0000-0x3FFF и в регионе 8 КБ. divmmc оперирует
 // регионами; гранула таблицы мельче, чтобы отделить окно 0x3Dxx от
 // знакогенератора.
-inline constexpr uint32_t PAGES_PER_TABLE = 0x4000u / 256u;
+inline constexpr uint32_t PAGES_PER_TABLE  = 0x4000u / 256u;
 inline constexpr uint32_t PAGES_PER_REGION = 32;
 inline constexpr uint32_t PAGE_TAB_REGIONS = PAGES_PER_TABLE / PAGES_PER_REGION;
 // Запись таблицы: (база страницы >> 8) << 1 | ROM_BLK_N. Своя страница -
@@ -70,7 +71,9 @@ inline constexpr uint32_t PAGE_TAB_REGIONS = PAGES_PER_TABLE / PAGES_PER_REGION;
 inline constexpr uint32_t kPageNotOurs = 1u;
 // Карты трапов (trap_join): по адресу 0x0000-0x1FFF, по странице 0x2000-0x3FFF.
 inline constexpr uint32_t kTrapPageMapEntries = 0x2000u / 256u;
-constexpr uint32_t page_entry(uint32_t base_shr8) { return base_shr8 << 1; }
+constexpr uint32_t page_entry(uint32_t base_shr8) {
+    return base_shr8 << 1;
+}
 // --- 2. Состояние монтажа ---
 //
 // Определения в bus.cpp, рядом с логикой, которая их читает; здесь
@@ -124,9 +127,14 @@ extern int s_dma_port_addr;
 extern int s_dma_port_ptr;
 extern int s_dma_port_join;
 extern int s_sm_port_join;
+extern int s_sm_trdos_drive;
 
 // Трапы: карты, слова варианта, склейщик в pio2 и четыре канала.
-inline uint32_t* const s_trap_addr_map = reinterpret_cast<uint32_t*>(kTrapAddrMapAt);
+// Карта трапов - обычный объект в .bss с выравниванием, а не адрес
+// цифрой за .bss. Адресом её тридцать два килобайта не видны ни в size,
+// ни линкеру, и арена newlib формально накрывает их собой.
+extern uint32_t s_trap_addr_map_storage[kTrapAddrMapEntries];
+inline uint32_t* const s_trap_addr_map = s_trap_addr_map_storage;
 extern uint32_t s_trap_page_map[kTrapPageMapEntries];
 extern uint32_t s_trap_word[2];
 extern int s_sm_trap_join;

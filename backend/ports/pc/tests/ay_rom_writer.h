@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 #pragma once
 
 // Записи в порты AY так, как их делает ПЗУ 128 (PLAY): выбор регистра 14 и
@@ -20,12 +21,14 @@ struct AyRomWriter {
     void bit(bool one) { data(one ? 0xFEu : 0xFAu); }
     void byte(uint8_t b) {
         bit(false);
-        for (int i = 0; i < 8; ++i) bit(((b >> i) & 1u) != 0);
+        for (int i = 0; i < 8; ++i)
+            bit(((b >> i) & 1u) != 0);
         bit(true);
     }
     void bytes(std::initializer_list<uint8_t> list) {
         select(soundsinth::midi_in::kAyRegPortA);
-        for (uint8_t b : list) byte(b);
+        for (uint8_t b : list)
+            byte(b);
     }
 };
 

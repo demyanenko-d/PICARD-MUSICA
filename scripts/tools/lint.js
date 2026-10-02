@@ -21,7 +21,7 @@ const cp = require('child_process');
 
 const ROOT = path.resolve(__dirname, '..', '..');
 const DB_DIR = path.join(ROOT, 'build', 'zc');
-const SCOPE = ['backend/core', 'backend/ports/rp2350', 'backend/platform'];
+const SCOPE = ['backend/core', 'backend/devices', 'backend/player', 'backend/ports/rp2350', 'backend/platform'];
 
 function find_clang_tidy() {
     const probe = cp.spawnSync('clang-tidy', ['--version'], {encoding: 'utf8'});

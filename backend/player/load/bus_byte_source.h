@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 #pragma once
 
 // soundsinth::formats::ByteSource поверх протокола с хостом. pump - функция вызывающего, продвигает
@@ -20,17 +21,24 @@ public:
     // pump/pump_user - вызывается в цикле ожидания ответа, должен продвинуть
     // протокол хотя бы на шаг и вернуться, не блокируя.
     BusByteSource(player::protocol::HostProtocol& protocol, uint32_t file_length, PumpFn pump, void* pump_user)
-        : protocol_(protocol), file_length_(file_length), pump_(pump), pump_user_(pump_user) {}
+        : protocol_(protocol)
+        , file_length_(file_length)
+        , pump_(pump)
+        , pump_user_(pump_user) {}
 
-    soundsinth::formats::ByteSource as_byte_source() {
-        return soundsinth::formats::ByteSource{this, &read_fn, &seek_fn, &size_fn};
-    }
+    soundsinth::formats::ByteSource as_byte_source() { return soundsinth::formats::ByteSource{this, &read_fn, &seek_fn, &size_fn}; }
 
     // Передаётся владельцем колбэков протокола (набор Callbacks один на весь
     // протокол, BusByteSource сам их не регистрирует).
     void on_reset() { aborted_ = true; }
 
     bool aborted() const { return aborted_; }
+
+    // Сколько раз окно не накрыло запрошенное место. Выход оттуда даёт
+    // короткое чтение молча, и без этого числа "хост сдался" не отличить
+    // от "хост отдал не то окно": кадр подтверждения несёт только длину,
+    // смещения в нём нет.
+    uint32_t window_missed() const { return window_missed_; }
 
 private:
     static uint32_t read_fn(void* self, void* dst, uint32_t n);
@@ -46,15 +54,16 @@ private:
     // request_file_chunk(), который делает только request_window, сперва
     // обнулив window_len_.
     const uint8_t* window_ = nullptr;
-    uint32_t window_base_ = 0;
-    uint32_t window_len_ = 0;
+    uint32_t window_base_  = 0;
+    uint32_t window_len_   = 0;
 
     player::protocol::HostProtocol& protocol_;
     uint32_t file_length_;
     PumpFn pump_;
     void* pump_user_;
 
-    uint32_t pos_ = 0;
+    uint32_t pos_           = 0;
+    uint32_t window_missed_ = 0;
 
     // Пишет on_reset из poll() внутри pump_ - тот же поток, что ждёт окна.
     bool aborted_ = false;

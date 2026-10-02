@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 #include <cstdio>
 
 #include "testing.h"
@@ -34,10 +35,12 @@ void run_live_chain_tests();
 void run_track_transition_stress_tests();
 void run_midi_loader_tests();
 void run_it_golden_tests();
+void run_psram_alloc_tests();
 void run_psram_pattern_alloc_tests();
 void run_gs_device_tests();
 void run_ay_midi_tests();
 void run_debug_ring_tests();
+void run_config_tests();
 void run_hid_tests();
 void run_hid_parser_tests();
 void run_sd_spi_emu_tests();
@@ -79,10 +82,12 @@ int main() {
     run_track_transition_stress_tests();
     run_midi_loader_tests();
     run_it_golden_tests();
+    run_psram_alloc_tests();
     run_psram_pattern_alloc_tests();
     run_gs_device_tests();
     run_ay_midi_tests();
     run_debug_ring_tests();
+    run_config_tests();
     run_hid_tests();
     run_hid_parser_tests();
     run_sd_spi_emu_tests();
@@ -94,9 +99,9 @@ int main() {
     run_voice_cull_tests();
     run_reverb_filter_tests();
 
-    std::printf("\n%d/%d проверок пройдено\n", testing::g_checks - testing::g_failures, testing::g_checks);
+    std::printf("\n%d/%d checks passed\n", testing::g_checks - testing::g_failures, testing::g_checks);
     if (testing::g_failures > 0) {
-        std::printf("ПРОВАЛ: %d\n", testing::g_failures);
+        std::printf("FAILED: %d\n", testing::g_failures);
         return 1;
     }
     std::printf("OK\n");

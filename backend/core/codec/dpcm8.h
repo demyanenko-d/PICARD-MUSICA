@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 #pragma once
 
 // Компандированная 8-битная дельта - резидентный формат 16-битных сэмплов.
@@ -33,19 +34,18 @@ inline constexpr int32_t kScaleTable[8] = {1, 3, 9, 27, 81, 243, 729, 2048};
 
 // Поля байта-кода (раскладка в шапке файла). Кодировщик и декодер обязаны
 // совпадать, поэтому числа только здесь.
-inline constexpr uint32_t kCodeScaleLsb = 5;
-inline constexpr uint32_t kCodeValueBits = 0x1fu;
+inline constexpr uint32_t kCodeScaleLsb     = 5;
+inline constexpr uint32_t kCodeValueBits    = 0x1fu;
 inline constexpr uint32_t kCodeValueSignBit = 0x10u;
-inline constexpr int32_t kCodeValueMin = -static_cast<int32_t>(kCodeValueSignBit);    // -16
-inline constexpr int32_t kCodeValueMax = static_cast<int32_t>(kCodeValueSignBit) - 1; // 15
-static_assert(kCodeValueMin * kScaleTable[7] >= -32768 && kCodeValueMax * kScaleTable[7] <= 32767,
-              "дельта кода не обрезается int16");
+inline constexpr int32_t kCodeValueMin      = -static_cast<int32_t>(kCodeValueSignBit);    // -16
+inline constexpr int32_t kCodeValueMax      = static_cast<int32_t>(kCodeValueSignBit) - 1; // 15
+static_assert(kCodeValueMin * kScaleTable[7] >= -32768 && kCodeValueMax * kScaleTable[7] <= 32767, "the code delta is not clipped by int16");
 
 namespace detail {
 
 constexpr int16_t compute_delta(int code) {
     const uint8_t scale = static_cast<uint8_t>(code) >> kCodeScaleLsb;
-    int32_t v = static_cast<int32_t>(code & kCodeValueBits);
+    int32_t v           = static_cast<int32_t>(code & kCodeValueBits);
     if (v & kCodeValueSignBit) v -= static_cast<int32_t>(kCodeValueBits) + 1; // расширение знака 5 бит (-16..15)
     return static_cast<int16_t>(v * kScaleTable[scale]);
 }
@@ -64,7 +64,8 @@ struct DeltaLut {
 };
 // Атрибут на переменной (месте в памяти), а не на типе: section() на
 // определении структуры экземпляры не переносит.
-SOUNDSINTH_HOT_PATH_ATTR("kDeltaLut") inline constexpr DeltaLut kDeltaLut{};
+SOUNDSINTH_HOT_PATH_ATTR("kDeltaLut")
+inline constexpr DeltaLut kDeltaLut{};
 
 } // namespace detail
 
@@ -98,8 +99,8 @@ uint8_t quantize_sample(int16_t sample, const Dpcm8State& state);
 // выход, для первого куска Dpcm8State{} (predictor = 0).
 // global_sample_offset - абсолютная позиция первого отсчёта вызова от
 // начала сэмпла.
-uint32_t encode_block(const int16_t* samples, uint32_t sample_count, uint32_t global_sample_offset, Dpcm8State& state,
-                      int8_t* dpcm_out, Dpcm8Checkpoint* checkpoints_out, uint32_t checkpoints_capacity);
+uint32_t encode_block(const int16_t* samples, uint32_t sample_count, uint32_t global_sample_offset, Dpcm8State& state, int8_t* dpcm_out,
+                      Dpcm8Checkpoint* checkpoints_out, uint32_t checkpoints_capacity);
 
 // Декодирует ровно sample_count отсчётов от состояния state (обычно из
 // контрольной точки) в samples_out.

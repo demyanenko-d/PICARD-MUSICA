@@ -57,6 +57,12 @@ static u16 s_first;
 static char s_playing[32];      /* имя того, что играет */
 static u16  s_play_idx;         /* какая запись играет - для автоперехода */
 static bool_t s_play_active;    /* есть чему доигрывать */
+
+/* Где лежит играющее: кластер каталога и признак, что оно есть. Нужно для
+   подсветки, и живёт дольше s_play_active - тот про автопереход и гаснет
+   при смене каталога, а подсветка обязана вернуться, когда вернулись. */
+static u32 s_play_dir;
+static bool_t s_play_marked;
 static u16 s_open_fails;         /* сколько раз не открылся файл, для строки отказа */
 
 static u32  s_idle;             /* пустых кругов подряд, пока не заиграло */
@@ -101,19 +107,29 @@ static bool_t ent_is_updir(void)
     return (bool_t)(fat_ent_name[0] == '.' && fat_ent_name[1] == '.' && fat_ent_name[2] == 0);
 }
 
+/** Кластер текущего каталога; у корня нулевой. */
+static u32 cur_dir_clus(void)
+{
+    return s_depth ? s_path[s_depth - 1] : 0;
+}
+
 static void list_draw(void)
 {
+    /* Играющее подсвечивается только в своём каталоге: номер записи в
+       чужом означает чужой файл. */
+    const bool_t here = (bool_t)(s_play_marked && cur_dir_clus() == s_play_dir);
     u16 i;
     for (i = 0; i < UI_LIST_ROWS; ++i) {
         u16 idx = s_top + i;
         if (idx >= s_count) {
-            ui_draw_entry((u8)i, "", 0, 0);
+            ui_draw_entry((u8)i, "", 0, 0, 0);
             continue;
         }
         fw_dir_get(idx);
         ui_draw_entry((u8)i, fat_ent_name,
                       (u8)((fat_ent_attr & FW_ATTR_DIR) != 0),
-                      (u8)(idx == s_cursor));
+                      (u8)(idx == s_cursor),
+                      (u8)(here && idx == s_play_idx));
     }
 }
 
@@ -257,13 +273,18 @@ static void go_into(void)
     list_reload();
 }
 
+static void cursor_to(u16 idx);
+
 /** Подняться на уровень выше. */
 static void go_up(void)
 {
     u8 i;
+    u32 came_from;
+    u16 k;
 
     if (s_depth == 0) return;
     --s_depth;
+    came_from = s_path[s_depth];
 
     /* Пройти путь заново от корня: хранить открытым только текущий каталог
        дешевле, чем держать состояние обхода на каждый уровень. Каталогов
@@ -275,6 +296,17 @@ static void go_up(void)
     }
     draw_path();
     list_reload();
+
+    /* Курсор на тот каталог, из которого вышли, а не в начало списка: по
+       кластеру, а не по имени - имя в записи обрезано и в своём регистре,
+       а кластер у каталога один. */
+    for (k = s_first; k < s_count; ++k) {
+        fw_dir_get(k);
+        if ((fat_ent_attr & FW_ATTR_DIR) != 0 && fat_ent_clus == came_from) {
+            cursor_to(k);
+            return;
+        }
+    }
 }
 
 /** Поставить курсор на запись idx, подкрутив прокрутку и перерисовав. */
@@ -327,6 +359,7 @@ static void play_entry(u16 idx)
         ui_field_num(21, UI_ROW_ERROR, 11, "c ", (u16)fat_ent_clus, UI_ATTR_ALARM);
         ui_alarm("open failed");
         s_play_active = FALSE;
+        s_play_marked = FALSE;
         return;
     }
 
@@ -338,6 +371,8 @@ static void play_entry(u16 idx)
 
     s_play_idx = idx;
     s_play_active = TRUE;
+    s_play_dir = cur_dir_clus();
+    s_play_marked = TRUE;
     s_idle = 0;
 
     /* Навигатор идёт за играющим треком. Последней строкой не случайно:

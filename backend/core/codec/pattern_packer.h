@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 #pragma once
 
 // Упаковщик паттернов, сжатый формат:
@@ -83,12 +84,12 @@ private:
     uint16_t row_count_;
     uint8_t channel_count_;
 
-    uint32_t write_cursor_;  // растёт вперёд от конца таблицы смещений: строки
-    uint32_t dict_cursor_;   // растёт назад от buffer_size_: словарь
-    uint16_t dict_count_ = 0;
-    uint16_t rows_written_ = 0;
+    uint32_t write_cursor_; // растёт вперёд от конца таблицы смещений: строки
+    uint32_t dict_cursor_;  // растёт назад от buffer_size_: словарь
+    uint16_t dict_count_       = 0;
+    uint16_t rows_written_     = 0;
     uint32_t empty_row_offset_ = 0; // тело первой пустой строки, 0 - ещё не было (0 занят заголовком)
-    bool ok_ = true;
+    bool ok_                   = true;
 };
 
 } // namespace soundsinth::patterns

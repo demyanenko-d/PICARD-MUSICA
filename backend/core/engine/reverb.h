@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 #pragma once
 
 // Ревербератор Шрёдера (схема Freeverb): восемь гребёнок параллельно, затем
@@ -15,11 +16,11 @@ namespace soundsinth::engine {
 // (25 КБ), 2 - половинная (12.6 КБ). Длины линий делятся на неё же.
 inline constexpr uint32_t kReverbRateDiv = 2;
 
-inline constexpr uint32_t kReverbCombCount = 8;
+inline constexpr uint32_t kReverbCombCount    = 8;
 inline constexpr uint32_t kReverbAllpassCount = 4;
 
 // Длины Freeverb для 44100 Гц, у всех линий разные.
-inline constexpr uint16_t kReverbCombLen44k[kReverbCombCount] = {1116, 1188, 1277, 1356, 1422, 1491, 1557, 1617};
+inline constexpr uint16_t kReverbCombLen44k[kReverbCombCount]       = {1116, 1188, 1277, 1356, 1422, 1491, 1557, 1617};
 inline constexpr uint16_t kReverbAllpassLen44k[kReverbAllpassCount] = {556, 441, 341, 225};
 
 inline constexpr uint32_t reverb_line_total() {
@@ -37,8 +38,8 @@ inline constexpr uint32_t kReverbSampleCount = reverb_line_total();
 
 // Нулевое состояние (Reverb{}) - тишина в линиях.
 struct Reverb {
-    int16_t lines[kReverbSampleCount] = {};
-    uint16_t comb_pos[kReverbCombCount] = {};
+    int16_t lines[kReverbSampleCount]         = {};
+    uint16_t comb_pos[kReverbCombCount]       = {};
     uint16_t allpass_pos[kReverbAllpassCount] = {};
     // Последний выданный возврат - для линейной интерполяции обратно на
     // выходную частоту. Живёт между блоками, иначе на границе блока ступенька.

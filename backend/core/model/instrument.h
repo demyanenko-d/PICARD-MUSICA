@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 #pragma once
 
 #include <cstdint>
@@ -9,29 +10,29 @@ namespace soundsinth::model {
 // Шкалы величин форматов, общие для загрузчиков и движка. Громкость ноты,
 // канала и сэмпла - 0..64; глобальная громкость песни и инструмента IT -
 // 0..128; панорама - 0..64, 32 - центр.
-inline constexpr uint8_t kVolumeMax = 64;
+inline constexpr uint8_t kVolumeMax       = 64;
 inline constexpr uint8_t kGlobalVolumeMax = 128;
-inline constexpr uint8_t kPanMax = 64;
-inline constexpr uint8_t kPanCenter = 32;
+inline constexpr uint8_t kPanMax          = 64;
+inline constexpr uint8_t kPanCenter       = 32;
 
 // Кодирование PCM сэмпла в исходном файле: как распаковывать данные из
 // файла. Резидентный кодек (ResidentEncoding) выбирается отдельно, от
 // исходного берётся только разрядность.
 enum class SampleEncoding : uint8_t {
-    Pcm8,            // MOD всегда, S3M часто; знаковость - SampleDescriptor::signed_pcm
-    Pcm16,           // S3M/XM/IT, несжатые
-    XmDelta8,        // XM, 8-битная дельта
-    XmDelta16,       // XM, 16-битная дельта
-    ItCompressed8,   // IT-компрессия, блоки по 0x8000 сэмплов
-    ItCompressed16,  // IT-компрессия, блоки по 0x4000 сэмплов
-    S3mAdpcm4,       // S3M pack != 0 (ADPCM ModPlug - 4), не распаковывается, сэмпл нерезидентен
+    Pcm8,           // MOD всегда, S3M часто; знаковость - SampleDescriptor::signed_pcm
+    Pcm16,          // S3M/XM/IT, несжатые
+    XmDelta8,       // XM, 8-битная дельта
+    XmDelta16,      // XM, 16-битная дельта
+    ItCompressed8,  // IT-компрессия, блоки по 0x8000 сэмплов
+    ItCompressed16, // IT-компрессия, блоки по 0x4000 сэмплов
+    S3mAdpcm4,      // S3M pack != 0 (ADPCM ModPlug - 4), не распаковывается, сэмпл нерезидентен
 };
 
 // Резидентное хранение сэмпла в PSRAM (SampleEncoding - исходный файл).
 enum class ResidentEncoding : uint8_t {
-    Raw8,   // 8-битные исходники как есть, 1 байт на отсчёт
-    Dpcm8,  // 16-битные исходники: 8-битная линейная (не адаптивная) дельта
-    Raw16,  // 16-битные исходники как есть, 2 байта на отсчёт, без кодека
+    Raw8,  // 8-битные исходники как есть, 1 байт на отсчёт
+    Dpcm8, // 16-битные исходники: 8-битная линейная (не адаптивная) дельта
+    Raw16, // 16-битные исходники как есть, 2 байта на отсчёт, без кодека
 };
 
 // Raw16 - 16-битный сэмпл как есть, 2 байта на отсчёт. Dpcm8 последователен:
@@ -72,15 +73,15 @@ inline constexpr uint32_t loop_unroll_extra(LoopUnroll u, uint32_t loop_len) {
 }
 
 struct SampleDescriptor {
-    SampleEncoding encoding = SampleEncoding::Pcm8;
+    SampleEncoding encoding            = SampleEncoding::Pcm8;
     ResidentEncoding resident_encoding = ResidentEncoding::Raw8; // как закодирован резидентный поток этого сэмпла
     // Сэмпл прорежен 2:1 при упаковке (закодированный размер больше 1 МБ и
     // c5_speed выше 20 кГц). length_samples, loop_* и c5_speed уже после
     // прореживания. При повторной распаковке из file_offset данные надо
     // прогнать через то же прореживание.
-    bool decimated = false;
-    uint8_t channels = 1;              // 1 у всех загрузчиков: стерео-сэмпл S3M, XM и IT - левый канал
-    uint32_t length_samples = 0;        // длина в отсчётах, не в байтах
+    bool decimated          = false;
+    uint8_t channels        = 1; // 1 у всех загрузчиков: стерео-сэмпл S3M, XM и IT - левый канал
+    uint32_t length_samples = 0; // длина в отсчётах, не в байтах
 
     // Поля для распаковки сэмпла после разбора заголовков: при прогрессивной
     // загрузке метаданные разбираются сразу, а PCM сэмпла тянется с хоста в
@@ -107,25 +108,25 @@ struct SampleDescriptor {
     // IT: сжатый сэмпл в варианте 2.15 (бит 2 байта cvt заголовка сэмпла), на
     // сэмпл, как у OpenMPT и libxmp. Занимает последний байт дырки перед
     // loop_start, размер структуры не растёт.
-    bool it_is215 = false;
-    uint32_t loop_start = 0;
-    uint32_t loop_end = 0;              // равен length_samples, если петли нет
-    bool loop_enabled = false;
-    bool loop_bidirectional = false;    // ping-pong петля (S3M/XM/IT)
+    bool it_is215           = false;
+    uint32_t loop_start     = 0;
+    uint32_t loop_end       = 0; // равен length_samples, если петли нет
+    bool loop_enabled       = false;
+    bool loop_bidirectional = false; // ping-pong петля (S3M/XM/IT)
     // Петля развёрнута (LoopUnroll): loop_end и length_samples уже
     // развёрнутые, исходный конец - loop_end_before_unroll().
     LoopUnroll loop_unroll = LoopUnroll::None;
-    uint32_t file_offset = 0;           // смещение начала PCM в исходном файле
-    uint32_t c5_speed = 8363;           // частота воспроизведения на ноте C-5, Гц; у MOD всегда 8363, finetune - в поле finetune
-    int8_t relative_note = 0;           // XM: смещение ноты сэмпла от базовой; IT без линейных слайдов: -12; 0 у остальных
-    int8_t finetune = 0;                // 128 единиц на полутон, как у XM; MOD -8..7 загрузчик умножает на 16
+    uint32_t file_offset   = 0; // смещение начала PCM в исходном файле
+    uint32_t c5_speed = 8363; // частота воспроизведения на ноте C-5, Гц; у MOD всегда 8363, finetune - в поле finetune
+    int8_t relative_note = 0; // XM: смещение ноты сэмпла от базовой; IT без линейных слайдов: -12; 0 у остальных
+    int8_t finetune        = 0;          // 128 единиц на полутон, как у XM; MOD -8..7 загрузчик умножает на 16
     uint8_t default_volume = kVolumeMax; // 0..64
-    int8_t default_panning = -1;        // -1 - своей панорамы нет (наследуется от инструмента или канала), иначе 0..64
+    int8_t default_panning = -1; // -1 - своей панорамы нет (наследуется от инструмента или канала), иначе 0..64
 };
 
 // Самая крупная статья арены у трекеров (gk-funky.xm - 778 сэмплов): рост
 // должен ловить компилятор.
-static_assert(sizeof(SampleDescriptor) == 40, "SampleDescriptor: 40 байт, новое поле обязано лечь в дырку");
+static_assert(sizeof(SampleDescriptor) == 40, "SampleDescriptor: 40 bytes, a new field must land in a hole");
 
 // Сколько байт сэмпл занимает в исходном файле. Длина - исходная, до
 // прореживания и разворота петли. У сжатых кодировок она в заголовке не
@@ -153,8 +154,7 @@ inline constexpr bool sample_is_16bit(SampleEncoding e) {
 // Сэмпл, который загрузчик кладёт в PSRAM. Нерезидентны пустые, стерео и
 // кодировки, которые загрузчик не распаковывает.
 inline constexpr bool sample_is_resident(const SampleDescriptor& sd) {
-    return sd.length_samples > 0 && sd.channels == 1 && !sd.unsupported_codec &&
-           sd.encoding != SampleEncoding::S3mAdpcm4;
+    return sd.length_samples > 0 && sd.channels == 1 && !sd.unsupported_codec && sd.encoding != SampleEncoding::S3mAdpcm4;
 }
 
 // Конец петли до разворота. Смещения Oxx приходят в отсчётах файла, и
@@ -191,12 +191,12 @@ inline constexpr uint16_t kNoSample = 0xffff;
 // аппаратно.
 #pragma pack(push, 1)
 struct KeymapRange {
-    uint8_t start_note = 0;   // первая нота диапазона включительно (биты 0..6); диапазоны по возрастанию покрывают весь [0,120)
+    uint8_t start_note = 0; // первая нота диапазона включительно (биты 0..6); диапазоны по возрастанию покрывают весь [0,120)
     uint16_t sample_index = 0;
-    int8_t note_offset = 0;   // target_note = queried_note + note_offset, ограничение - за вызывающим (apply_relative_note)
+    int8_t note_offset    = 0; // target_note = queried_note + note_offset, ограничение - за вызывающим (apply_relative_note)
 };
 #pragma pack(pop)
-static_assert(sizeof(KeymapRange) == 4, "KeymapRange должен паковаться без выравнивания — см. комментарий выше");
+static_assert(sizeof(KeymapRange) == 4, "KeymapRange must pack without padding - see the comment above");
 
 // Бит start_note: целевая нота постоянна и лежит в note_offset (0..119).
 inline constexpr uint8_t kKeymapFixedNote = 0x80;
@@ -221,13 +221,12 @@ inline uint8_t apply_relative_note(uint8_t note, int8_t relative_note) {
 
 // Целевая нота клавиши note в диапазоне r.
 inline uint8_t keymap_range_note(const KeymapRange& r, uint8_t note) {
-    return (r.start_note & kKeymapFixedNote) != 0 ? static_cast<uint8_t>(r.note_offset)
-                                                   : apply_relative_note(note, r.note_offset);
+    return (r.start_note & kKeymapFixedNote) != 0 ? static_cast<uint8_t>(r.note_offset) : apply_relative_note(note, r.note_offset);
 }
 
-enum class NewNoteAction : uint8_t { Cut = 0, Continue, Off, Fade };            // только IT
-enum class DuplicateCheckType : uint8_t { Off = 0, Note, Sample, Instrument };  // только IT
-enum class DuplicateCheckAction : uint8_t { Cut = 0, Off, Fade };               // только IT
+enum class NewNoteAction : uint8_t { Cut = 0, Continue, Off, Fade };           // только IT
+enum class DuplicateCheckType : uint8_t { Off = 0, Note, Sample, Instrument }; // только IT
+enum class DuplicateCheckAction : uint8_t { Cut = 0, Off, Fade };              // только IT
 
 // Громкость ноты по умолчанию - у сэмпла (SampleDescriptor::default_volume),
 // затухание - fadeout_rate: сырые поля файла загрузчик в арену не кладёт.
@@ -243,9 +242,9 @@ struct Instrument {
     // всегда, у XM у 77.9% инструментов, у IT у 72.6%. Данные выделяются в
     // арене вместе с keymap, только когда нужны. pitch_envelope - только IT, у
     // XM отдельной огибающей питча нет.
-    const Envelope* volume_envelope = nullptr;
+    const Envelope* volume_envelope  = nullptr;
     const Envelope* panning_envelope = nullptr;
-    const Envelope* pitch_envelope = nullptr;
+    const Envelope* pitch_envelope   = nullptr;
     // Только IT: та же ячейка данных файла, что и pitch_envelope - одна
     // огибающая означает либо высоту, либо срез, решает бит 0x80 её флага. Оба
     // поля одновременно не заполняются.
@@ -260,7 +259,7 @@ struct Instrument {
     // останавливает голос.
     uint32_t fadeout_rate = 0;
 
-    uint16_t default_sample_index = 0;
+    uint16_t default_sample_index      = 0;
     uint8_t note_to_sample_range_count = 0;
 
     uint8_t global_volume = kGlobalVolumeMax; // IT: множитель поверх громкости сэмпла и огибающей, 0..128; у остальных 128 (нейтраль)
@@ -274,14 +273,14 @@ struct Instrument {
     // - значение задано, младшие 7 бит - значение 0..127. Не задано - канал
     // берёт срез 127 и резонанс 0, фильтра нет, пока его не включит
     // огибающая или Zxx.
-    uint8_t filter_cutoff = 0;
+    uint8_t filter_cutoff    = 0;
     uint8_t filter_resonance = 0;
 
     // NNA/DCT/DCA - только IT. У остальных форматов NNA равен Cut, Duplicate
     // Check выключен: загрузчики MOD/S3M/XM оставляют умолчания, исключений по
     // формату в движке нет.
-    NewNoteAction nna = NewNoteAction::Cut;
-    DuplicateCheckType dct = DuplicateCheckType::Off;
+    NewNoteAction nna        = NewNoteAction::Cut;
+    DuplicateCheckType dct   = DuplicateCheckType::Off;
     DuplicateCheckAction dca = DuplicateCheckAction::Cut;
 
     // Панорама и Pitch-Pan Separation - только новый формат IT-инструмента
@@ -299,13 +298,12 @@ struct Instrument {
     // установленной панораме на каждом реальном Note-Trigger, после базовой.
     // 0 - выключено, так почти у всех инструментов.
     int8_t pitch_pan_separation = 0;
-    uint8_t pitch_pan_center = 60; // нота 0..119 (шкала PatternCell::note), нейтральная точка pps
+    uint8_t pitch_pan_center    = 60; // нота 0..119 (шкала PatternCell::note), нейтральная точка pps
 };
 
 // Размер зафиксирован: на плате указатель 4 байта, запись обязана
 // остаться в 40 байтах, арена считана под них. Рост должен ловить
 // компилятор, а не отказ загрузки большого IT на железе.
-static_assert(sizeof(void*) != 4 || sizeof(Instrument) == 40,
-              "Instrument: 40 байт при 32-битном указателе - новое поле обязано лечь в дырку");
+static_assert(sizeof(void*) != 4 || sizeof(Instrument) == 40, "Instrument: 40 bytes with a 32-bit pointer - a new field must land in a hole");
 
 } // namespace soundsinth::model

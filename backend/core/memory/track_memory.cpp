@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 #include "core/memory/track_memory.h"
 
 #include <cstring>
@@ -11,12 +12,12 @@ namespace soundsinth::memory {
 static_assert(alignof(soundsinth::model::Instrument) <= kArenaBaseAlign && alignof(soundsinth::model::SampleDescriptor) <= kArenaBaseAlign &&
                   alignof(soundsinth::model::Pattern) <= kArenaBaseAlign && alignof(soundsinth::model::Envelope) <= kArenaBaseAlign &&
                   alignof(soundsinth::model::KeymapRange) <= kArenaBaseAlign,
-              "тип арены выровнен строже базы");
+              "the arena type is aligned stricter than the base");
 
 void track_memory_create(TrackMemory& mem) {
     arena_init(mem.resident, platform::resident_storage_acquire(kResidentMetadataBytes), kResidentMetadataBytes);
     // Сценарии живут на вершине того же пула: своей памяти у них нет.
-    mem.scratch.arena = &mem.resident;
+    mem.scratch.arena  = &mem.resident;
     mem.scratch.tenant = Scratch::None;
     psram_create(mem.psram);
     sample_cache_reset(mem.sample_cache);

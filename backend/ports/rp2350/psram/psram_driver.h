@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 #pragma once
 
 // Драйвер PSRAM AP Memory APS6404L-3SQR (8 МБ, QPI, QMI XIP CS1).

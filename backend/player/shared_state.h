@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 #pragma once
 
 // Межъядерная поверхность звука и загрузки. Кроме неё Core0 читает счётчики
@@ -68,11 +69,27 @@ extern std::atomic<uint32_t> g_stale_generation;
 extern std::atomic<uint32_t> g_app_task_loops;
 extern std::atomic<uint32_t> g_engine_generation;
 
-// Жив ли Core1 - для log_task: обороты основного цикла и насоса (пишет
+// Жив ли Core1 - для log_task: обороты основного цикла и обслуживания без ожидания (пишет
 // только основной поток Core1) и фаза, в которой он сейчас. Стоящий
 // счётчик с фазой называет место, где Core1 ждёт: окно от хоста (Load),
-// снос движка на Core0 (TeardownWait), разбор модуля GS без насоса.
+// снос движка на Core0 (TeardownWait), разбор модуля GS без обслуживания шины.
 enum class Core1Phase : uint8_t { Loop, Load, TeardownWait, GsModule };
+
+// Где именно в витке находится Core1. Нужно сторожу живости: фаза
+// говорит "в цикле", а шаг - на чём именно встало.
+enum class Core1Step : uint8_t {
+    GsPoll,
+    Watch,
+    HostService,
+    SdTask,
+    UsbTask,
+    Transport,
+    LiveServe,
+    PlanLoad,
+    IdleWait,
+    RunSession,
+};
+extern std::atomic<Core1Step> g_core1_step;
 extern std::atomic<uint32_t> g_core1_loops;
 extern std::atomic<Core1Phase> g_core1_phase;
 // Кадр конца трека для затухания шины (0 - нет). Пишет Core1 до
@@ -113,7 +130,7 @@ extern std::atomic<bool> g_playback_finished;
 extern std::atomic<bool> g_playback_paused;
 
 // Перемотка вперёд: на сколько выходных отсчётов уехать, 0 - не просили.
-// Ставит Core1 (команда хоста), исполняет Core0. Сам прогон долгий и
+// Ставит Core1 (команда хоста), исполняет Core0. Сама прокрутка тиков долгая и
 // движок трогает, поэтому идёт только под паузой: пока выход погашен,
 // микшер источники не зовёт, и рендер движка не касается.
 extern std::atomic<uint32_t> g_seek_frames;
@@ -188,7 +205,7 @@ void publish_loaded_track(uint32_t end_frame);
 //
 // Сэмплы с индексом >= kSamplesInUseBits в карту не попадают; читатель
 // обязан считать их всегда занятыми.
-inline constexpr uint16_t kSamplesInUseBits = 512;
+inline constexpr uint16_t kSamplesInUseBits  = 512;
 inline constexpr uint16_t kSamplesInUseWords = kSamplesInUseBits / 32;
 extern std::atomic<uint32_t> g_samples_in_use[kSamplesInUseWords];
 
@@ -214,11 +231,8 @@ extern std::atomic<bool> g_background_loading;
 // g_voice_count_* - статистика полифонии по тикам, средние считает
 // читатель.
 //
-// Пишет Core0, читает Core1. Правило для счётчиков этой поверхности:
-// писатель один - relaxed load и store (без ldrex/strex); писателей два -
-// RMW (g_voice_count_peak: Core1 обнуляет exchange). Если тик начнёт
-// двигать и Core1 (команда GS "продвинуть тик"), писателей тиковых
-// счётчиков станет два - тогда нужен fetch_add.
+// Пишет Core0, читает Core1. Писатель один - relaxed load и store; у
+// g_voice_count_peak писателей два (Core1 обнуляет exchange), поэтому RMW.
 extern std::atomic<uint32_t> g_render_busy_us;
 extern std::atomic<uint32_t> g_voice_count_ticks;
 

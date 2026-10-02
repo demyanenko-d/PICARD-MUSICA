@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 // Реализация bus.h. Разделы в том же порядке: пины, плагинная шина,
 // эмуляция ПЗУ.
 
@@ -15,39 +16,47 @@
 #include "player/live/ay_tap.h"
 #include "core/live_midi/ay_midi.h"
 #include "memory.pio.h" // PAGE_TABLE_BASE_SHIFT
-#include "ports.pio.h" // PORT_TABLE_BASE_SHIFT
+#include "ports.pio.h"  // PORT_TABLE_BASE_SHIFT
 #include "player/protocol/host_frame.h"
 
 namespace bus {
 
-// --- Пины и перемычки ---
-// Опрос перемычек режима при старте.
+// --- Пины и режим ---
+//
 
 // Анонимного пространства имён нет: монтаж в bus_setup.cpp, регистры,
 // таблицы и обработчики должны быть видны оттуда. Имена в namespace bus с
 // префиксом s_ или k.
 
-// Перемычка читается один раз при загрузке, дальше все спрашивают флаг:
-// режим не должен меняться на ходу. Определение - рядом с таблицами ответов
-// (плагинная шина ниже): set_rd_word читает флаг от их общей базы.
+// Режим ставится один раз при загрузке, дальше все спрашивают флаг: на
+// ходу он не меняется. Определение - рядом с таблицами ответов (плагинная
+// шина ниже): set_rd_word читает флаг от их общей базы.
 extern bool s_divmmc;
+extern bool s_trdos;
+extern bool s_config_rom;
 
-void latch_divmmc_jumper() {
-    gpio_init(PIN_DIVMMC_JUMPER);
-    gpio_set_function(PIN_DIVMMC_JUMPER, GPIO_FUNC_SIO);
-    gpio_set_dir(PIN_DIVMMC_JUMPER, GPIO_IN);
-    gpio_pull_up(PIN_DIVMMC_JUMPER);
-
-    // Подтяжке нужно время поднять линию: у RP2350 она 50-80 кОм, с ёмкостью
-    // дорожки и перемычки фронт неспешный. Чтение сразу после включения
-    // подтяжки может дать ноль на пустом месте и включить DivMMC.
-    busy_wait_us(100);
-
-    s_divmmc = (gpio_get(PIN_DIVMMC_JUMPER) == 0);
+void divmmc_set_enabled(bool on) {
+    s_divmmc = on;
 }
 
-bool divmmc_selected() {
+void config_rom_set_enabled(bool on) {
+    s_config_rom = on;
+}
+
+bool config_rom_enabled() {
+    return s_config_rom;
+}
+
+bool divmmc_enabled() {
     return s_divmmc;
+}
+
+void trdos_set_enabled(bool on) {
+    s_trdos = on;
+}
+
+bool trdos_enabled() {
+    return s_trdos;
 }
 
 // --- Плагинная шина ---
@@ -104,16 +113,21 @@ PortWriteFn s_wr_table[256];
 // самый горячий путь.
 PortReadFn s_rd_done_table[256];
 
-// Перемычка стоит, DivMMC включён. Пишет latch_divmmc_jumper при загрузке.
+// DivMMC включён. Пишет divmmc_set_enabled при загрузке, из настроек.
 bool s_divmmc = false;
+// Триггер TR-DOS включён. Вместе с DivMMC не бывает: дисковая система одна.
+bool s_trdos = false;
+// Режим конфигуратора: вместо образа DivMMC подставляется ПЗУ настроек, и
+// подстановка держится с первой выборки, не дожидаясь трапа.
+bool s_config_rom = false;
 
 // Единственное место, где слово ответа попадает на шину: байт - в ячейку
-// ответа порта (путь портов один на оба положения перемычки).
+// ответа порта (путь портов один на оба режима).
 __force_inline void __not_in_flash_func(set_rd_word)(uint8_t port, uint32_t word) {
     rom_emu_set_port(port, rd_word_byte(word));
 }
 
-// Разбор записи в порт - один на оба режима: bus_wr_isr без перемычки,
+// Разбор записи в порт - один на оба режима: bus_wr_isr без DivMMC,
 // divmmc_on_bus_write для чужих ей портов в режиме DivMMC. Счёт команд и
 // данных плагина здесь же, один набор на оба режима. Счётчики после
 // обработки: Z80 на OUT ответа не ждёт.
@@ -189,10 +203,10 @@ PioStats z80_bus_pio_get_stats() {
 // Выровнено на 512 байт (вариант): адрес собирается склейкой (in x,23 /
 // in y,1 / in pins,6 / in null,2).
 static_assert(sizeof(uint32_t) * PAGE_TAB_HALVES * PAGES_PER_TABLE == 1u << PAGE_TABLE_BASE_SHIFT,
-              "вариант таблицы страниц - ровно окно адреса, которое собирает rom_detect");
+              "the page table variant is exactly the address window rom_detect assembles");
 // Выравнивание вдвое больше варианта: младший разряд базы в X - номер
 // варианта по чётности, он же ROM_BLK_N (rom_detect, mov pins, x).
-alignas(2u << PAGE_TABLE_BASE_SHIFT) uint32_t s_pagetabs[PAGE_TAB_VARIANTS][PAGE_TAB_HALVES][PAGES_PER_TABLE];
+alignas(2u << PAGE_TABLE_BASE_SHIFT) __attribute__((section(".bss.bus_pagetabs"))) uint32_t s_pagetabs[PAGE_TAB_VARIANTS][PAGE_TAB_HALVES][PAGES_PER_TABLE];
 uint32_t s_page_variant = 0;
 
 // Откуда брать байт ответа на порт, ноль - порт не наш. Младший разряд
@@ -200,19 +214,20 @@ uint32_t s_page_variant = 0;
 // единица - база страницы на 256 байт, сдвинутая вправо на 8. Таблица
 // выровнена на 1024: адрес записи собирается склейкой в детекторе
 // (in x,22 / in pins,8 / in null,2).
-alignas(1u << PORT_TABLE_BASE_SHIFT) uint32_t s_porttab[256];
+alignas(1u << PORT_TABLE_BASE_SHIFT) __attribute__((section(".bss.bus_porttab"))) uint32_t s_porttab[256];
 
 // Ячейки ответов, отдельно от таблицы: значение пишется сюда, разрешение
 // отвечать - указателем в таблице.
 uint32_t s_portval[256];
 
-int s_dma_port_addr = -1; // rxf детектора портов -> read_addr следующего
-int s_dma_port_ptr = -1; // porttab[порт] -> al3_read_addr_trig канала выдачи ответа
-int s_dma_port_join = -1; // rxf склейщика -> al3_read_addr_trig канала выдачи байта
-int s_sm_port_join = -1;  // склейщик ячейки ответа, в блоке звука
+int s_dma_port_addr  = -1; // rxf детектора портов -> read_addr следующего
+int s_dma_port_ptr   = -1; // porttab[порт] -> al3_read_addr_trig канала выдачи ответа
+int s_dma_port_join  = -1; // rxf склейщика -> al3_read_addr_trig канала выдачи байта
+int s_sm_port_join   = -1; // склейщик ячейки ответа, в блоке звука
+int s_sm_trdos_drive = -1; // выдатчик уровня DOS_N, там же
 
-int s_dma_tab_addr = -1; // rxf детектора -> read_addr следующего
-int s_dma_tab_data = -1; // pagetab[регион] -> txf rom_join
+int s_dma_tab_addr  = -1; // rxf детектора -> read_addr следующего
+int s_dma_tab_data  = -1; // pagetab[регион] -> txf rom_join
 int s_dma_byte_addr = -1; // rxf rom_join -> read_addr следующего
 int s_dma_byte_data = -1; // страница[смещение] -> txf rom_serve
 
@@ -220,25 +235,19 @@ int s_dma_byte_data = -1; // страница[смещение] -> txf rom_serve
 // (pio2) -> пара каналов читает запись карты -> канал слова варианта в
 // очередь детектора. Запись карты - указатель на слово "войти" или
 // "выйти"; ноль - пустой триггер, цепочка стоит.
-alignas(128) uint32_t s_trap_page_map[kTrapPageMapEntries];   // 0x2000-0x3FFF по странице
-uint32_t s_trap_word[2];  // слова варианта: [0] войти, [1] выйти - ставит divmmc
-int s_sm_trap_join = -1;
-int s_dma_trap_in = -1;   // rom_trap rxf -> склейщик txf
-int s_dma_trap_addr = -1; // склейщик rxf -> read_addr канала записи
+alignas(128) uint32_t s_trap_page_map[kTrapPageMapEntries]; // 0x2000-0x3FFF по странице
+uint32_t s_trap_word[2];                                    // слова варианта: [0] войти, [1] выйти - ставит divmmc
+int s_sm_trap_join   = -1;
+int s_dma_trap_in    = -1; // rom_trap rxf -> склейщик txf
+int s_dma_trap_addr  = -1; // склейщик rxf -> read_addr канала записи
 int s_dma_trap_entry = -1; // запись карты -> al3_read_addr_trig канала слова
-int s_dma_trap_word = -1; // слово варианта -> txf детектора
-int s_dma_trap_note = -1; // адрес отданного слова -> s_trap_last (после word)
+int s_dma_trap_word  = -1; // слово варианта -> txf детектора
+int s_dma_trap_note  = -1; // адрес отданного слова -> s_trap_last (после word)
 // Адрес последнего отданного слова: вход или выход. Пустой триггер пишет
 // ноль в read_addr канала слова, поэтому состояние - не там, а здесь: его
 // копирует канал, которого запускает только настоящий трап.
 volatile uint32_t s_trap_last = 0;
 
-// Обработчик записей: разобрать очередь и отдать слова разбору (логика в
-// divmmc.cpp).
-//
-// Цикл, а не по слову: между двумя записями Z80 может быть меньше
-// времени, чем вход в прерывание, оставленное слово ждало бы следующего
-// события неизвестно сколько.
 // Наибольшее число слов, разобранных обработчиком записей за один вызов.
 // Пишет bus_wr_isr, читает log_task.
 uint32_t s_bus_wr_peak = 0;
@@ -263,6 +272,9 @@ void __not_in_flash_func(bus_wr_isr)() {
 
     // Без DivMMC автомат ловит только записи в порт: разбор - сразу по
     // таблице обработчиков.
+    //
+    // Цикл, а не по слову: между двумя записями Z80 бывает меньше времени,
+    // чем вход в прерывание.
     uint32_t drained = 0;
     while (!pio_sm_is_rx_fifo_empty(PIO_WATCH, SM_BUS_WRITE)) {
         const uint32_t raw = pio_sm_get(PIO_WATCH, SM_BUS_WRITE);
@@ -291,9 +303,7 @@ void __not_in_flash_func(bus_wr_isr)() {
 
 // --- Замеры шины ---
 //
-// Три случая, которых по нынешним счётчикам не видно, и от каждого зависит,
-// нужна ли перестройка обработчиков. Пишут только обработчики, по одному
-// приращению в уже существующей ветке; читает задача логгера.
+// Случай, которого по остальным счётчикам не видно.
 
 // --- Порты на чтение в режиме эмуляции ПЗУ ---
 //
@@ -321,24 +331,26 @@ void __not_in_flash_func(port_rd_isr)() {
     }
 }
 
-// Зовётся только из build_pagetabs при сбросе. Область - регион 8 КБ, как
-// у divmmc; гранула 256 байт раскладывается здесь. На пути трапа таблицы
-// не трогаются: меняется вариант, одно слово в регистре детектора.
-void __not_in_flash_func(rom_emu_fill_pages)(uint32_t variant, uint32_t region, const void* page) {
+// Зовётся только из build_pagetabs при сбросе - потому и во флеше, а не в
+// SRAM. Завести вызов с пути шины нельзя: там флеша быть не должно.
+// Область - регион 8 КБ, как у divmmc; гранула 256 байт раскладывается
+// здесь. На пути трапа таблицы не трогаются: меняется вариант, одно слово
+// в регистре детектора.
+void rom_emu_fill_pages(uint32_t variant, uint32_t region, const void* page) {
     // Регионов в таблице два: она покрывает только 0x0000-0x3FFF.
     if (variant >= PAGE_TAB_VARIANTS || region >= PAGE_TAB_REGIONS) return;
     // kPageNotOurs - "страница не наша": X = 0, rom_join обрывает цикл по
     // jmp !x, на шину никто не выходит. Указатель выровнен на 256 байт (младшие 8 бит
     // теряются; s_rom и s_ram - alignas(8192)).
     const uint32_t base = page == nullptr ? 0u : static_cast<uint32_t>(reinterpret_cast<uintptr_t>(page) >> 8);
-    static_assert(kPageNotOurs == 1u, "rom_join: разряд 0 - ROM_BLK_N, X = 0 - страница не наша");
+    static_assert(kPageNotOurs == 1u, "rom_join: bit 0 is ROM_BLK_N, X = 0 means the page is not ours");
     const uint32_t first = region * PAGES_PER_REGION;
     for (uint32_t i = 0; i < PAGES_PER_REGION; ++i) {
         // Каждой 256-байтовой странице своя база: одна на все 32 означала бы, что
         // весь регион читается из первых 256 байт.
-        const uint32_t e = (base == 0u) ? kPageNotOurs : page_entry(base + i);
+        const uint32_t e                           = (base == 0u) ? kPageNotOurs : page_entry(base + i);
         s_pagetabs[variant][kFetchHalf][first + i] = e;
-        s_pagetabs[variant][kDataHalf][first + i] = e;
+        s_pagetabs[variant][kDataHalf][first + i]  = e;
     }
 }
 
@@ -350,10 +362,11 @@ void __not_in_flash_func(rom_emu_fill_pages)(uint32_t variant, uint32_t region, 
 //
 // Чтение данных из того же окна остаётся машине: в тех же 8 КБ
 // знакогенератор 0x3C00-0x3FFF, иначе пропал бы шрифт.
-void __not_in_flash_func(rom_emu_set_fetch_page)(uint32_t variant, uint32_t page, const void* mem) {
+//
+// Как и rom_emu_fill_pages, зовётся только при сбросе - потому во флеше.
+void rom_emu_set_fetch_page(uint32_t variant, uint32_t page, const void* mem) {
     if (variant >= PAGE_TAB_VARIANTS || page >= PAGES_PER_TABLE) return;
-    s_pagetabs[variant][kFetchHalf][page] =
-        mem == nullptr ? kPageNotOurs : page_entry(static_cast<uint32_t>(reinterpret_cast<uintptr_t>(mem) >> 8));
+    s_pagetabs[variant][kFetchHalf][page] = mem == nullptr ? kPageNotOurs : page_entry(static_cast<uint32_t>(reinterpret_cast<uintptr_t>(mem) >> 8));
 }
 
 // База таблицы - слово в очередь детектора, X он переписывает сам в начале
@@ -368,8 +381,7 @@ void __not_in_flash_func(queue_page_base)(uint32_t variant) {
     if (pio_sm_is_tx_fifo_full(PIO_DETECT, SM_ROM_DETECT)) {
         pio_sm_clear_fifos(PIO_DETECT, SM_ROM_DETECT);
     }
-    pio_sm_put(PIO_DETECT, SM_ROM_DETECT,
-               static_cast<uint32_t>(reinterpret_cast<uintptr_t>(&s_pagetabs[variant][0][0])) >> PAGE_TABLE_BASE_SHIFT);
+    pio_sm_put(PIO_DETECT, SM_ROM_DETECT, static_cast<uint32_t>(reinterpret_cast<uintptr_t>(&s_pagetabs[variant][0][0])) >> PAGE_TABLE_BASE_SHIFT);
 }
 } // namespace
 
@@ -393,8 +405,12 @@ __force_inline uint32_t variant_word(uint32_t variant) {
 } // namespace
 
 void rom_emu_trap_clear() {
-    for (uint32_t i = 0; i < kTrapAddrMapEntries; ++i) s_trap_addr_map[i] = 0u;
-    for (uint32_t& e : s_trap_page_map) e = 0u;
+    for (uint32_t i = 0; i < kTrapAddrMapEntries; ++i) {
+        s_trap_addr_map[i] = 0u;
+    }
+    for (uint32_t& e : s_trap_page_map) {
+        e = 0u;
+    }
 }
 
 void rom_emu_trap_set(uint16_t addr, TrapKind kind) {
@@ -408,12 +424,11 @@ void rom_emu_trap_set(uint16_t addr, TrapKind kind) {
 
 void __not_in_flash_func(rom_emu_trap_variants)(uint32_t enter_variant, uint32_t exit_variant) {
     s_trap_word[static_cast<uint32_t>(TrapKind::Enter)] = variant_word(enter_variant);
-    s_trap_word[static_cast<uint32_t>(TrapKind::Exit)] = variant_word(exit_variant);
+    s_trap_word[static_cast<uint32_t>(TrapKind::Exit)]  = variant_word(exit_variant);
 }
 
 bool __not_in_flash_func(rom_emu_trap_entered)() {
-    return s_trap_last ==
-           static_cast<uint32_t>(reinterpret_cast<uintptr_t>(&s_trap_word[static_cast<uint32_t>(TrapKind::Enter)]));
+    return s_trap_last == static_cast<uint32_t>(reinterpret_cast<uintptr_t>(&s_trap_word[static_cast<uint32_t>(TrapKind::Enter)]));
 }
 
 void rom_emu_trap_reset_state() {
@@ -485,10 +500,10 @@ BusMeasurements bus_measurements() {
 
 GenericPortsState generic_ports_state() {
     GenericPortsState g;
-    g.tab_cmd = s_porttab[PORT_CMD];
-    g.tab_dat = s_porttab[PORT_DAT];
-    g.val_cmd = static_cast<uint8_t>(s_portval[PORT_CMD]);
-    g.val_dat = static_cast<uint8_t>(s_portval[PORT_DAT]);
+    g.tab_cmd    = s_porttab[PORT_CMD];
+    g.tab_dat    = s_porttab[PORT_DAT];
+    g.val_cmd    = static_cast<uint8_t>(s_portval[PORT_CMD]);
+    g.val_dat    = static_cast<uint8_t>(s_portval[PORT_DAT]);
     g.serve_late = s_serve_late.load(std::memory_order_relaxed);
     return g;
 }

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 #pragma once
 
 // Пометка "держать в SRAM, а не во флеше". На RP2350 (SOUNDSINTH_RP2350_HOT_PATH,

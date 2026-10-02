@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 #pragma once
 
 // Мышь Kempston: три порта с общим младшим байтом 0xDF, различает их
@@ -21,18 +22,18 @@
 
 namespace devices::hid {
 
-inline constexpr uint8_t kMousePort = 0xDF;
-inline constexpr uint8_t kMouseHiButtons = 0xFA;
-inline constexpr uint8_t kMouseHiX = 0xFB;
-inline constexpr uint8_t kMouseHiY = 0xFF;
+inline constexpr uint8_t kMousePort      = 0xdf;
+inline constexpr uint8_t kMouseHiButtons = 0xfa;
+inline constexpr uint8_t kMouseHiX       = 0xfb;
+inline constexpr uint8_t kMouseHiY       = 0xff;
 
 // Ноль - нажата.
-inline constexpr uint8_t kMouseButtonLeft = 0x01;
-inline constexpr uint8_t kMouseButtonRight = 0x02;
+inline constexpr uint8_t kMouseButtonLeft   = 0x01;
+inline constexpr uint8_t kMouseButtonRight  = 0x02;
 inline constexpr uint8_t kMouseButtonMiddle = 0x04;
-inline constexpr uint8_t kMouseButtonsIdle = 0xFF;
-inline constexpr uint8_t kMouseWheelMask = 0xF0;
-inline constexpr uint8_t kMouseWheelStep = 0x10;
+inline constexpr uint8_t kMouseButtonsIdle  = 0xff;
+inline constexpr uint8_t kMouseWheelMask    = 0xf0;
+inline constexpr uint8_t kMouseWheelStep    = 0x10;
 
 void mouse_reset();
 void mouse_move(int8_t dx, int8_t dy);

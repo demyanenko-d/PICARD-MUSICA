@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 #include "core/codec/loop_unroll.h"
 
 #include "core/codec/dpcm8.h"
@@ -8,11 +9,13 @@ namespace soundsinth::model {
 
 namespace {
 
-uint32_t div_up(uint32_t a, uint32_t b) { return (a + b - 1u) / b; }
+uint32_t div_up(uint32_t a, uint32_t b) {
+    return (a + b - 1u) / b;
+}
 
 bool can_unroll(const SampleDescriptor& sd) {
-    return sample_is_resident(sd) && sd.loop_enabled && sd.loop_bidirectional && sd.loop_unroll == LoopUnroll::None &&
-           sd.loop_start + 2u < sd.loop_end && sd.loop_end <= sd.length_samples;
+    return sample_is_resident(sd) && sd.loop_enabled && sd.loop_bidirectional && sd.loop_unroll == LoopUnroll::None && sd.loop_start + 2u < sd.loop_end &&
+           sd.loop_end <= sd.length_samples;
 }
 
 } // namespace
@@ -20,8 +23,8 @@ bool can_unroll(const SampleDescriptor& sd) {
 uint32_t resident_pages(ResidentEncoding e, uint32_t length_samples) {
     uint32_t pages = div_up(length_samples * resident_bytes_per_sample(e), memory::kPsramPageBytes);
     if (e == ResidentEncoding::Dpcm8) {
-        const uint32_t points = div_up(length_samples, dpcm8::kCheckpointIntervalSamples);
-        pages += div_up(points * static_cast<uint32_t>(sizeof(dpcm8::Dpcm8Checkpoint)), memory::kPsramPageBytes);
+        const uint32_t points  = div_up(length_samples, dpcm8::kCheckpointIntervalSamples);
+        pages                 += div_up(points * static_cast<uint32_t>(sizeof(dpcm8::Dpcm8Checkpoint)), memory::kPsramPageBytes);
     }
     return pages;
 }
@@ -31,23 +34,21 @@ bool choose_resident_encoding(Song& song, uint32_t free_pages) {
     for (uint16_t i = 0; i < song.sample_count; ++i) {
         const SampleDescriptor& sd = song.samples[i];
         if (!sample_is_resident(sd)) continue;
-        const ResidentEncodingDecision d =
-            decide_resident_encoding(sample_is_16bit(sd.encoding), sd.source_length_samples, sd.c5_speed, true);
-        need += resident_pages(d.mode, d.decimate ? (sd.source_length_samples + 1) / 2 : sd.source_length_samples);
+        const ResidentEncodingDecision d  = decide_resident_encoding(sample_is_16bit(sd.encoding), sd.source_length_samples, sd.c5_speed, true);
+        need                             += resident_pages(d.mode, d.decimate ? (sd.source_length_samples + 1) / 2 : sd.source_length_samples);
     }
     const bool allow_raw16 = need <= free_pages;
     for (uint16_t i = 0; i < song.sample_count; ++i) {
         SampleDescriptor& sd = song.samples[i];
         if (sd.length_samples == 0) continue;
-        const ResidentEncodingDecision d =
-            decide_resident_encoding(sample_is_16bit(sd.encoding), sd.source_length_samples, sd.c5_speed, allow_raw16);
-        sd.resident_encoding = d.mode;
+        const ResidentEncodingDecision d = decide_resident_encoding(sample_is_16bit(sd.encoding), sd.source_length_samples, sd.c5_speed, allow_raw16);
+        sd.resident_encoding             = d.mode;
         if (d.decimate) {
-            sd.decimated = true;
+            sd.decimated      = true;
             sd.length_samples = (sd.source_length_samples + 1) / 2;
-            sd.c5_speed = sd.c5_speed / 2;
-            sd.loop_start = sd.loop_start / 2;
-            sd.loop_end = sd.loop_end / 2;
+            sd.c5_speed       = sd.c5_speed / 2;
+            sd.loop_start     = sd.loop_start / 2;
+            sd.loop_end       = sd.loop_end / 2;
         }
     }
     return allow_raw16;
@@ -73,8 +74,7 @@ uint16_t unroll_pingpong_loops(Song& song, uint32_t free_pages, LoopUnroll mode)
         for (uint16_t i = 0; i < song.sample_count; ++i) {
             const SampleDescriptor& sd = song.samples[i];
             if (!can_unroll(sd)) continue;
-            if (best == song.sample_count ||
-                sd.loop_end - sd.loop_start < song.samples[best].loop_end - song.samples[best].loop_start) {
+            if (best == song.sample_count || sd.loop_end - sd.loop_start < song.samples[best].loop_end - song.samples[best].loop_start) {
                 best = i;
             }
         }
@@ -82,12 +82,11 @@ uint16_t unroll_pingpong_loops(Song& song, uint32_t free_pages, LoopUnroll mode)
 
         SampleDescriptor& sd = song.samples[best];
         const uint32_t extra = loop_unroll_extra(mode, sd.loop_end - sd.loop_start);
-        const uint32_t more = resident_pages(sd.resident_encoding, sd.length_samples + extra) -
-                              resident_pages(sd.resident_encoding, sd.length_samples);
+        const uint32_t more  = resident_pages(sd.resident_encoding, sd.length_samples + extra) - resident_pages(sd.resident_encoding, sd.length_samples);
         if (more > budget) break; // остальные петли длиннее
-        budget -= more;
-        sd.loop_unroll = mode;
-        sd.loop_end += extra;
+        budget            -= more;
+        sd.loop_unroll     = mode;
+        sd.loop_end       += extra;
         sd.length_samples += extra;
         ++done;
     }

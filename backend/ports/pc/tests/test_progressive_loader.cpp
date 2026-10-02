@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 // Фоновая догрузка ядра (progressive_loader): вытеснение отыгравших
 // сэмплов и шаг загрузки с упреждением. Отказ здесь на плате - страницы,
 // освобождённые под звучащим голосом, то есть мусор в звуке.
@@ -23,7 +24,10 @@ uint16_t alloc_chain(memory::PsramStore& psram, uint32_t n) {
     for (uint32_t i = 0; i < n; ++i) {
         const uint16_t p = memory::psram_alloc_page(psram);
         if (p == memory::kPageChainEnd) return first;
-        if (prev == memory::kPageChainEnd) first = p; else memory::psram_set_next(psram, prev, p);
+        if (prev == memory::kPageChainEnd)
+            first = p;
+        else
+            memory::psram_set_next(psram, prev, p);
         memory::psram_set_next(psram, p, memory::kPageChainEnd);
         prev = p;
     }
@@ -31,12 +35,14 @@ uint16_t alloc_chain(memory::PsramStore& psram, uint32_t n) {
 }
 
 struct Env {
-    std::unique_ptr<memory::TrackMemory> mem = std::make_unique<memory::TrackMemory>();
+    std::unique_ptr<memory::TrackMemory> mem            = std::make_unique<memory::TrackMemory>();
     std::unique_ptr<player::load::ProgressiveLoader> pl = std::make_unique<player::load::ProgressiveLoader>();
-    std::unique_ptr<uint16_t[]> plan_mem = std::make_unique<uint16_t[]>(3 * player::load::kProgressiveMaxSamples);
-    std::atomic<uint32_t> in_use_bits[2] = {};
+    std::unique_ptr<uint16_t[]> plan_mem                = std::make_unique<uint16_t[]>(3 * player::load::kProgressiveMaxSamples);
+    std::atomic<uint32_t> in_use_bits[2]                = {};
     Env() {
         memory::track_memory_create(*mem);
+        // Паттернов нет: блок трека отдаётся сэмплам целиком.
+        (void)memory::psram_freeze_pattern_zone(mem->psram);
         player::load::progressive_attach_plan(*pl, plan_mem.get());
     }
     ~Env() { memory::track_memory_destroy(*mem); }
@@ -62,13 +68,13 @@ void test_evict_one_branches() {
     }
     {
         Env e;
-        e.resident(0, 3, 5);                       // ещё прозвучит
-        e.resident(1, 3, player::load::kSampleNeverUsed);     // планировщик его не видел
-        e.resident(2, 3, 1);                       // держит голос
+        e.resident(0, 3, 5);                              // ещё прозвучит
+        e.resident(1, 3, player::load::kSampleNeverUsed); // планировщик его не видел
+        e.resident(2, 3, 1);                              // держит голос
         e.in_use_bits[0] = 1u << 2;
         CHECK(!player::load::progressive_evict_one(*e.pl, *e.mem, 3, e.in_use()));
         CHECK(!player::load::progressive_evict_one(*e.pl, *e.mem, 3, e.in_use(2))); // индекс за картой - занят
-        e.in_use_bits[0] = 0;
+        e.in_use_bits[0]      = 0;
         const uint32_t before = memory::psram_free_page_count(e.mem->psram);
         CHECK(player::load::progressive_evict_one(*e.pl, *e.mem, 3, e.in_use()));
         CHECK(memory::sample_cache_find(e.mem->sample_cache, 2) == nullptr);
@@ -82,8 +88,8 @@ void test_evict_one_branches() {
         const uint16_t first = e.resident(0, 4, 1);
         CHECK(memory::sample_cache_alloc_slot(e.mem->sample_cache, 1, first) != nullptr);
         e.pl->plan_last_use[1] = 9;
-        e.pl->plan_count = 2;
-        const uint32_t before = memory::psram_free_page_count(e.mem->psram);
+        e.pl->plan_count       = 2;
+        const uint32_t before  = memory::psram_free_page_count(e.mem->psram);
         CHECK(player::load::progressive_evict_one(*e.pl, *e.mem, 3, e.in_use()));
         CHECK(memory::sample_cache_find(e.mem->sample_cache, 0) == nullptr);
         CHECK_EQ(memory::psram_free_page_count(e.mem->psram), before);
@@ -93,13 +99,13 @@ void test_evict_one_branches() {
 // Загрузка: страниц на сэмпл pages; отказ, пока свободных меньше. Считает вызовы.
 struct Loader {
     memory::TrackMemory* mem = nullptr;
-    uint32_t pages = 1;
-    uint32_t calls = 0;
+    uint32_t pages           = 1;
+    uint32_t calls           = 0;
     static bool load(void* user, uint16_t idx, const char** reason_out) {
         auto* l = static_cast<Loader*>(user);
         ++l->calls;
         if (memory::psram_free_page_count(l->mem->psram) < l->pages) {
-            *reason_out = "нет места";
+            *reason_out = "no room";
             return false;
         }
         const uint16_t first = alloc_chain(l->mem->psram, l->pages);
@@ -109,7 +115,8 @@ struct Loader {
 
 // Занять всё, кроме free страниц.
 void leave_free(memory::PsramStore& psram, uint32_t free) {
-    while (memory::psram_free_page_count(psram) > free) (void)memory::psram_alloc_page(psram);
+    while (memory::psram_free_page_count(psram) > free)
+        (void)memory::psram_alloc_page(psram);
 }
 
 void test_load_next_steps() {
@@ -120,10 +127,9 @@ void test_load_next_steps() {
         Loader l{e.mem.get(), 2, 0};
         e.resident(3, 2, 7);
         e.pl->plan_indices[0] = 3;
-        e.pl->plan_count = 1;
-        uint16_t got = 0;
-        CHECK(player::load::progressive_load_next(*e.pl, *e.mem, 0, e.in_use(), &Loader::load, &l, &got) ==
-              player::load::ProgressiveStep::Loaded);
+        e.pl->plan_count      = 1;
+        uint16_t got          = 0;
+        CHECK(player::load::progressive_load_next(*e.pl, *e.mem, 0, e.in_use(), &Loader::load, &l, &got) == player::load::ProgressiveStep::Loaded);
         CHECK_EQ(got, 3u);
         CHECK_EQ(l.calls, 0u);
         CHECK(player::load::progressive_load_next(*e.pl, *e.mem, 0, e.in_use(), &Loader::load, &l) == player::load::ProgressiveStep::Done);
@@ -136,11 +142,10 @@ void test_load_next_steps() {
         e.resident(1, 2, 1);
         e.resident(2, 2, 1);
         leave_free(e.mem->psram, 0);
-        e.pl->plan_indices[0] = 4;
-        e.pl->plan_count = 5;
+        e.pl->plan_indices[0]  = 4;
+        e.pl->plan_count       = 5;
         e.pl->plan_last_use[4] = 9;
-        CHECK(player::load::progressive_load_next(*e.pl, *e.mem, 3, e.in_use(), &Loader::load, &l) ==
-              player::load::ProgressiveStep::Loaded);
+        CHECK(player::load::progressive_load_next(*e.pl, *e.mem, 3, e.in_use(), &Loader::load, &l) == player::load::ProgressiveStep::Loaded);
         CHECK_EQ(e.pl->evicted, 3u); // 0 + 2 + 2 + 2 страниц: хватило на третьем
         CHECK_EQ(l.calls, 4u);
         CHECK(memory::sample_cache_find(e.mem->sample_cache, 4) != nullptr);
@@ -151,10 +156,9 @@ void test_load_next_steps() {
         Loader l{e.mem.get(), 5, 0};
         leave_free(e.mem->psram, 1);
         e.pl->plan_indices[0] = 0;
-        e.pl->plan_count = 1;
-        const char* why = nullptr;
-        CHECK(player::load::progressive_load_next(*e.pl, *e.mem, 3, e.in_use(), &Loader::load, &l, nullptr, &why) ==
-              player::load::ProgressiveStep::Failed);
+        e.pl->plan_count      = 1;
+        const char* why       = nullptr;
+        CHECK(player::load::progressive_load_next(*e.pl, *e.mem, 3, e.in_use(), &Loader::load, &l, nullptr, &why) == player::load::ProgressiveStep::Failed);
         CHECK_EQ(e.pl->plan_failed, 1u);
         CHECK(why != nullptr);
     }
@@ -163,25 +167,22 @@ void test_load_next_steps() {
         // своевременный встаёт в голову очереди; нет своевременных - Waiting.
         Env e;
         Loader l{e.mem.get(), 1, 0};
-        leave_free(e.mem->psram, e.mem->psram.sample_page_count / player::load::kAmpleFreeDivisor);
-        e.pl->lead_positions = 2;
-        e.pl->plan_count = 3;
-        e.pl->plan_indices[0] = 10;
-        e.pl->plan_indices[1] = 11;
-        e.pl->plan_indices[2] = 12;
+        leave_free(e.mem->psram, memory::psram_sample_page_count(e.mem->psram) / player::load::kAmpleFreeDivisor);
+        e.pl->lead_positions     = 2;
+        e.pl->plan_count         = 3;
+        e.pl->plan_indices[0]    = 10;
+        e.pl->plan_indices[1]    = 11;
+        e.pl->plan_indices[2]    = 12;
         e.pl->plan_first_use[10] = 20;
         e.pl->plan_first_use[11] = 5;
         e.pl->plan_first_use[12] = 30;
-        uint16_t got = 0;
-        CHECK(player::load::progressive_load_next(*e.pl, *e.mem, 4, e.in_use(), &Loader::load, &l, &got) ==
-              player::load::ProgressiveStep::Loaded);
-        CHECK_EQ(got, 11u); // первое появление 5 <= 4 + 2
+        uint16_t got             = 0;
+        CHECK(player::load::progressive_load_next(*e.pl, *e.mem, 4, e.in_use(), &Loader::load, &l, &got) == player::load::ProgressiveStep::Loaded);
+        CHECK_EQ(got, 11u);                   // первое появление 5 <= 4 + 2
         CHECK_EQ(e.pl->plan_indices[1], 10u); // несвоевременный уехал на его место
-        CHECK(player::load::progressive_load_next(*e.pl, *e.mem, 4, e.in_use(), &Loader::load, &l) ==
-              player::load::ProgressiveStep::Waiting);
+        CHECK(player::load::progressive_load_next(*e.pl, *e.mem, 4, e.in_use(), &Loader::load, &l) == player::load::ProgressiveStep::Waiting);
         CHECK_EQ(e.pl->plan_next, 1u);
-        CHECK(player::load::progressive_load_next(*e.pl, *e.mem, 18, e.in_use(), &Loader::load, &l, &got) ==
-              player::load::ProgressiveStep::Loaded);
+        CHECK(player::load::progressive_load_next(*e.pl, *e.mem, 18, e.in_use(), &Loader::load, &l, &got) == player::load::ProgressiveStep::Loaded);
         CHECK_EQ(got, 10u);
     }
     {
@@ -189,30 +190,25 @@ void test_load_next_steps() {
         // же, а горизонт ниже неё, очередь не просматривается.
         Env e;
         Loader l{e.mem.get(), 1, 0};
-        leave_free(e.mem->psram, e.mem->psram.sample_page_count / player::load::kAmpleFreeDivisor);
-        e.pl->lead_positions = 2;
-        e.pl->plan_count = 2;
-        e.pl->plan_indices[0] = 10;
-        e.pl->plan_indices[1] = 11;
+        leave_free(e.mem->psram, memory::psram_sample_page_count(e.mem->psram) / player::load::kAmpleFreeDivisor);
+        e.pl->lead_positions     = 2;
+        e.pl->plan_count         = 2;
+        e.pl->plan_indices[0]    = 10;
+        e.pl->plan_indices[1]    = 11;
         e.pl->plan_first_use[10] = 20;
         e.pl->plan_first_use[11] = 9;
-        CHECK(player::load::progressive_load_next(*e.pl, *e.mem, 4, e.in_use(), &Loader::load, &l) ==
-              player::load::ProgressiveStep::Waiting);
+        CHECK(player::load::progressive_load_next(*e.pl, *e.mem, 4, e.in_use(), &Loader::load, &l) == player::load::ProgressiveStep::Waiting);
         CHECK_EQ(e.pl->waiting_min_first_use, 9u);
         e.pl->plan_first_use[10] = 5; // без смены плана не видно
-        CHECK(player::load::progressive_load_next(*e.pl, *e.mem, 2, e.in_use(), &Loader::load, &l) ==
-              player::load::ProgressiveStep::Waiting);
+        CHECK(player::load::progressive_load_next(*e.pl, *e.mem, 2, e.in_use(), &Loader::load, &l) == player::load::ProgressiveStep::Waiting);
         player::load::progressive_plan_changed(*e.pl);
         uint16_t got = 0;
-        CHECK(player::load::progressive_load_next(*e.pl, *e.mem, 4, e.in_use(), &Loader::load, &l, &got) ==
-              player::load::ProgressiveStep::Loaded);
+        CHECK(player::load::progressive_load_next(*e.pl, *e.mem, 4, e.in_use(), &Loader::load, &l, &got) == player::load::ProgressiveStep::Loaded);
         CHECK_EQ(got, 10u);
         CHECK_EQ(e.pl->waiting_min_first_use, player::load::kSampleNeverUsed);
         // Горизонт дошёл до запомненного - просмотр и загрузка.
-        CHECK(player::load::progressive_load_next(*e.pl, *e.mem, 4, e.in_use(), &Loader::load, &l) ==
-              player::load::ProgressiveStep::Waiting);
-        CHECK(player::load::progressive_load_next(*e.pl, *e.mem, 7, e.in_use(), &Loader::load, &l, &got) ==
-              player::load::ProgressiveStep::Loaded);
+        CHECK(player::load::progressive_load_next(*e.pl, *e.mem, 4, e.in_use(), &Loader::load, &l) == player::load::ProgressiveStep::Waiting);
+        CHECK(player::load::progressive_load_next(*e.pl, *e.mem, 7, e.in_use(), &Loader::load, &l, &got) == player::load::ProgressiveStep::Loaded);
         CHECK_EQ(got, 11u);
     }
 }
@@ -220,12 +216,12 @@ void test_load_next_steps() {
 // Загрузка, у которой может кончиться каталог: причина - общая константа.
 struct CatalogLoader {
     memory::TrackMemory* mem = nullptr;
-    uint32_t calls = 0;
+    uint32_t calls           = 0;
     static bool load(void* user, uint16_t idx, const char** reason_out) {
         auto* l = static_cast<CatalogLoader*>(user);
         ++l->calls;
         if (memory::psram_free_page_count(l->mem->psram) < 1) {
-            *reason_out = "нет места";
+            *reason_out = "no room";
             return false;
         }
         const uint16_t first = alloc_chain(l->mem->psram, 1);
@@ -248,13 +244,12 @@ void test_retry_only_after_useful_eviction() {
         CHECK(memory::sample_cache_alloc_slot(e.mem->sample_cache, 1, first) != nullptr);
         e.pl->plan_last_use[1] = 9;
         leave_free(e.mem->psram, 0);
-        e.pl->plan_indices[0] = 4;
-        e.pl->plan_count = 5;
+        e.pl->plan_indices[0]  = 4;
+        e.pl->plan_count       = 5;
         e.pl->plan_last_use[4] = 9;
-        CHECK(player::load::progressive_load_next(*e.pl, *e.mem, 3, e.in_use(), &Loader::load, &l) ==
-              player::load::ProgressiveStep::Failed);
+        CHECK(player::load::progressive_load_next(*e.pl, *e.mem, 3, e.in_use(), &Loader::load, &l) == player::load::ProgressiveStep::Failed);
         CHECK_EQ(e.pl->evicted, 1u);
-        CHECK_EQ(l.calls, 1u);   // было 2: повтор при тех же свободных страницах
+        CHECK_EQ(l.calls, 1u); // было 2: повтор при тех же свободных страницах
     }
     {
         // Каталог полон записями без страниц: вытеснение освобождает слот без
@@ -265,12 +260,11 @@ void test_retry_only_after_useful_eviction() {
             CHECK(memory::sample_cache_alloc_slot(e.mem->sample_cache, i, memory::kPageChainEnd) != nullptr);
             e.pl->plan_last_use[i] = i < 8 ? 1 : player::load::kSampleNeverUsed;
         }
-        const uint16_t idx = memory::kSampleCacheCatalogCapacity + 10;
-        e.pl->plan_indices[0] = idx;
-        e.pl->plan_count = static_cast<uint16_t>(idx + 1);
+        const uint16_t idx       = memory::kSampleCacheCatalogCapacity + 10;
+        e.pl->plan_indices[0]    = idx;
+        e.pl->plan_count         = static_cast<uint16_t>(idx + 1);
         e.pl->plan_last_use[idx] = 9;
-        CHECK(player::load::progressive_load_next(*e.pl, *e.mem, 3, e.in_use(), &CatalogLoader::load, &l) ==
-              player::load::ProgressiveStep::Loaded);
+        CHECK(player::load::progressive_load_next(*e.pl, *e.mem, 3, e.in_use(), &CatalogLoader::load, &l) == player::load::ProgressiveStep::Loaded);
         CHECK_EQ(e.pl->evicted, 1u);
         CHECK_EQ(l.calls, 2u);
         CHECK(memory::sample_cache_find(e.mem->sample_cache, idx) != nullptr);
@@ -292,11 +286,9 @@ void test_demand() {
     CHECK(player::load::progressive_request(*e.pl, 7));
     CHECK(!player::load::progressive_request(*e.pl, player::load::kProgressiveMaxSamples));
     uint16_t got = 0;
-    CHECK(player::load::progressive_load_next(*e.pl, *e.mem, 0, e.in_use(), &Loader::load, &l, &got) ==
-          player::load::ProgressiveStep::Loaded);
+    CHECK(player::load::progressive_load_next(*e.pl, *e.mem, 0, e.in_use(), &Loader::load, &l, &got) == player::load::ProgressiveStep::Loaded);
     CHECK_EQ(got, 5u);
-    CHECK(player::load::progressive_load_next(*e.pl, *e.mem, 0, e.in_use(), &Loader::load, &l, &got) ==
-          player::load::ProgressiveStep::Loaded);
+    CHECK(player::load::progressive_load_next(*e.pl, *e.mem, 0, e.in_use(), &Loader::load, &l, &got) == player::load::ProgressiveStep::Loaded);
     CHECK_EQ(got, 7u);
     CHECK(player::load::progressive_load_next(*e.pl, *e.mem, 0, e.in_use(), &Loader::load, &l) == player::load::ProgressiveStep::Waiting);
     CHECK_EQ(l.calls, 2u);
@@ -311,8 +303,7 @@ void test_demand() {
     player::load::progressive_note_in_use(*e.pl, *e.mem, e.in_use(), 10);
     e.in_use_bits[0] = 0;
     CHECK(player::load::progressive_request(*e.pl, 9));
-    CHECK(player::load::progressive_load_next(*e.pl, *e.mem, 0, e.in_use(), &Loader::load, &l, &got) ==
-          player::load::ProgressiveStep::Loaded);
+    CHECK(player::load::progressive_load_next(*e.pl, *e.mem, 0, e.in_use(), &Loader::load, &l, &got) == player::load::ProgressiveStep::Loaded);
     CHECK_EQ(got, 9u);
     CHECK(memory::sample_cache_find(e.mem->sample_cache, 7) == nullptr);
     CHECK(memory::sample_cache_find(e.mem->sample_cache, 5) != nullptr);
@@ -330,9 +321,37 @@ void test_demand() {
 
 } // namespace
 
+// Упреждение не ломает порядок плана. План отсортирован по смещению в
+// файле, и у плагина прыжок назад - перечитывание файла с начала: взяв
+// своевременный сэмпл из середины, загрузчик обязан оставить остальные в
+// прежнем порядке.
+void test_lead_keeps_plan_order() {
+    std::printf("test_progressive_lead_keeps_plan_order\n");
+    Env e;
+    Loader l{e.mem.get(), 1, 0};
+    leave_free(e.mem->psram, memory::psram_sample_page_count(e.mem->psram) / player::load::kAmpleFreeDivisor);
+    e.pl->lead_positions = 2;
+    // План по возрастанию смещения: 10, 11, 12, 13. Своевременна только 13.
+    e.pl->plan_count = 4;
+    for (uint16_t i = 0; i < 4; ++i)
+        e.pl->plan_indices[i] = static_cast<uint16_t>(10 + i);
+    e.pl->plan_first_use[10] = 50;
+    e.pl->plan_first_use[11] = 60;
+    e.pl->plan_first_use[12] = 70;
+    e.pl->plan_first_use[13] = 5;
+    uint16_t got             = 0;
+    CHECK(player::load::progressive_load_next(*e.pl, *e.mem, 4, e.in_use(), &Loader::load, &l, &got) == player::load::ProgressiveStep::Loaded);
+    CHECK_EQ(got, 13u);
+    // Остальные - в прежнем порядке, а не вперемешку.
+    CHECK_EQ(e.pl->plan_indices[1], 10u);
+    CHECK_EQ(e.pl->plan_indices[2], 11u);
+    CHECK_EQ(e.pl->plan_indices[3], 12u);
+}
+
 void run_progressive_loader_tests() {
     test_evict_one_branches();
     test_load_next_steps();
     test_retry_only_after_useful_eviction();
     test_demand();
+    test_lead_keeps_plan_order();
 }

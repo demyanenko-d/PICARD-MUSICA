@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 // Разворот ping-pong петли в прямую при упаковке (LoopUnroll): что лежит в
 // PSRAM, какие петли выбирает планировщик и как голос считает смещение за
 // концом петли.
@@ -25,7 +26,8 @@ namespace {
 std::vector<int16_t> unrolled(const std::vector<int16_t>& s, uint32_t ls, uint32_t le, LoopUnroll mode) {
     std::vector<int16_t> u(s.begin(), s.begin() + le);
     if (mode == LoopUnroll::Xm) u.push_back(s[le - 1]);
-    for (uint32_t i = le - 1; i > ls; --i) u.push_back(s[i]);
+    for (uint32_t i = le - 1; i > ls; --i)
+        u.push_back(s[i]);
     u.insert(u.end(), s.begin() + le, s.end());
     return u;
 }
@@ -34,13 +36,13 @@ std::vector<int16_t> unrolled(const std::vector<int16_t>& s, uint32_t ls, uint32
 std::vector<int16_t> read_stream(memory::PsramStore& psram, uint16_t first_page, ResidentEncoding e, uint32_t n) {
     std::vector<int16_t> out(n);
     dpcm8::Dpcm8State st;
-    uint16_t page = first_page;
-    uint32_t pos = 0;
+    uint16_t page      = first_page;
+    uint32_t pos       = 0;
     const uint32_t bps = soundsinth::model::resident_bytes_per_sample(e);
     for (uint32_t i = 0; i < n; ++i) {
         if (pos >= memory::kPsramPageBytes) {
             page = memory::psram_page_next(psram, page);
-            pos = 0;
+            pos  = 0;
         }
         const uint8_t* p = memory::psram_page_ptr(psram, page) + pos;
         if (e == ResidentEncoding::Raw8) {
@@ -60,14 +62,12 @@ std::vector<int16_t> read_stream(memory::PsramStore& psram, uint16_t first_page,
 // упаковкой эталона точно, обратный - по ошибке против исходника.
 // harsh - пила со скачком на всю шкалу (у Dpcm8 срез крутизны), иначе
 // синус с шумом, как у настоящего сэмпла.
-void check_unroll(ResidentEncoding e, LoopUnroll mode, uint32_t n, uint32_t ls, uint32_t le, uint32_t cut,
-                  bool harsh = true) {
+void check_unroll(ResidentEncoding e, LoopUnroll mode, uint32_t n, uint32_t ls, uint32_t le, uint32_t cut, bool harsh = true) {
     std::vector<int16_t> s(n);
     for (uint32_t i = 0; i < n; ++i) {
         const int32_t noise = static_cast<int32_t>((i * 2654435761u) >> 26);
-        const int32_t v = harsh ? static_cast<int32_t>((i * 7u) % 4000u) * 8 - 16000 + noise
-                                : static_cast<int32_t>(20000.0 * std::sin(i * 0.0627)) + noise;
-        s[i] = static_cast<int16_t>(e == ResidentEncoding::Raw8 ? v / 256 : v);
+        const int32_t v     = harsh ? static_cast<int32_t>((i * 7u) % 4000u) * 8 - 16000 + noise : static_cast<int32_t>(20000.0 * std::sin(i * 0.0627)) + noise;
+        s[i]                = static_cast<int16_t>(e == ResidentEncoding::Raw8 ? v / 256 : v);
     }
     const std::vector<int16_t> want = unrolled(s, ls, le, mode);
 
@@ -93,8 +93,8 @@ void check_unroll(ResidentEncoding e, LoopUnroll mode, uint32_t n, uint32_t ls, 
 
     const std::vector<int16_t> got = read_stream(psram, r.first_page, e, r.total_samples);
     const std::vector<int16_t> exp = read_stream(psram, rr.first_page, e, rr.total_samples);
-    uint32_t diff = 0;
-    int32_t worst = 0;
+    uint32_t diff                  = 0;
+    int32_t worst                  = 0;
     for (uint32_t i = 0; i < got.size(); ++i) {
         const int32_t d = std::abs(static_cast<int32_t>(got[i]) - static_cast<int32_t>(exp[i]));
         if (d != 0) ++diff;
@@ -121,23 +121,26 @@ void check_unroll(ResidentEncoding e, LoopUnroll mode, uint32_t n, uint32_t ls, 
     // (второе поколение).
     double fwd_sq = 0.0, rev_sq = 0.0;
     const uint32_t extra = r.total_samples - n;
-    for (uint32_t i = ls; i < le; ++i) fwd_sq += std::pow(double(got[i]) - double(want[i]), 2.0);
-    for (uint32_t i = le; i < le + extra; ++i) rev_sq += std::pow(double(got[i]) - double(want[i]), 2.0);
+    for (uint32_t i = ls; i < le; ++i)
+        fwd_sq += std::pow(double(got[i]) - double(want[i]), 2.0);
+    for (uint32_t i = le; i < le + extra; ++i)
+        rev_sq += std::pow(double(got[i]) - double(want[i]), 2.0);
     const double fwd_rms = std::sqrt(fwd_sq / double(le - ls));
     const double rev_rms = extra ? std::sqrt(rev_sq / double(extra)) : 0.0;
     if (e == ResidentEncoding::Dpcm8) {
         // Обратный ход кодирует распакованное - второе поколение ошибки. Замер:
         // синус с шумом 1.3 ошибки кодека, пила со скачками во всю шкалу 2.7.
         CHECK(rev_rms <= (harsh ? 3.0 : 1.5) * fwd_rms + 1.0);
-        std::printf("    ошибка против исходника: прямой ход %.1f, обратный %.1f (СКО)\n", fwd_rms, rev_rms);
+        std::printf("    error against the source: forward %.1f, backward %.1f (RMS)\n", fwd_rms, rev_rms);
     } else {
         CHECK_EQ(diff, 0u);
         CHECK_EQ(mirror_diff, 0u);
     }
-    std::printf("  %s %s n=%u петля %u..%u кусок %u: отсчётов %u, отличий %u (худшее %d), от зеркала %u (%d)\n",
-                e == ResidentEncoding::Raw8 ? "Raw8" : e == ResidentEncoding::Raw16 ? "Raw16" : "Dpcm8",
-                mode == LoopUnroll::Xm ? "XM" : "IT", n, ls, le, cut, r.total_samples, diff, worst, mirror_diff,
-                mirror_worst);
+    std::printf("  %s %s n=%u loop %u..%u chunk %u: samples %u, differences %u (worst %d), from the mirror %u (%d)\n",
+                e == ResidentEncoding::Raw8    ? "Raw8"
+                : e == ResidentEncoding::Raw16 ? "Raw16"
+                                               : "Dpcm8",
+                mode == LoopUnroll::Xm ? "XM" : "IT", n, ls, le, cut, r.total_samples, diff, worst, mirror_diff, mirror_worst);
     memory::psram_destroy(psram);
 }
 
@@ -189,11 +192,11 @@ void test_unroll_short_stream_fails() {
 
 soundsinth::model::SampleDescriptor pingpong(uint32_t len, uint32_t ls, uint32_t le) {
     soundsinth::model::SampleDescriptor sd;
-    sd.resident_encoding = ResidentEncoding::Raw8;
-    sd.length_samples = len;
-    sd.loop_start = ls;
-    sd.loop_end = le;
-    sd.loop_enabled = true;
+    sd.resident_encoding  = ResidentEncoding::Raw8;
+    sd.length_samples     = len;
+    sd.loop_start         = ls;
+    sd.loop_end           = le;
+    sd.loop_enabled       = true;
     sd.loop_bidirectional = true;
     return sd;
 }
@@ -203,16 +206,16 @@ soundsinth::model::SampleDescriptor pingpong(uint32_t len, uint32_t ls, uint32_t
 void test_unroll_pingpong_loops_budget() {
     std::printf("test_unroll_pingpong_loops_budget\n");
     soundsinth::model::SampleDescriptor samples[6] = {
-        pingpong(8192, 0, 8192),  // L 8192 - 8 страниц сверху
+        pingpong(8192, 0, 8192),    // L 8192 - 8 страниц сверху
         pingpong(4096, 1024, 3072), // L 2048 - 2 страницы
-        pingpong(2048, 0, 1024),  // L 1024 - 1 страница
-        pingpong(1024, 100, 102), // L 2 - не разворачивается
-        pingpong(1024, 0, 512),   // прямая петля
-        pingpong(0, 0, 0),        // пустой
+        pingpong(2048, 0, 1024),    // L 1024 - 1 страница
+        pingpong(1024, 100, 102),   // L 2 - не разворачивается
+        pingpong(1024, 0, 512),     // прямая петля
+        pingpong(0, 0, 0),          // пустой
     };
     samples[4].loop_bidirectional = false;
     soundsinth::model::Song song;
-    song.samples = samples;
+    song.samples      = samples;
     song.sample_count = 6;
 
     // Без разворота: 8 + 4 + 2 + 1 + 1 = 16 страниц. Сверху 3: влезают петли
@@ -231,7 +234,7 @@ void test_unroll_pingpong_loops_budget() {
     // IT: период 2L - 1, исходный конец восстанавливается.
     soundsinth::model::SampleDescriptor it = pingpong(1000, 100, 600);
     soundsinth::model::Song song_it;
-    song_it.samples = &it;
+    song_it.samples      = &it;
     song_it.sample_count = 1;
     CHECK_EQ(soundsinth::model::unroll_pingpong_loops(song_it, 100, LoopUnroll::It), 1u);
     CHECK_EQ(it.loop_end, 100u + 2u * 500u - 1u);
@@ -241,7 +244,7 @@ void test_unroll_pingpong_loops_budget() {
     // Трек не помещается и без разворота - ничего не разворачивается.
     soundsinth::model::SampleDescriptor big = pingpong(4096, 0, 1024);
     soundsinth::model::Song song_big;
-    song_big.samples = &big;
+    song_big.samples      = &big;
     song_big.sample_count = 1;
     CHECK_EQ(soundsinth::model::unroll_pingpong_loops(song_big, 4, LoopUnroll::Xm), 0u);
     CHECK(big.loop_unroll == LoopUnroll::None);
@@ -250,7 +253,7 @@ void test_unroll_pingpong_loops_budget() {
     // None планировщик выбирал бы тот же сэмпл без конца).
     soundsinth::model::SampleDescriptor none = pingpong(1000, 100, 600);
     soundsinth::model::Song song_none;
-    song_none.samples = &none;
+    song_none.samples      = &none;
     song_none.sample_count = 1;
     CHECK_EQ(soundsinth::model::unroll_pingpong_loops(song_none, 100, LoopUnroll::None), 0u);
     CHECK(none.loop_unroll == LoopUnroll::None);
@@ -265,7 +268,8 @@ void test_voice_offset_uses_loop_end_before_unroll() {
     memory::PsramStore psram;
     memory::psram_create(psram);
     std::vector<int16_t> s(2000);
-    for (uint32_t i = 0; i < s.size(); ++i) s[i] = static_cast<int16_t>(i % 100);
+    for (uint32_t i = 0; i < s.size(); ++i)
+        s[i] = static_cast<int16_t>(i % 100);
     sample_pack::SamplePacker packer(psram, ResidentEncoding::Raw8);
     packer.set_loop_unroll(LoopUnroll::Xm, 500, 1500);
     CHECK(packer.add_samples(s.data(), 2000));
@@ -273,7 +277,7 @@ void test_voice_offset_uses_loop_end_before_unroll() {
     CHECK(r.ok);
 
     soundsinth::model::SampleDescriptor sd = pingpong(2000 + 1000, 500, 2500);
-    sd.loop_unroll = LoopUnroll::Xm;
+    sd.loop_unroll                         = LoopUnroll::Xm;
 
     engine::Voice v;
     engine::voice_trigger(v, psram, sd, r.first_page, 60, soundsinth::model::FrequencyModel::Linear, 1500, 0);
@@ -294,10 +298,11 @@ void test_resident_pages_matches_packer() {
     std::printf("test_resident_pages_matches_packer\n");
     static memory::PsramStore psram;
     memory::psram_create(psram);
-    const uint32_t lengths[] = {1, 255, 256, 257, 1023, 1024, 1025, 131072, 131073};
+    const uint32_t lengths[]           = {1, 255, 256, 257, 1023, 1024, 1025, 131072, 131073};
     const ResidentEncoding encodings[] = {ResidentEncoding::Raw8, ResidentEncoding::Raw16, ResidentEncoding::Dpcm8};
     std::vector<int16_t> src(131073);
-    for (uint32_t i = 0; i < src.size(); ++i) src[i] = static_cast<int16_t>((i * 37u) % 200u) - 100;
+    for (uint32_t i = 0; i < src.size(); ++i)
+        src[i] = static_cast<int16_t>((i * 37u) % 200u) - 100;
     uint32_t cases = 0, bad = 0;
     for (ResidentEncoding e : encodings) {
         for (int dec = 0; dec < 2; ++dec) {
@@ -306,6 +311,7 @@ void test_resident_pages_matches_packer() {
                     const uint32_t stored = dec ? (n + 1) / 2 : n; // после прореживания
                     if (unroll && stored < 16) continue;
                     memory::psram_reset_track(psram);
+                    (void)memory::psram_freeze_pattern_zone(psram);
                     const uint32_t free0 = memory::psram_free_page_count(psram);
                     sample_pack::SamplePacker p(psram, e, dec != 0);
                     uint32_t expect_len = stored;
@@ -326,15 +332,15 @@ void test_resident_pages_matches_packer() {
                     ++cases;
                     if (r.total_samples != expect_len || used != want) {
                         if (++bad <= 5) {
-                            std::printf("  кодек %u прореж %d n %u разворот %d: отсчётов %u (ждали %u), страниц %u (формула %u)\n",
-                                        static_cast<unsigned>(e), dec, n, unroll, r.total_samples, expect_len, used, want);
+                            std::printf("  codec %u decimation %d n %u expand %d: samples %u (expected %u), pages %u (formula %u)\n", static_cast<unsigned>(e),
+                                        dec, n, unroll, r.total_samples, expect_len, used, want);
                         }
                     }
                 }
             }
         }
     }
-    std::printf("  случаев %u, расхождений %u\n", cases, bad);
+    std::printf("  cases %u, differences %u\n", cases, bad);
     CHECK_EQ(bad, 0u);
     memory::psram_destroy(psram);
 }

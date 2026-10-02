@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 #include "player/shared_state.h"
 
 namespace shared {
@@ -11,6 +12,7 @@ std::atomic<uint32_t> g_stale_generation{0};
 std::atomic<uint32_t> g_app_task_loops{0};
 std::atomic<uint32_t> g_engine_generation{0};
 std::atomic<uint32_t> g_core1_loops{0};
+std::atomic<Core1Step> g_core1_step{Core1Step::GsPoll};
 std::atomic<Core1Phase> g_core1_phase{Core1Phase::Loop};
 std::atomic<uint32_t> g_track_end_frame{0};
 std::atomic<uint32_t> g_playback_frames{0};
@@ -60,7 +62,9 @@ void track_load_begin(void (*pump)(void*), void* user) {
     // Позиция и карта прошлого трека. Писатель снят, новый движок опубликует
     // свои с первого тика; до него вытеснение видит позицию 0 - "ещё ничего
     // не отыграло", а не позицию прошлого трека.
-    for (auto& w : g_samples_in_use) w.store(0, std::memory_order_relaxed);
+    for (auto& w : g_samples_in_use) {
+        w.store(0, std::memory_order_relaxed);
+    }
     g_order_pos.store(0, std::memory_order_relaxed);
     g_row_pos.store(0, std::memory_order_relaxed);
     // Конец прошлого трека. Здесь, а не в начале сессии: старый движок уже
@@ -74,7 +78,9 @@ void track_load_begin(void (*pump)(void*), void* user) {
     g_seek_frames.store(0, std::memory_order_relaxed);
 }
 
-void track_load_end() { g_load_in_progress.store(false, std::memory_order_release); }
+void track_load_end() {
+    g_load_in_progress.store(false, std::memory_order_release);
+}
 
 void publish_loaded_track(uint32_t end_frame) {
     g_playback_frames.store(0, std::memory_order_relaxed);

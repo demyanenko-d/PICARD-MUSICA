@@ -40,9 +40,8 @@ include(pico_sdk_import.cmake)
 project(soundsinth_firmware C CXX ASM)
 
 # Эмулятор Z-Controller: 1 включён (умолчание), 0 - вторая прошивка релиза.
-# Перекрывает умолчание SOUNDSINTH_RP2350_ZCONTROLLER (там оно под #ifndef).
-set(SOUNDSINTH_ZCONTROLLER 1 CACHE STRING "Эмулятор Z-Controller: 1 включён, 0 выключен")
-add_compile_definitions(SOUNDSINTH_RP2350_ZCONTROLLER=${SOUNDSINTH_ZCONTROLLER})
+# Эмулятор Z-Controller решается настройкой ZCONTROLLER на карте, а не
+# сборкой: образ один на все машины.
 
 # Пула будильников нет: он единственный путь, которым ожидание уходит в
 # spin_lock_blocking с запретом прерываний, а на Core1 в это время идёт шина.
@@ -69,6 +68,57 @@ add_compile_definitions(SOUNDSINTH_RP2350_I2S_PHASE_TEST=${SOUNDSINTH_I2S_PHASE_
 # ставится до pico_sdk_init().
 set(TINYUSB_OPT_OS OPT_OS_NONE)
 
+# TinyUSB берётся из мейнстрима, а не из SDK. В 0.18.0, которую несёт
+# pico-sdk 2.3.0, массовые обмены хоста идут через "interrupt"-точки с
+# опросом раз в кадр: 64 байта за миллисекунду, то есть сектор флешки
+# за 10 мс при возможных полутора. В 0.20.0 драйвер RP2 переписан: массовые
+# точки переведены на epx с двойной буферизацией.
+#
+# Сборку ведёт всё равно SDK, поэтому здесь только выкачивание
+# (SOURCE_SUBDIR указан несуществующий), а путь ставится до
+# pico_sdk_init(): его читает src/rp2_common/tinyusb/CMakeLists.txt.
+include(FetchContent)
+FetchContent_Declare(
+    tinyusb_mainline
+    GIT_REPOSITORY https://github.com/hathach/tinyusb.git
+    GIT_TAG 0.21.0
+    GIT_SHALLOW TRUE
+    SOURCE_SUBDIR do-not-build-here
+)
+FetchContent_MakeAvailable(tinyusb_mainline)
+set(PICO_TINYUSB_PATH ${tinyusb_mainline_SOURCE_DIR})
+
+# Секция драйвера RP2 запирается не PRIMASK, а прерыванием USB.
+#
+# С 0.21.0 порт RP2 завёл свою critical_section_t и берёт её в hcd_edpt_xfer,
+# то есть на каждую передачу. В pico-sdk это save_and_disable_interrupts():
+# PRIMASK гасит на ядре всё, включая шинные обработчики, которые мы
+# намеренно подняли выше порога планировщика. У Z80 нет /WAIT, и пропущенный
+# цикл чтения порта значит байт прошлого обмена на шине.
+#
+# Секция защищает состояние драйвера от его же обработчика прерывания и
+# больше ни от чего: сам обработчик её не берёт, ядро у стека одно. Запрета
+# одного USBCTRL_IRQ достаточно - именно так делает сама TinyUSB в своём
+# слое OPT_OS_NONE (osal_none.h, interrupt_set).
+#
+# Замена текстом, а не патчем: повторный запуск безвреден, git не нужен.
+set(_rp2_usb_h ${tinyusb_mainline_SOURCE_DIR}/src/portable/raspberrypi/rp2040/rp2040_usb.h)
+file(READ ${_rp2_usb_h} _rp2_usb_src)
+string(REPLACE
+    "  critical_section_enter_blocking(&rp2usb_lock);"
+    "  irq_set_enabled(USBCTRL_IRQ, false); // правка SoundSinth: не PRIMASK"
+    _rp2_usb_src "${_rp2_usb_src}")
+string(REPLACE
+    "  critical_section_exit(&rp2usb_lock);"
+    "  irq_set_enabled(USBCTRL_IRQ, true); // правка SoundSinth: не PRIMASK"
+    _rp2_usb_src "${_rp2_usb_src}")
+string(REPLACE
+    "#include \"pico/critical_section.h\""
+    "#include \"pico/critical_section.h\"
+#include \"hardware/irq.h\""
+    _rp2_usb_src "${_rp2_usb_src}")
+file(WRITE ${_rp2_usb_h} "${_rp2_usb_src}")
+
 # Initialise the Raspberry Pi Pico SDK
 pico_sdk_init()
 
@@ -80,7 +130,11 @@ include(FetchContent)
 add_library(freertos_config INTERFACE)
 target_include_directories(freertos_config INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/backend/ports/rp2350/rtos)
 
-set(FREERTOS_HEAP "4" CACHE STRING "" FORCE)
+# Файла кучи у ядра нет: всё размещено статически
+# (configSUPPORT_DYNAMIC_ALLOCATION 0). unset, а не пропуск строки: значение
+# могло остаться в кэше от прежней сборки, и heap_4.c тогда остановил бы
+# сборку своим #error.
+unset(FREERTOS_HEAP CACHE)
 set(FREERTOS_PORT "GCC_ARM_CM33_NTZ_NONSECURE" CACHE STRING "" FORCE)
 
 FetchContent_Declare(
@@ -193,6 +247,9 @@ pico_generate_pio_header(platform_rp2350
 pico_generate_pio_header(platform_rp2350
     ${CMAKE_CURRENT_LIST_DIR}/backend/ports/rp2350/hostlink/trap_join.pio
 )
+pico_generate_pio_header(platform_rp2350
+    ${CMAKE_CURRENT_LIST_DIR}/backend/ports/rp2350/hostlink/trdos.pio
+)
 
 add_executable(soundsinth_firmware
     backend/ports/rp2350/main.cpp
@@ -202,6 +259,8 @@ add_executable(soundsinth_firmware
     backend/ports/rp2350/hal/media.cpp
     backend/ports/rp2350/hal/audio_out.cpp
     backend/ports/rp2350/hal/host_signals.cpp
+    backend/ports/rp2350/hal/config_flash.cpp
+    backend/ports/rp2350/hal/boot_mode.cpp
     backend/ports/rp2350/log.cpp
 )
 target_include_directories(soundsinth_firmware PRIVATE
@@ -252,6 +311,7 @@ target_link_libraries(soundsinth_firmware
     # PIO.
     hardware_pio
     hardware_spi   # spi_pins.cpp: реализация devices/hal/spi.h
+    hardware_flash # hal/config_flash.cpp: два блока настроек
     platform_rp2350
     # USB-хост на встроенном контроллере. Каналов DMA не занимает: байты
     # между буфером и памятью USB возит сам контроллер.

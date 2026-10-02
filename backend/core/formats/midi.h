@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 #pragma once
 
 // Standard MIDI File -> Song, паттернами, как у OpenMPT: движок, длительность, конец трека и экран на ZX
@@ -48,9 +49,9 @@ void set_forced_grid(uint8_t rows_per_beat, uint8_t ticks_per_row);
 // общая громкость (их пишет загрузчик, а не конвертер). nullptr - выключено.
 struct ConvertTrace {
     void (*event)(void* user, uint8_t status, uint8_t d1, uint8_t d2, uint8_t delay) = nullptr;
-    void (*row_done)(void* user, const soundsinth::model::PatternCell* cells) = nullptr;
-    void* user = nullptr;
-    uint32_t row_effects = 0;
+    void (*row_done)(void* user, const soundsinth::model::PatternCell* cells)        = nullptr;
+    void* user                                                                       = nullptr;
+    uint32_t row_effects                                                             = 0;
     uint16_t drum_mask = 0; // ударные каналы файла (бит на канал), GS/XG SysEx учтён
 };
 void set_convert_trace(ConvertTrace* trace);
@@ -58,12 +59,12 @@ void set_convert_trace(ConvertTrace* trace);
 // Числа последней загрузки .mid; ядро само не печатает. *_known - дошла ли загрузка до этого места:
 // числа нужны и когда файл не влез.
 struct LoadStats {
-    bool layers_known = false; // выбор слоёв пройден: поля до notes_no_zone заполнены
-    uint32_t instruments = 0; // инструментов песни
-    uint32_t samples = 0; // сэмплов песни
-    uint32_t keymap_ranges = 0; // диапазонов keymap у инструментов песни
-    uint32_t envelopes = 0; // огибающих в арене; при отказе - по ссылкам, с повторами
-    uint32_t arena_bytes = 0; // байт резидентной арены; при отказе - верхняя оценка
+    bool layers_known      = false; // выбор слоёв пройден: поля до notes_no_zone заполнены
+    uint32_t instruments   = 0;     // инструментов песни
+    uint32_t samples       = 0;     // сэмплов песни
+    uint32_t keymap_ranges = 0;     // диапазонов keymap у инструментов песни
+    uint32_t envelopes     = 0;     // огибающих в арене; при отказе - по ссылкам, с повторами
+    uint32_t arena_bytes   = 0;     // байт резидентной арены; при отказе - верхняя оценка
     // Note-on без единого слоя не пишется вовсе.
     uint32_t notes_over_cap = 0; // номер инструмента в ячейке 9 бит: инструментам банка сверх 511 не достаётся
     uint32_t notes_no_zone = 0; // у пресета нет зоны на эту ноту и силу удара
@@ -71,18 +72,18 @@ struct LoadStats {
     uint32_t steals = 0; // кража звучащего канала: все 64 заняты
     // Повтор клавиши лёг на её же канал, где прежний удар ещё доигрывал релиз:
     // так одна клавиша не копит хвосты. Тремоло рояля даёт их десятками.
-    uint32_t note_restacks = 0;
-    uint32_t off_delay_lost = 0; // снятие без задержки внутри строки: колонка эффекта занята
-    uint32_t vib_lost = 0; // вибрато CC1 без свободной колонки
-    uint32_t tempo_deferred = 0; // смена темпа отложена на строку: все колонки эффекта заняты
-    uint32_t tempo_dropped = 0; // смены темпа сверх потолка карты
-    bool psram_known = false; // паттерны упакованы: поля ниже заполнены
-    uint32_t free_pages = 0; // страниц PSRAM сэмплам после заморозки зоны паттернов
-    uint32_t samples_need_kb = 0; // КБ PCM сэмплов песни, общий блок банка - один раз
-    uint32_t patterns_kb = 0; // КБ зоны паттернов
+    uint32_t note_restacks   = 0;
+    uint32_t off_delay_lost  = 0;     // снятие без задержки внутри строки: колонка эффекта занята
+    uint32_t vib_lost        = 0;     // вибрато CC1 без свободной колонки
+    uint32_t tempo_deferred  = 0;     // смена темпа отложена на строку: все колонки эффекта заняты
+    uint32_t tempo_dropped   = 0;     // смены темпа сверх потолка карты
+    bool psram_known         = false; // паттерны упакованы: поля ниже заполнены
+    uint32_t free_pages      = 0;     // страниц PSRAM сэмплам после заморозки зоны паттернов
+    uint32_t samples_need_kb = 0;     // КБ PCM сэмплов песни, общий блок банка - один раз
+    uint32_t patterns_kb     = 0;     // КБ зоны паттернов
     // Событий в слитом таймлайне и сколько они занимают. Потоковому пути они
     // нужны резидентно вместо паттернов, поэтому размен считается по ним.
-    uint32_t events = 0;
+    uint32_t events       = 0;
     uint32_t events_bytes = 0;
 };
 const LoadStats& last_load_stats();

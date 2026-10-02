@@ -1,8 +1,8 @@
-// Логика шины Z80: как прошивка разговаривает с шиной. Поверх неё -
-// divmmc.h (эмуляция DivMMC/esxDOS) и hostlink.h (протокол с плагином).
+// SPDX-License-Identifier: MIT
+// Логика шины Z80: как прошивка разговаривает с шиной.
 //
-// Автоматы PIO - в двух файлах по границе сигнала: ports.pio (циклы IORQ и
-// rom_serve) и memory.pio (циклы MREQ и трапы).
+// Автоматы PIO разделены по сигналу: циклы IORQ отдельно от циклов MREQ и
+// трапов.
 
 #pragma once
 
@@ -17,18 +17,18 @@
 
 namespace bus {
 
-// --- Пины и перемычки ---
+// --- Пины и режим ---
 
 constexpr uint PIN_BUFF_OE_N = 2; // 0 - данные МК на шину, 1 - с шины на МК
-constexpr uint PIN_M1_N = 3; // используется эмуляцией ПЗУ
-constexpr uint PIN_WR_N = 4;
-constexpr uint PIN_RD_N = 5;
-constexpr uint PIN_IORQ_N = 6;
-constexpr uint PIN_MREQ_N = 7; // используется эмуляцией ПЗУ
-constexpr uint PIN_A0 = 8; // A0..A7 = GPIO 8..15
-constexpr uint PIN_D0 = 24; // D0..D7 = GPIO 24..31
-constexpr uint ADDR_LINES = 16; // A0..A15
-constexpr uint DATA_LINES = 8; // D0..D7
+constexpr uint PIN_M1_N      = 3; // используется эмуляцией ПЗУ
+constexpr uint PIN_WR_N      = 4;
+constexpr uint PIN_RD_N      = 5;
+constexpr uint PIN_IORQ_N    = 6;
+constexpr uint PIN_MREQ_N    = 7;  // используется эмуляцией ПЗУ
+constexpr uint PIN_A0        = 8;  // A0..A7 = GPIO 8..15
+constexpr uint PIN_D0        = 24; // D0..D7 = GPIO 24..31
+constexpr uint ADDR_LINES    = 16; // A0..A15
+constexpr uint DATA_LINES    = 8;  // D0..D7
 
 // Поля снимка порта ввода (gpio_get_all, слово bus_wr): адрес A0..A15, его
 // младший байт (номер порта) и данные D0..D7.
@@ -66,7 +66,6 @@ inline void release_host_rom() {
     gpio_put(PIN_ROM_BLK_N, 1);
 }
 
-
 // Дождаться конца идущего цикла чтения памяти (MREQ_N и RD_N оба низкие).
 // Смена подстановки DivMMC - вариант таблицы и ROM_BLK - действует со
 // следующего цикла: трап будит ядро посреди выборки по своему адресу, и
@@ -83,25 +82,52 @@ static __force_inline void wait_memory_read_end() {
     }
 }
 
-// Перемычка: вход с подтяжкой вверх, замыкание на землю включает DivMMC;
-// прочие устройства работают в обоих положениях.
-//
-// Читается один раз при загрузке: менять раскладку PIO и таблицу страниц
-// у работающей машины незачем и опасно. Ставить до включения питания.
-//
-// Errata E9 (защёлкивание плавающего входа) не грозит: подтяжка включена,
-// в отличие от RESERVED_PINS, которым входной буфер приходится держать
-// выключенным.
-constexpr uint PIN_DIVMMC_JUMPER = 39;
-
-constexpr uint PIN_NMI_N = 35;
+constexpr uint PIN_NMI_N   = 35;
 constexpr uint PIN_RESET_N = 47;
 
-// Прочитать перемычку и запомнить. Звать один раз при загрузке, до того
-// как что-либо спросит режим.
-void latch_divmmc_jumper();
-// true - перемычка стоит, DivMMC включён.
-bool divmmc_selected();
+// Признак ПЗУ TR-DOS для машины с интерфейсом Beta: ноль - страничено ПЗУ
+// TR-DOS. Плата ведёт его всегда, даже когда триггер выключен: там за ним
+// вход, а плавающий вход это неопределённость.
+//
+// Вывод старше 31, и окно выводов у блока PIO с шинными автоматами - 0..31.
+// Поэтому ведёт его SIO, а автоматы триггера только отдают маску, и несёт
+// её DMA.
+constexpr uint PIN_DOS_N = 36;
+
+// Перемычка режима загрузки: замкнута на землю - плата поднимает
+// конфигуратор. Вывод уже несёт перемычку на плате и прошивкой больше
+// нигде не читается; подтяжка вверх своя, внешней на нём нет.
+constexpr uint PIN_BOOT_JUMPER = 37;
+
+// Снять признак ПЗУ TR-DOS. Зовётся при сбросе машины: после сброса Beta
+// стоит в исходном, и признак обязан совпасть.
+inline void release_host_trdos() {
+    gpio_put(PIN_DOS_N, 1);
+}
+
+// Включить или выключить DivMMC. Ставится один раз при загрузке, из
+// настроек, до всех, кто спрашивает режим: менять раскладку PIO и таблицу
+// страниц у работающей машины незачем и опасно.
+void divmmc_set_enabled(bool on);
+// true - DivMMC работает: подставляет память и держит ПЗУ машины.
+bool divmmc_enabled();
+
+// Включить или выключить триггер TR-DOS. Ставится там же и тогда же, что
+// и DivMMC: дисковая система одна, и автоматы у них общие.
+void trdos_set_enabled(bool on);
+bool trdos_enabled();
+
+// Режим конфигуратора настроек. Ставится до divmmc_set_enabled и вместе с
+// ним: механизм подстановки тот же, меняются образ ПЗУ и начальное
+// состояние - CONMEM держится с первой выборки, чтобы машина стартовала
+// прямо в наше ПЗУ.
+void config_rom_set_enabled(bool on);
+bool config_rom_enabled();
+
+// Страница настроек глазами машины: 0x2000-0x3FFF, банк 0 ОЗУ DivMMC.
+// Плата пишет её прямо - это её массив в SRAM.
+uint8_t* config_rom_page();
+uint32_t config_rom_page_bytes();
 
 // Единица на выводе - хост в сбросе: на плате линию инвертирует 74HCT04,
 // за ним диод (сброс на шине двунаправленный).
@@ -113,8 +139,9 @@ inline void release_host_reset() {
 }
 
 // --- Плагинная шина ---
-// Порты протокола и свои порты. Без перемычки отвечают z80_rd_fsm и
-// z80_wr_fsm, с перемычкой - путь портов эмуляции ПЗУ.
+// Порты протокола и свои порты. Путь один на оба режима: детектор порта,
+// склейщик и общий ответчик rom_serve. Без DivMMC этот путь и поднимает
+// шину, с ним - его поднимает эмуляция ПЗУ.
 
 void plugin_ports_init(player::protocol::HostProtocol& protocol);
 
@@ -132,7 +159,7 @@ void plugin_ports_init(player::protocol::HostProtocol& protocol);
 //
 // Регистрации и ответы можно звать и до plugin_ports_init(): таблицы
 // статические, init их не стирает, копию ответа для пути портов эмуляции
-// ПЗУ включает флаг перемычки, защёлкнутый при загрузке.
+// ПЗУ включает признак DivMMC, поставленный при загрузке.
 
 using PortWriteFn = void (*)(uint8_t port, uint8_t data);
 
@@ -140,8 +167,8 @@ using PortWriteFn = void (*)(uint8_t port, uint8_t data);
 // (__not_in_flash_func).
 void z80_bus_pio_register_wr(uint8_t port, PortWriteFn fn);
 
-// Что ответить на следующее чтение порта. Без перемычки - одна 32-битная
-// запись, с перемычкой ещё ячейка и разрешение (значение раньше
+// Что ответить на следующее чтение порта. Без DivMMC - одна 32-битная
+// запись, с ним ещё ячейка и разрешение (значение раньше
 // разрешения).
 void z80_bus_pio_set_rd(uint8_t port, uint8_t value);
 
@@ -176,7 +203,7 @@ PioStats z80_bus_pio_get_stats();
 // --- Эмуляция ПЗУ и памяти ---
 // Путь, которым прошивка подставляет машине байты из своих страниц:
 // чтение по цепочкам DMA, запись через PIO, трапы, порты DivMMC.
-// Работает, когда стоит перемычка выбора режима.
+// Работает, когда настройками выбран DivMMC.
 
 // Поднимает эмуляцию: таблица страниц, автоматы PIO, цепочки DMA,
 // блокировка ПЗУ машины. Хост в этот момент должен быть в сбросе, сброс
@@ -188,7 +215,7 @@ void rom_emu_init();
 // базы в X детектора, он же ROM_BLK_N: подстановка - чётные номера, без неё -
 // нечётные. Групп три, номеров вчетверо больше банков: нечётных на
 // шестнадцать больше нужного.
-inline constexpr uint32_t PAGE_TAB_BANKS = 16;
+inline constexpr uint32_t PAGE_TAB_BANKS    = 16;
 inline constexpr uint32_t PAGE_TAB_VARIANTS = 4 * PAGE_TAB_BANKS;
 
 // Заполнить регион в заданном варианте таблицы. Варианты заготовлены,
@@ -213,11 +240,10 @@ void rom_emu_force_pages(uint32_t variant);
 // чтения памяти.
 // Карта трапов по адресу (0x0000-0x1FFF).
 inline constexpr uint32_t kTrapAddrMapEntries = 0x2000u;
-// Карта по адресам - 32 КБ с выравниванием на 32 КБ (склейщик собирает адрес
-// склейкой база | A << 2). Массивом в .bss выравнивание стоило бы ещё до
-// 32 КБ дыры перед ней, поэтому она в конце SRAM, за .bss: кучей прошивка не
-// пользуется. Что .bss туда не заходит, проверяет rom_emu_init.
-inline constexpr uintptr_t kTrapAddrMapAt = 0x20080000u - kTrapAddrMapEntries * sizeof(uint32_t);
+// Карта по адресам - 32 КБ с выравниванием на 32 КБ: склейщик собирает адрес
+// склейкой "база | A << 2". Лежит обычным объектом в .bss
+// (s_trap_addr_map_storage) - так её тридцать два килобайта видны линкеру
+// и size, а арена newlib их больше не накрывает.
 enum class TrapKind : uint8_t { Enter = 0, Exit = 1 };
 void rom_emu_trap_clear();
 // addr ниже 0x2000 - точка; 0x2000-0x3FFF - вся страница адреса.
@@ -251,10 +277,10 @@ void rom_emu_serve_late_poll();
 // отвечается по портам команд и данных и сколько байтов rom_serve не
 // выставил.
 struct GenericPortsState {
-    uint32_t tab_cmd = 0; // запись s_porttab: адрес ячейки ответа, 0 - порт не наш
-    uint32_t tab_dat = 0;
-    uint8_t val_cmd = 0;
-    uint8_t val_dat = 0;
+    uint32_t tab_cmd    = 0; // запись s_porttab: адрес ячейки ответа, 0 - порт не наш
+    uint32_t tab_dat    = 0;
+    uint8_t val_cmd     = 0;
+    uint8_t val_dat     = 0;
     uint32_t serve_late = 0;
 };
 GenericPortsState generic_ports_state();

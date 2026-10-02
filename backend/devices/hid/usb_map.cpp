@@ -1,4 +1,7 @@
+// SPDX-License-Identifier: MIT
 #include "devices/hid/usb_map.h"
+
+#include "platform/hot_path.h"
 
 #include <array>
 
@@ -10,7 +13,7 @@
 namespace devices::hid {
 namespace {
 
-constexpr uint8_t kNoKey = 0xFF;
+constexpr uint8_t kNoKey = 0xff;
 
 // Клавиша матрицы одним байтом: строка в старших разрядах, разряд в
 // младших.
@@ -19,7 +22,7 @@ constexpr uint8_t zx(uint8_t row, uint8_t bit) {
 }
 
 constexpr uint8_t kCapsShift = zx(0, 0);
-constexpr uint8_t kSymShift = zx(7, 1);
+constexpr uint8_t kSymShift  = zx(7, 1);
 
 // Две клавиши на код: у ZX половина знаков набирается с CAPS или SYMBOL
 // SHIFT, и нажимать их надо вместе.
@@ -29,12 +32,14 @@ struct Combo {
 };
 
 // Таблица вдвое длиннее числа кодов: вторая половина - то же с нажатым
-// ЛЕВЫМ Shift, то есть отображается набранный знак, а не клавиша.
+// левым Shift, то есть отображается набранный знак, а не клавиша.
 constexpr uint16_t kShifted = 0x100;
 
 constexpr std::array<Combo, 512> build_keymap() {
     std::array<Combo, 512> m{};
-    for (Combo& c : m) c = Combo{kNoKey, kNoKey};
+    for (Combo& c : m) {
+        c = Combo{kNoKey, kNoKey};
+    }
 
     // Буквы: коды 0x04..0x1D идут по латинскому алфавиту.
     m[0x04] = {zx(1, 0), kNoKey}; // A
@@ -43,12 +48,12 @@ constexpr std::array<Combo, 512> build_keymap() {
     m[0x07] = {zx(1, 2), kNoKey}; // D
     m[0x08] = {zx(2, 2), kNoKey}; // E
     m[0x09] = {zx(1, 3), kNoKey}; // F
-    m[0x0A] = {zx(1, 4), kNoKey}; // G
-    m[0x0B] = {zx(6, 4), kNoKey}; // H
-    m[0x0C] = {zx(5, 2), kNoKey}; // I
-    m[0x0D] = {zx(6, 3), kNoKey}; // J
-    m[0x0E] = {zx(6, 2), kNoKey}; // K
-    m[0x0F] = {zx(6, 1), kNoKey}; // L
+    m[0x0a] = {zx(1, 4), kNoKey}; // G
+    m[0x0b] = {zx(6, 4), kNoKey}; // H
+    m[0x0c] = {zx(5, 2), kNoKey}; // I
+    m[0x0d] = {zx(6, 3), kNoKey}; // J
+    m[0x0e] = {zx(6, 2), kNoKey}; // K
+    m[0x0f] = {zx(6, 1), kNoKey}; // L
     m[0x10] = {zx(7, 2), kNoKey}; // M
     m[0x11] = {zx(7, 3), kNoKey}; // N
     m[0x12] = {zx(5, 1), kNoKey}; // O
@@ -59,15 +64,15 @@ constexpr std::array<Combo, 512> build_keymap() {
     m[0x17] = {zx(2, 4), kNoKey}; // T
     m[0x18] = {zx(5, 3), kNoKey}; // U
     m[0x19] = {zx(0, 4), kNoKey}; // V
-    m[0x1A] = {zx(2, 1), kNoKey}; // W
-    m[0x1B] = {zx(0, 2), kNoKey}; // X
-    m[0x1C] = {zx(5, 4), kNoKey}; // Y
-    m[0x1D] = {zx(0, 1), kNoKey}; // Z
+    m[0x1a] = {zx(2, 1), kNoKey}; // W
+    m[0x1b] = {zx(0, 2), kNoKey}; // X
+    m[0x1c] = {zx(5, 4), kNoKey}; // Y
+    m[0x1d] = {zx(0, 1), kNoKey}; // Z
 
     // Цифры: 1..5 в своей строке слева направо, 6..0 в соседней справа
     // налево - как на самой машине.
-    m[0x1E] = {zx(3, 0), kNoKey}; // 1
-    m[0x1F] = {zx(3, 1), kNoKey}; // 2
+    m[0x1e] = {zx(3, 0), kNoKey}; // 1
+    m[0x1f] = {zx(3, 1), kNoKey}; // 2
     m[0x20] = {zx(3, 2), kNoKey}; // 3
     m[0x21] = {zx(3, 3), kNoKey}; // 4
     m[0x22] = {zx(3, 4), kNoKey}; // 5
@@ -79,13 +84,13 @@ constexpr std::array<Combo, 512> build_keymap() {
 
     m[0x28] = {zx(6, 0), kNoKey};      // Enter
     m[0x29] = {kCapsShift, zx(7, 0)};  // Escape - BREAK
-    m[0x2A] = {kCapsShift, zx(4, 0)};  // Backspace - DELETE
-    m[0x2B] = {kCapsShift, kSymShift}; // Tab - расширенный режим
-    m[0x2C] = {zx(7, 0), kNoKey};      // пробел
+    m[0x2a] = {kCapsShift, zx(4, 0)};  // Backspace - DELETE
+    m[0x2b] = {kCapsShift, kSymShift}; // Tab - расширенный режим
+    m[0x2c] = {zx(7, 0), kNoKey};      // пробел
 
     // Знаки набираются с SYMBOL SHIFT.
-    m[0x2D] = {kSymShift, zx(6, 3)}; // минус
-    m[0x2E] = {kSymShift, zx(6, 1)}; // равно
+    m[0x2d] = {kSymShift, zx(6, 3)}; // минус
+    m[0x2e] = {kSymShift, zx(6, 1)}; // равно
     m[0x33] = {kSymShift, zx(5, 1)}; // точка с запятой
     m[0x34] = {kSymShift, zx(4, 3)}; // апостроф
     m[0x36] = {kSymShift, zx(7, 3)}; // запятая
@@ -93,28 +98,28 @@ constexpr std::array<Combo, 512> build_keymap() {
     m[0x38] = {kSymShift, zx(0, 4)}; // косая черта
 
     // Стрелки - с CAPS SHIFT, как на резиновой клавиатуре.
-    m[0x4F] = {kCapsShift, zx(4, 2)}; // вправо - 8
+    m[0x4f] = {kCapsShift, zx(4, 2)}; // вправо - 8
     m[0x50] = {kCapsShift, zx(3, 4)}; // влево - 5
     m[0x51] = {kCapsShift, zx(4, 4)}; // вниз - 6
     m[0x52] = {kCapsShift, zx(4, 3)}; // вверх - 7
 
     // Скобки и обратная косая.
-    m[0x2F] = {kSymShift, zx(5, 4)}; // [ - SS+Y
+    m[0x2f] = {kSymShift, zx(5, 4)}; // [ - SS+Y
     m[0x30] = {kSymShift, zx(5, 3)}; // ] - SS+U
     m[0x31] = {kSymShift, zx(1, 2)}; // \ - SS+D
 
     // Цифровая клавиатура: цифры сами собой, знаки как на основной.
-    m[0x59] = {zx(3, 0), kNoKey}; // 1
-    m[0x5A] = {zx(3, 1), kNoKey}; // 2
-    m[0x5B] = {zx(3, 2), kNoKey}; // 3
-    m[0x5C] = {zx(3, 3), kNoKey}; // 4
-    m[0x5D] = {zx(3, 4), kNoKey}; // 5
-    m[0x5E] = {zx(4, 4), kNoKey}; // 6
-    m[0x5F] = {zx(4, 3), kNoKey}; // 7
-    m[0x60] = {zx(4, 2), kNoKey}; // 8
-    m[0x61] = {zx(4, 1), kNoKey}; // 9
-    m[0x62] = {zx(4, 0), kNoKey}; // 0
-    m[0x58] = {zx(6, 0), kNoKey}; // Enter
+    m[0x59] = {zx(3, 0), kNoKey};    // 1
+    m[0x5a] = {zx(3, 1), kNoKey};    // 2
+    m[0x5b] = {zx(3, 2), kNoKey};    // 3
+    m[0x5c] = {zx(3, 3), kNoKey};    // 4
+    m[0x5d] = {zx(3, 4), kNoKey};    // 5
+    m[0x5e] = {zx(4, 4), kNoKey};    // 6
+    m[0x5f] = {zx(4, 3), kNoKey};    // 7
+    m[0x60] = {zx(4, 2), kNoKey};    // 8
+    m[0x61] = {zx(4, 1), kNoKey};    // 9
+    m[0x62] = {zx(4, 0), kNoKey};    // 0
+    m[0x58] = {zx(6, 0), kNoKey};    // Enter
     m[0x63] = {kSymShift, zx(7, 2)}; // . - SS+M
     m[0x54] = {kSymShift, zx(0, 4)}; // / - SS+V
     m[0x55] = {kSymShift, zx(7, 4)}; // * - SS+B
@@ -123,22 +128,22 @@ constexpr std::array<Combo, 512> build_keymap() {
 
     // Клавиши правки: как на Spectrum+.
     m[0x39] = {kCapsShift, zx(3, 1)}; // Caps Lock - CS+2
-    m[0x4B] = {kCapsShift, zx(3, 2)}; // PgUp - CS+3, TRUE VIDEO
-    m[0x4E] = {kCapsShift, zx(3, 3)}; // PgDn - CS+4, INV VIDEO
-    m[0x4C] = {kCapsShift, zx(4, 1)}; // Delete - CS+9, GRAPH
+    m[0x4b] = {kCapsShift, zx(3, 2)}; // PgUp - CS+3, TRUE VIDEO
+    m[0x4e] = {kCapsShift, zx(3, 3)}; // PgDn - CS+4, INV VIDEO
+    m[0x4c] = {kCapsShift, zx(4, 1)}; // Delete - CS+9, GRAPH
     m[0x35] = {kCapsShift, zx(3, 0)}; // ` - CS+1, EDIT
 
     // Знаки сравнения: на ПК их нечем набрать одной клавишей, поэтому они
     // сидят на трёх клавишах правки, которые машине иначе не нужны.
-    m[0x4A] = {kSymShift, zx(2, 0)}; // Home - SS+Q, <=
+    m[0x4a] = {kSymShift, zx(2, 0)}; // Home - SS+Q, <=
     m[0x49] = {kSymShift, zx(2, 1)}; // Insert - SS+W, <>
-    m[0x4D] = {kSymShift, zx(2, 2)}; // End - SS+E, >=
+    m[0x4d] = {kSymShift, zx(2, 2)}; // End - SS+E, >=
 
     // --- Верхний регистр: то же с левым Shift ---
     //
     // Знаки по раскладке US: что напечатано на верхней грани клавиши.
-    m[kShifted | 0x1E] = {kSymShift, zx(3, 0)}; // ! - SS+1
-    m[kShifted | 0x1F] = {kSymShift, zx(3, 1)}; // @ - SS+2
+    m[kShifted | 0x1e] = {kSymShift, zx(3, 0)}; // ! - SS+1
+    m[kShifted | 0x1f] = {kSymShift, zx(3, 1)}; // @ - SS+2
     m[kShifted | 0x20] = {kSymShift, zx(3, 2)}; // # - SS+3
     m[kShifted | 0x21] = {kSymShift, zx(3, 3)}; // $ - SS+4
     m[kShifted | 0x22] = {kSymShift, zx(3, 4)}; // % - SS+5
@@ -147,9 +152,9 @@ constexpr std::array<Combo, 512> build_keymap() {
     m[kShifted | 0x25] = {kSymShift, zx(7, 4)}; // * - SS+B
     m[kShifted | 0x26] = {kSymShift, zx(4, 2)}; // ( - SS+8
     m[kShifted | 0x27] = {kSymShift, zx(4, 1)}; // ) - SS+9
-    m[kShifted | 0x2D] = {kSymShift, zx(4, 0)}; // _ - SS+0
-    m[kShifted | 0x2E] = {kSymShift, zx(6, 2)}; // + - SS+K
-    m[kShifted | 0x2F] = {kSymShift, zx(1, 3)}; // { - SS+F
+    m[kShifted | 0x2d] = {kSymShift, zx(4, 0)}; // _ - SS+0
+    m[kShifted | 0x2e] = {kSymShift, zx(6, 2)}; // + - SS+K
+    m[kShifted | 0x2f] = {kSymShift, zx(1, 3)}; // { - SS+F
     m[kShifted | 0x30] = {kSymShift, zx(1, 4)}; // } - SS+G
     m[kShifted | 0x31] = {kSymShift, zx(1, 1)}; // | - SS+S
     m[kShifted | 0x33] = {kSymShift, zx(0, 1)}; // : - SS+Z
@@ -165,26 +170,46 @@ constexpr std::array<Combo, 512> kKeymap = build_keymap();
 
 // Разряды байта модификаторов загрузочного отчёта: слева Ctrl, Shift,
 // Alt, Gui, затем те же справа.
-constexpr uint8_t kModLeftCtrl = 0x01;
-constexpr uint8_t kModLeftShift = 0x02;
-constexpr uint8_t kModLeftAlt = 0x04;
-constexpr uint8_t kModRightCtrl = 0x10;
+constexpr uint8_t kModLeftCtrl   = 0x01;
+constexpr uint8_t kModLeftShift  = 0x02;
+constexpr uint8_t kModLeftAlt    = 0x04;
+constexpr uint8_t kModRightCtrl  = 0x10;
 constexpr uint8_t kModRightShift = 0x20;
-constexpr uint8_t kModRightAlt = 0x40;
+constexpr uint8_t kModRightAlt   = 0x40;
+constexpr uint8_t kModLeftGui    = 0x08;
+constexpr uint8_t kModRightGui   = 0x80;
 
 // Назначения HID тех же клавиш.
-constexpr uint8_t kUsageLeftShift = 0xE1;
+constexpr uint8_t kUsageLeftShift = 0xe1;
 
 ModifierRoles s_roles = ModifierRoles{};
+// Нажатий по кодам без записи в раскладке. Строка журнала с ненулевым
+// числом сразу говорит, что дело в раскладке, а не в дескрипторе.
+uint32_t s_unmapped = 0;
+MouseTuning s_mouse;
+// Остаток деления по каждой оси. Без него медленное движение
+// пропадает целиком: датчик шлёт приращения по единице, а при скорости
+// ниже четырёх четвертей каждое из них округляется в ноль.
+int32_t s_mouse_rem_x = 0;
+int32_t s_mouse_rem_y = 0;
+
+// Приращение в четвертях с накоплением остатка. Остаток того же
+// знака, что и частное: тогда движение туда-сюда не накапливает сдвиг.
+int32_t scale_with_remainder(int32_t delta, int32_t& rem) {
+    const int32_t total = delta * static_cast<int32_t>(s_mouse.speed) + rem;
+    const int32_t step  = total / 4;
+    rem                 = total - step * 4;
+    return step;
+}
 
 // --- Сигнальные клавиши ---
 //
 // Стоят выше раскладки: в матрице машины их нет ни в одной, поэтому
 // назначить их клавишам нельзя, а дёрнуть линии больше нечем. Сигнал
 // уходит на нажатие; пока клавиша держится, повтора нет.
-constexpr uint8_t kCodeNmi = 0x44;    // F11
-constexpr uint8_t kCodeReset = 0x45;  // F12
-constexpr uint8_t kCodeDelete = 0x4C; // в тройке Ctrl+Alt+Delete
+constexpr uint8_t kCodeNmi    = 0x44; // F11
+constexpr uint8_t kCodeReset  = 0x45; // F12
+constexpr uint8_t kCodeDelete = 0x4c; // в тройке Ctrl+Alt+Delete
 
 struct Signals {
     bool nmi;
@@ -192,9 +217,17 @@ struct Signals {
     bool del;
     bool ctrl;
     bool alt;
+    bool gui;
 };
 
-Signals s_signals = {false, false, false, false, false};
+Signals s_signals = {};
+
+// Win+F12 - вход в конфигуратор настроек. Одиночный F12 при этом машину
+// не сбрасывает: так же тройка Ctrl+Alt+Delete не отдаёт ей одиночный
+// Delete.
+bool config_combo(const Signals& s) {
+    return s.gui && s.reset;
+}
 
 // Сигнал взводится отпусканием: полный сброс перезапускает плату, и
 // зажатая тройка иначе сбрасывала бы её по кругу.
@@ -205,7 +238,6 @@ bool hard_combo(const Signals& s) {
     return s.ctrl && s.alt && s.del;
 }
 
-
 void note_signal(Signals& now, uint8_t code) {
     if (code == kCodeNmi) now.nmi = true;
     if (code == kCodeReset) now.reset = true;
@@ -213,17 +245,21 @@ void note_signal(Signals& now, uint8_t code) {
 }
 
 void fire_signals(const Signals& now) {
-    const bool quiet = !now.nmi && !now.reset && !hard_combo(now);
+    const bool quiet = !now.nmi && !now.reset && !hard_combo(now) && !config_combo(now);
     if (!s_signals_armed) {
         // Клавиши ещё не отпускали с подключения: сигнал не подаём, но
         // состояние помним - иначе отпускание не станет фронтом.
         s_signals_armed = quiet;
-        s_signals = now;
+        s_signals       = now;
         return;
     }
     if (hard_combo(now) && !hard_combo(s_signals)) hal::host_hard_reset_request();
     if (now.nmi && !s_signals.nmi) hal::host_nmi_request();
-    if (now.reset && !s_signals.reset) hal::host_reset_request();
+    if (config_combo(now) && !config_combo(s_signals)) {
+        hal::host_configurator_request();
+    } else if (now.reset && !s_signals.reset && !now.gui) {
+        hal::host_reset_request();
+    }
     s_signals = now;
 }
 
@@ -239,7 +275,7 @@ void press(uint8_t rows[kKeyboardRows], uint8_t key) {
     if (key == kNoKey) return;
     const uint8_t row = static_cast<uint8_t>(key >> 3);
     const uint8_t bit = static_cast<uint8_t>(key & 0x07);
-    rows[row] = static_cast<uint8_t>(rows[row] & ~(1u << bit));
+    rows[row]         = static_cast<uint8_t>(rows[row] & ~(1u << bit));
 }
 
 bool pressed(const uint8_t rows[kKeyboardRows], uint8_t key) {
@@ -250,10 +286,6 @@ void press_role(uint8_t rows[kKeyboardRows], ModRole role) {
     if (role == ModRole::CapsShift) press(rows, kCapsShift);
     if (role == ModRole::SymbolShift) press(rows, kSymShift);
 }
-
-} // namespace
-
-namespace {
 
 // Код клавиши в матрицу. При нажатом левом Shift сперва ищется запись
 // верхнего знака, и только если её нет - обычная. Возвращает false на
@@ -267,6 +299,13 @@ bool press_code(uint8_t rows[kKeyboardRows], uint8_t code, bool shifted) {
         index = static_cast<uint16_t>(kShifted | code);
     }
     const Combo& c = kKeymap[index];
+    // Записи нет - клавиша не нажимается, и это неотличимо от промаха
+    // дескриптора и от потери отчёта. Таких кодов много: F1..F10, Pause,
+    // PrintScreen, Menu, часть цифровой клавиатуры, всё выше 0x63.
+    if (c.first == kNoKey && c.second == kNoKey) {
+        ++s_unmapped;
+        return true;
+    }
     press(rows, c.first);
     press(rows, c.second);
     return true;
@@ -276,12 +315,23 @@ bool press_code(uint8_t rows[kKeyboardRows], uint8_t code, bool shifted) {
 // попадает: он не клавиша, а выбор верхнего знака.
 void press_modifier(uint8_t rows[kKeyboardRows], uint8_t usage) {
     switch (usage) {
-        case 0xE0: press_role(rows, s_roles.left_ctrl); break;
-        case 0xE2: press_role(rows, s_roles.left_alt); break;
-        case 0xE4: press_role(rows, s_roles.right_ctrl); break;
-        case 0xE5: press_role(rows, s_roles.right_shift); break;
-        case 0xE6: press_role(rows, s_roles.right_alt); break;
-        default: break; // клавиши Gui машине неизвестны
+        case 0xe0:
+            press_role(rows, s_roles.left_ctrl);
+            break;
+        case 0xe2:
+            press_role(rows, s_roles.left_alt);
+            break;
+        case 0xe4:
+            press_role(rows, s_roles.right_ctrl);
+            break;
+        case 0xe5:
+            press_role(rows, s_roles.right_shift);
+            break;
+        case 0xe6:
+            press_role(rows, s_roles.right_alt);
+            break;
+        default:
+            break; // клавиши Gui машине неизвестны
     }
 }
 
@@ -303,15 +353,18 @@ bool keyboard_from_map(const ReportMap& map, const uint8_t* report, uint16_t len
     if (!map.uses_report_ids) return false;
 
     uint8_t rows[kKeyboardRows];
-    for (uint8_t& r : rows) r = 0xFF;
+    for (uint8_t& r : rows) {
+        r = 0xff;
+    }
 
-    bool shifted = false;
-    Signals signals = {false, false, false, false, false};
+    bool shifted    = false;
+    Signals signals = {};
     for (uint8_t i = 0; i < k.modifier_count; ++i) {
         if (!report_button_read(k.modifier[i], report, len)) continue;
         const uint8_t usage = k.modifier_usage[i];
-        if (usage == 0xE0u || usage == 0xE4u) signals.ctrl = true;
-        if (usage == 0xE2u || usage == 0xE6u) signals.alt = true;
+        if (usage == 0xe0u || usage == 0xe4u) signals.ctrl = true;
+        if (usage == 0xe2u || usage == 0xe6u) signals.alt = true;
+        if (usage == 0xe3u || usage == 0xe7u) signals.gui = true;
         if (usage == kUsageLeftShift) {
             shifted = true;
             continue;
@@ -350,7 +403,9 @@ void usb_map_keyboard(const ReportMap& map, const uint8_t* report, uint16_t len)
     if (len < 8) return;
 
     uint8_t rows[kKeyboardRows];
-    for (uint8_t& r : rows) r = 0xFF;
+    for (uint8_t& r : rows) {
+        r = 0xff;
+    }
 
     const uint8_t mods = report[0];
     const bool shifted = (mods & kModLeftShift) != 0u;
@@ -360,9 +415,10 @@ void usb_map_keyboard(const ReportMap& map, const uint8_t* report, uint16_t len)
     if ((mods & kModLeftAlt) != 0u) press_role(rows, s_roles.left_alt);
     if ((mods & kModRightAlt) != 0u) press_role(rows, s_roles.right_alt);
 
-    Signals signals = {false, false, false, false, false};
-    signals.ctrl = (mods & (kModLeftCtrl | kModRightCtrl)) != 0u;
-    signals.alt = (mods & (kModLeftAlt | kModRightAlt)) != 0u;
+    Signals signals = {};
+    signals.ctrl    = (mods & (kModLeftCtrl | kModRightCtrl)) != 0u;
+    signals.alt     = (mods & (kModLeftAlt | kModRightAlt)) != 0u;
+    signals.gui     = (mods & (kModLeftGui | kModRightGui)) != 0u;
     for (uint16_t i = 2; i < 8; ++i) {
         note_signal(signals, report[i]);
         if (report[i] == kCodeDelete && signals.ctrl && signals.alt) continue;
@@ -382,35 +438,48 @@ void usb_map_set_modifiers(const ModifierRoles& roles) {
     s_roles = roles;
 }
 
+void usb_map_set_mouse(const MouseTuning& t) {
+    s_mouse = t;
+    if (s_mouse.speed == 0) s_mouse.speed = 1;
+    s_mouse_rem_x = 0;
+    s_mouse_rem_y = 0;
+}
+
 ModifierRoles usb_map_modifiers() {
     return s_roles;
+}
+
+uint32_t usb_map_unmapped_presses() {
+    return s_unmapped;
 }
 
 void usb_map_keyboard_release_all() {
     // Устройство отключено: состояние сигнальных клавиш снимается, а
     // подать сигнал снова сможет только отпускание.
-    s_signals = Signals{false, false, false, false, false};
+    s_signals       = Signals{};
     s_signals_armed = false;
     keyboard_reset();
 }
 
-void usb_map_mouse(const ReportMap& map, const uint8_t* report, uint16_t len) {
+void SOUNDSINTH_HOT_PATH(usb_map_mouse)(const ReportMap& map, const uint8_t* report, uint16_t len) {
     if (report == nullptr) return;
 
     // Кнопки по карте: порядок HID - левая, правая, средняя.
-    uint8_t zx_buttons = kMouseButtonsIdle;
+    const uint8_t first  = s_mouse.swap_buttons ? kMouseButtonRight : kMouseButtonLeft;
+    const uint8_t second = s_mouse.swap_buttons ? kMouseButtonLeft : kMouseButtonRight;
+    uint8_t zx_buttons   = kMouseButtonsIdle;
     if (map.button_count > 0 && report_button_read(map.button[0], report, len)) {
-        zx_buttons &= static_cast<uint8_t>(~kMouseButtonLeft);
+        zx_buttons &= static_cast<uint8_t>(~first);
     }
     if (map.button_count > 1 && report_button_read(map.button[1], report, len)) {
-        zx_buttons &= static_cast<uint8_t>(~kMouseButtonRight);
+        zx_buttons &= static_cast<uint8_t>(~second);
     }
     if (map.button_count > 2 && report_button_read(map.button[2], report, len)) {
         zx_buttons &= static_cast<uint8_t>(~kMouseButtonMiddle);
     }
 
-    int32_t dx = 0;
-    int32_t dy = 0;
+    int32_t dx       = 0;
+    int32_t dy       = 0;
     const bool got_x = report_field_read(map.axis[static_cast<uint8_t>(Axis::X)], report, len, dx);
     const bool got_y = report_field_read(map.axis[static_cast<uint8_t>(Axis::Y)], report, len, dy);
     // Отчёт не того номера: он не про мышь, состояние не трогаем.
@@ -419,6 +488,8 @@ void usb_map_mouse(const ReportMap& map, const uint8_t* report, uint16_t len) {
     mouse_set_buttons(zx_buttons);
     // Y у Kempston растёт вверх, у USB вниз. Приращение обрезается байтом:
     // счётчик у Kempston восьмиразрядный.
+    dx = scale_with_remainder(dx, s_mouse_rem_x);
+    dy = scale_with_remainder(dy, s_mouse_rem_y);
     mouse_move(clamp_i8(dx), clamp_i8(-dy));
 
     // Колесо - в старшую половину порта кнопок.
@@ -435,27 +506,35 @@ namespace {
 uint8_t axis_bits(const Field& f, int32_t value, uint8_t low_bit, uint8_t high_bit) {
     if (!f.present() || f.logical_max <= f.logical_min) return 0;
     const int32_t centre = f.logical_min + (f.logical_max - f.logical_min) / 2;
-    const int32_t dead = (f.logical_max - f.logical_min) / 8;
+    const int32_t dead   = (f.logical_max - f.logical_min) / 8;
     if (value < centre - dead) return low_bit;
     if (value > centre + dead) return high_bit;
     return 0;
 }
 
 // Шляпка: восемь положений по часовой стрелке от "вверх", всё прочее -
-// покой. Логический минимум сдвигает отсчёт: у одних пультов он ноль, у
+// покой. Логический минимум сдвигает отсчёт: у одних геймпадов он ноль, у
 // других единица.
 uint8_t hat_bits(const Field& f, int32_t value) {
     const int32_t dir = value - f.logical_min;
     if (dir < 0 || dir > 7) return 0;
     switch (dir) {
-        case 0: return kJoyUp;
-        case 1: return static_cast<uint8_t>(kJoyUp | kJoyRight);
-        case 2: return kJoyRight;
-        case 3: return static_cast<uint8_t>(kJoyDown | kJoyRight);
-        case 4: return kJoyDown;
-        case 5: return static_cast<uint8_t>(kJoyDown | kJoyLeft);
-        case 6: return kJoyLeft;
-        default: return static_cast<uint8_t>(kJoyUp | kJoyLeft);
+        case 0:
+            return kJoyUp;
+        case 1:
+            return static_cast<uint8_t>(kJoyUp | kJoyRight);
+        case 2:
+            return kJoyRight;
+        case 3:
+            return static_cast<uint8_t>(kJoyDown | kJoyRight);
+        case 4:
+            return kJoyDown;
+        case 5:
+            return static_cast<uint8_t>(kJoyDown | kJoyLeft);
+        case 6:
+            return kJoyLeft;
+        default:
+            return static_cast<uint8_t>(kJoyUp | kJoyLeft);
     }
 }
 
@@ -465,29 +544,29 @@ void usb_map_gamepad(const ReportMap& map, const uint8_t* report, uint16_t len) 
     if (report == nullptr) return;
 
     uint8_t bits = 0;
-    bool seen = false;
+    bool seen    = false;
 
     const Field& fx = map.axis[static_cast<uint8_t>(Axis::X)];
     const Field& fy = map.axis[static_cast<uint8_t>(Axis::Y)];
-    int32_t v = 0;
+    int32_t v       = 0;
     if (report_field_read(fx, report, len, v)) {
         bits |= axis_bits(fx, v, kJoyLeft, kJoyRight);
-        seen = true;
+        seen  = true;
     }
     if (report_field_read(fy, report, len, v)) {
         bits |= axis_bits(fy, v, kJoyUp, kJoyDown);
-        seen = true;
+        seen  = true;
     }
-    // Шляпка дополняет оси, а не заменяет: на пультах с обоими работают оба.
+    // Шляпка дополняет оси, а не заменяет: на геймпадах с обоими работают оба.
     if (report_field_read(map.hat, report, len, v)) {
         bits |= hat_bits(map.hat, v);
-        seen = true;
+        seen  = true;
     }
 
     for (uint8_t i = 0; i < map.button_count; ++i) {
         if (!report_button_read(map.button[i], report, len)) continue;
         bits |= kJoyFire;
-        seen = true;
+        seen  = true;
         break;
     }
 

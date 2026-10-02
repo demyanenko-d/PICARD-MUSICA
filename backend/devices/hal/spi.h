@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 #pragma once
 
 // Шина SPI под карту памяти: всё платформенное, что нужно протоколу.

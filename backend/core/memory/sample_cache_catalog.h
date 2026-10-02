@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 #pragma once
 
 // Каталог резидентных сэмплов трека. Ёмкость - с запасом над максимумом
@@ -11,24 +12,24 @@
 namespace soundsinth::memory {
 
 inline constexpr uint16_t kSampleCacheCatalogCapacity = 512;
-inline constexpr uint16_t kSampleCacheFreeSlot = 0xffffu;
+inline constexpr uint16_t kSampleCacheFreeSlot        = 0xffffu;
 
 // Причина отказа загрузки сэмпла "в каталоге нет слота": одна строка на все
 // загрузчики, вызывающий сравнивает указатель. Отличает отказ, который лечит
 // вытеснение записи без страниц, от нехватки PSRAM.
-inline constexpr char kSampleCatalogFull[] = "в каталоге сэмплов нет места";
+inline constexpr char kSampleCatalogFull[] = "no room in the sample catalog";
 
 struct SampleCacheEntry {
     // Индекс в Song::samples[], kSampleCacheFreeSlot - слот свободен. Ключ
     // публикации: пишется последним (sample_cache_alloc_slot), читатель на
     // другом ядре - sample_cache_find.
     std::atomic<uint16_t> sample_index{kSampleCacheFreeSlot};
-    uint16_t first_page = 0;                       // первая страница цепочки в зоне сэмплов PsramStore
+    uint16_t first_page = 0; // первая страница цепочки в зоне сэмплов PsramStore
     // Первая страница контрольных точек Dpcm8, в той же цепочке после данных; kPageChainEnd - точек нет.
     uint16_t checkpoint_first_page = kPageChainEnd;
 };
 // Каждые 2 байта записи - 1 КБ SRAM на kSampleCacheCatalogCapacity слотах.
-static_assert(sizeof(SampleCacheEntry) == 6, "запись каталога выросла");
+static_assert(sizeof(SampleCacheEntry) == 6, "the catalog entry has grown");
 
 struct SampleCacheCatalog {
     SampleCacheEntry entries[kSampleCacheCatalogCapacity];
@@ -46,7 +47,7 @@ SampleCacheEntry* sample_cache_find(SampleCacheCatalog& catalog, uint16_t sample
 // Занимает первый свободный слот; nullptr, если каталог полон (заняты
 // все kSampleCacheCatalogCapacity). Вытеснение - забота вызывающего.
 SampleCacheEntry* sample_cache_alloc_slot(SampleCacheCatalog& catalog, uint16_t sample_index, uint16_t first_page,
-                                           uint16_t checkpoint_first_page = kPageChainEnd);
+                                          uint16_t checkpoint_first_page = kPageChainEnd);
 
 // Снимает ключ; страницы вызывающий освобождает только после этого.
 // Читателя, который ключ уже увидел (между sample_cache_find и чтением

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 #include "platform/log_rings.h"
 
 #include <atomic>
@@ -106,13 +107,15 @@ uint32_t platform::log_drain(uint32_t max_bytes) {
     return sent;
 }
 
-bool platform::log_pending() { return debug_ring::pending(s_ring, s_drain); }
+bool platform::log_pending() {
+    return debug_ring::pending(s_ring, s_drain);
+}
 
 bool platform::log_service(uint32_t max_bytes) {
     log_drain(max_bytes);
 
     // По неполному журналу без пометки ставят неверный диагноз.
-    static uint32_t s_last_dropped = 0;
+    static uint32_t s_last_dropped   = 0;
     static uint32_t s_last_isr_calls = 0;
     static uint32_t s_last_truncated = 0;
 
@@ -123,14 +126,14 @@ bool platform::log_service(uint32_t max_bytes) {
     }
     const uint32_t isr_calls = log_isr_calls();
     if (isr_calls != s_last_isr_calls) {
-        debug_logf("log: из прерываний %u строк не записано\n", static_cast<unsigned>(isr_calls));
+        debug_logf("log: %u lines not written from ISR\n", static_cast<unsigned>(isr_calls));
         s_last_isr_calls = isr_calls;
     }
     // Обрезанные строки - отдельно от потерь кольца: там журнал не успевал,
     // здесь буфер debug_logf короток для этой строки.
     const uint32_t truncated = log_truncated();
     if (truncated != s_last_truncated) {
-        debug_logf("log: TRUNC %u строк не влезли в буфер\n", static_cast<unsigned>(truncated));
+        debug_logf("log: TRUNC %u lines did not fit the buffer\n", static_cast<unsigned>(truncated));
         s_last_truncated = truncated;
     }
     return log_pending();
@@ -151,10 +154,18 @@ uint32_t platform::log_dropped() {
     return s_ring[0].dropped.load(std::memory_order_relaxed) + s_ring[1].dropped.load(std::memory_order_relaxed);
 }
 
-uint32_t platform::log_isr_calls() { return s_isr_calls.load(std::memory_order_relaxed); }
+uint32_t platform::log_isr_calls() {
+    return s_isr_calls.load(std::memory_order_relaxed);
+}
 
-uint32_t platform::log_truncated() { return s_truncated.load(std::memory_order_relaxed); }
+uint32_t platform::log_truncated() {
+    return s_truncated.load(std::memory_order_relaxed);
+}
 
-void platform::log_go_direct() { s_direct.store(true, std::memory_order_release); }
+void platform::log_go_direct() {
+    s_direct.store(true, std::memory_order_release);
+}
 
-void platform::log_use_rings() { s_direct.store(false, std::memory_order_release); }
+void platform::log_use_rings() {
+    s_direct.store(false, std::memory_order_release);
+}

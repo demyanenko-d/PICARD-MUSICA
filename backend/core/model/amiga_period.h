@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 #pragma once
 
 // Период ProTracker (finetune 0) <-> нота. Общее для загрузчика MOD
@@ -16,8 +17,8 @@ inline constexpr uint16_t kAmigaPeriodTable[36] = {
     856, 808, 762, 720, 678, 640, 604, 570, 538, 508, 480, 453, 428, 404, 381, 360, 339, 320,
     302, 285, 269, 254, 240, 226, 214, 202, 190, 180, 170, 160, 151, 143, 135, 127, 120, 113,
 };
-inline constexpr uint8_t kAmigaFirstNote = 36;
-inline constexpr uint8_t kAmigaLastNote = static_cast<uint8_t>(kAmigaFirstNote + std::size(kAmigaPeriodTable) - 1);
+inline constexpr uint8_t kAmigaFirstNote  = 36;
+inline constexpr uint8_t kAmigaLastNote   = static_cast<uint8_t>(kAmigaFirstNote + std::size(kAmigaPeriodTable) - 1);
 inline constexpr uint16_t kAmigaPeriodMax = kAmigaPeriodTable[0];
 inline constexpr uint16_t kAmigaPeriodMin = kAmigaPeriodTable[std::size(kAmigaPeriodTable) - 1];
 
@@ -47,7 +48,7 @@ uint16_t amiga_snap_period(uint16_t period, bool nearest);
 // флага OpenMPT ноты вне трёх октав не режет (у S3M без флага это около 10%
 // нот).
 inline uint16_t clamp_amiga_period(int32_t period, bool amiga_limits) {
-    const int32_t low = amiga_limits ? kAmigaPeriodMin : 1;
+    const int32_t low  = amiga_limits ? kAmigaPeriodMin : 1;
     const int32_t high = amiga_limits ? kAmigaPeriodMax : 0xffff;
     if (period < low) return static_cast<uint16_t>(low);
     if (period > high) return static_cast<uint16_t>(high);

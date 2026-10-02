@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 #include "testing.h"
 
 #include <vector>
@@ -117,7 +118,8 @@ void test_sysex_long_and_broken() {
     Rom rom;
     rom.select(kAyRegPortA);
     rom.byte(0xF0);
-    for (uint8_t i = 0; i < 40; ++i) rom.byte(static_cast<uint8_t>(i));
+    for (uint8_t i = 0; i < 40; ++i)
+        rom.byte(static_cast<uint8_t>(i));
     rom.byte(0xF7);
     rom.byte(0xF0);
     rom.byte(0x7e);
@@ -144,7 +146,8 @@ void test_framing_error_resyncs() {
     Rom rom;
     rom.select(kAyRegPortA);
     rom.bit(false);
-    for (int i = 0; i < 8; ++i) rom.bit(true);
+    for (int i = 0; i < 8; ++i)
+        rom.bit(true);
     rom.bit(false); // вместо стоп-бита
     rom.bit(true);  // покой
     rom.byte(0x90);

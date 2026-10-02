@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 #pragma once
 
 // Тонкая обёртка над formats::ByteSource: число и порядок вызовов
@@ -35,8 +36,7 @@ public:
     uint32_t u32() {
         uint8_t b[4];
         read_raw(b, 4);
-        return static_cast<uint32_t>(b[0]) | (static_cast<uint32_t>(b[1]) << 8) |
-               (static_cast<uint32_t>(b[2]) << 16) | (static_cast<uint32_t>(b[3]) << 24);
+        return static_cast<uint32_t>(b[0]) | (static_cast<uint32_t>(b[1]) << 8) | (static_cast<uint32_t>(b[2]) << 16) | (static_cast<uint32_t>(b[3]) << 24);
     }
 
     // Читает n байт как есть (имена, сырые блоки под распаковку).
@@ -77,7 +77,7 @@ private:
 
     ByteSource src_;
     uint32_t pos_ = 0;
-    bool ok_ = true;
+    bool ok_      = true;
 };
 
 } // namespace soundsinth::formats

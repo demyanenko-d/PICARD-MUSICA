@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 #include "core/formats/midi_convert.h"
 
 #include <cmath>
@@ -56,7 +57,7 @@ uint8_t cell_volume(uint8_t velocity, uint8_t cc7, uint8_t cc11) {
 // выписывается заново.
 uint8_t vibrato_speed_at(uint32_t tempo) {
     const uint32_t tps = engine_ticks_per_second(tempo);
-    uint32_t vs = (64u * 5u + tps / 2u) / tps;
+    uint32_t vs        = (64u * 5u + tps / 2u) / tps;
     if (vs < 1) vs = 1;
     if (vs > 15) vs = 15;
     return static_cast<uint8_t>(vs);
@@ -67,15 +68,15 @@ uint8_t vibrato_speed_at(uint32_t tempo) {
 void init_song_header(Song& out, Grid grid, uint32_t tracker_tempo) {
     // Song заново, на месте: копия Song{} стояла бы в кадре на стеке
     // Core1 (около 250 байт). Деструктор тривиален.
-    static_assert(std::is_trivially_destructible_v<Song>, "Song создаётся поверх прежнего");
+    static_assert(std::is_trivially_destructible_v<Song>, "Song is constructed over the previous one");
     new (&out) Song();
     std::snprintf(out.title, sizeof(out.title), "MIDI");
     out.frequency_model = soundsinth::model::FrequencyModel::Linear;
     // Доезд громкости 5 мс вместо 1.
-    out.volume_ramp_samples = 220;
-    out.quirks |= soundsinth::model::kQuirkItLinearC5Reference;
-    out.quirks |= soundsinth::model::kQuirkFadeoutExponential;
-    out.quirks |= soundsinth::model::kQuirkEnvelopeDecibel;
+    out.volume_ramp_samples  = 220;
+    out.quirks              |= soundsinth::model::kQuirkItLinearC5Reference;
+    out.quirks              |= soundsinth::model::kQuirkFadeoutExponential;
+    out.quirks              |= soundsinth::model::kQuirkEnvelopeDecibel;
     // Интерполяция линейная: эрмитова на DREAM.MID с SGM на слух не
     // отличается, а стоит копии цикла рендера в SRAM и тактов на отсчёт; по
     // замеру зеркала сэмплов на 22050 Гц выше 10 кГц в тихих местах -83 дБFS
@@ -83,9 +84,9 @@ void init_song_header(Song& out, Grid grid, uint32_t tracker_tempo) {
     // Огибающие и затухание переводятся из миллисекунд ниже по стартовому темпу;
     // при смене темпа по ходу трека движок их пересчитывает.
     out.envelopes_in_real_time = true;
-    out.default_speed = grid.ticks_per_row;
-    out.default_tempo = static_cast<uint16_t>(tracker_tempo);
-    out.default_global_volume = 128;
+    out.default_speed          = grid.ticks_per_row;
+    out.default_tempo          = static_cast<uint16_t>(tracker_tempo);
+    out.default_global_volume  = 128;
     // Панорама по корню (синус-косинус SF2-синтезаторов): центр 0.707 в каждую
     // сторону вместо 0.5, края те же; по восьми файлам с эталоном отклонение
     // RMS 1.00 дБ против 3.34 у линейной. Без квирка FT2: половины стереопары
@@ -95,11 +96,11 @@ void init_song_header(Song& out, Grid grid, uint32_t tracker_tempo) {
     // и лимитера): 80/128 = 0.625. При 64 тише эталона на 2.0 дБ (SGM), 2.35
     // (GeneralUser без его +6 дБ при выпечке), 0.8 (Timbres of Heaven); десять
     // файлов, первые 60 с, RMS.
-    out.sample_preamp = 80;
+    out.sample_preamp       = 80;
     out.filter_follows_note = true;
     // Шкала среза банка - 16 делений на октаву, отклик фильтра как в SF2.
     out.filter_units_per_octave = soundsinth::model::kFilterUnitsMid;
-    out.filter_sf2_response = true;
+    out.filter_sf2_response     = true;
     // Общий ревербератор нужен только здесь: у трекерных форматов посылов нет,
     // и движок не трогает ни шину, ни ревербератор. Включает его первый
     // ненулевой посыл, выписанный в ячейки: без CC91 > 0 (половина архива) шина
@@ -109,7 +110,7 @@ void init_song_header(Song& out, Grid grid, uint32_t tracker_tempo) {
     // не обрезается полкой, а мягко насыщается: до 0.75 шкалы сигнал не тронут,
     // выше загибается к шкале. Громкий банк перегружает сумму, как и у эталона:
     // у Timbres of Heaven эталон уходит за шкалу на 11.5..13.7 дБ пика.
-    out.limiter_enabled = false;
+    out.limiter_enabled   = false;
     out.soft_clip_enabled = true;
 }
 
@@ -126,16 +127,15 @@ void instrument_from_bank(const bank::BankInstrument& bi, uint32_t ticks_per_sec
     // инструмент - такой фильтр не включается; в GeneralUser GS 2.0.3 таких
     // инструментов 8 из 3807.
     constexpr uint8_t kMinUsableCutoff = 21;
-    const bool filter_on =
-        bi.env_filter != bank::kNoIndex || (bi.filter_cutoff < 127 && bi.filter_cutoff >= kMinUsableCutoff);
+    const bool filter_on               = bi.env_filter != bank::kNoIndex || (bi.filter_cutoff < 127 && bi.filter_cutoff >= kMinUsableCutoff);
     if (filter_on) {
-        ins.filter_cutoff = static_cast<uint8_t>(bi.filter_cutoff | 0x80u);
+        ins.filter_cutoff    = static_cast<uint8_t>(bi.filter_cutoff | 0x80u);
         ins.filter_resonance = static_cast<uint8_t>(bi.filter_resonance | 0x80u);
         // Яркость от силы удара (Instrument::velocity_to_cutoff) - только при
         // включённом фильтре: открытому срезу двигать нечего.
         ins.velocity_to_cutoff = bi.velocity_to_cutoff;
     } else {
-        ins.filter_cutoff = 127;
+        ins.filter_cutoff    = 127;
         ins.filter_resonance = 0;
     }
     // NNA Off: голос, на канал которого легла новая нота, уходит в фоновый
@@ -143,9 +143,9 @@ void instrument_from_bank(const bank::BankInstrument& bi, uint32_t ticks_per_sec
     // терял хвосты). Банк хранит Cut. Исключение - инструменты с
     // exclusiveClass: их обрыв конвертер пишет командой NoteCut в канал, до
     // хвоста в фоновом пуле она не дотянется.
-    ins.nna = bi.exclusive_class != 0 ? static_cast<soundsinth::model::NewNoteAction>(bi.nna) : soundsinth::model::NewNoteAction::Off;
-    ins.dct = static_cast<soundsinth::model::DuplicateCheckType>(bi.dct);
-    ins.dca = static_cast<soundsinth::model::DuplicateCheckAction>(bi.dca);
+    ins.nna                = bi.exclusive_class != 0 ? static_cast<soundsinth::model::NewNoteAction>(bi.nna) : soundsinth::model::NewNoteAction::Off;
+    ins.dct                = static_cast<soundsinth::model::DuplicateCheckType>(bi.dct);
+    ins.dca                = static_cast<soundsinth::model::DuplicateCheckAction>(bi.dca);
     ins.instrument_panning = bi.instrument_panning;
 
     // Затухание: банк держит миллисекунды, частота тиков зависит от темпа
@@ -155,66 +155,62 @@ void instrument_from_bank(const bank::BankInstrument& bi, uint32_t ticks_per_sec
         // (-48 дБ), множитель на тик - корень степени ticks из 256/65536. Число
         // тиков дробное, не округлять: на релизе в 3.2 тика округление до 3 гасит
         // хвост на 7% быстрее.
-        const double ticks =
-            static_cast<double>(bi.fadeout_ms) * static_cast<double>(ticks_per_second_rounded) / 1000.0;
-        ins.fadeout_rate =
-            ticks > 0.0 ? static_cast<uint32_t>(65536.0 * std::pow(256.0 / 65536.0, 1.0 / ticks) + 0.5) : 0u;
+        const double ticks = static_cast<double>(bi.fadeout_ms) * static_cast<double>(ticks_per_second_rounded) / 1000.0;
+        ins.fadeout_rate   = ticks > 0.0 ? static_cast<uint32_t>(65536.0 * std::pow(256.0 / 65536.0, 1.0 / ticks) + 0.5) : 0u;
         if (ins.fadeout_rate >= 65536u) ins.fadeout_rate = 65535u;
     }
 }
 
 // Огибающая банка -> огибающая песни; миллисекунды - в тики.
 void envelope_from_bank(const bank::BankEnvelope& be, uint32_t ticks_per_second_rounded, Envelope& env) {
-    env.enabled = (be.flags & bank::kEnvEnabledBit) != 0;
+    env.enabled         = (be.flags & bank::kEnvEnabledBit) != 0;
     env.sustain_enabled = (be.flags & bank::kEnvSustainBit) != 0;
-    env.loop_enabled = (be.flags & bank::kEnvLoopBit) != 0;
-    env.carry = (be.flags & bank::kEnvCarryBit) != 0;
+    env.loop_enabled    = (be.flags & bank::kEnvLoopBit) != 0;
+    env.carry           = (be.flags & bank::kEnvCarryBit) != 0;
     // Точки, попавшие в один тик, сливаются: поздняя заменяет раннюю по
     // значению, тик остаётся общим. Атака короче тика выходит мгновенной, а
     // длиннее - ложится по времени с точностью до тика. Разводить такие точки
     // по соседним тикам нельзя: сдвиги копятся и растягивают атаку, а равные
     // тики движок не играет. Номера точек сустейна и петли - на новые места.
     uint8_t remap[soundsinth::model::kMaxEnvelopePoints] = {};
-    uint8_t written = 0;
+    uint8_t written                                      = 0;
     for (uint8_t k = 0; k < be.point_count && k < soundsinth::model::kMaxEnvelopePoints; ++k) {
         // Миллисекунды в тики: банк от темпа файла не зависит.
         const uint32_t ms_ticks = (static_cast<uint32_t>(be.points[k].ms) * ticks_per_second_rounded + 500u) / 1000u;
-        const uint16_t tick = static_cast<uint16_t>(ms_ticks > 65535u ? 65535u : ms_ticks);
+        const uint16_t tick     = static_cast<uint16_t>(ms_ticks > 65535u ? 65535u : ms_ticks);
         if (written && tick <= env.points[written - 1].tick) {
             env.points[written - 1].value = be.points[k].value;
-            remap[k] = static_cast<uint8_t>(written - 1);
+            remap[k]                      = static_cast<uint8_t>(written - 1);
             continue;
         }
-        env.points[written].tick = tick;
+        env.points[written].tick  = tick;
         env.points[written].value = be.points[k].value;
-        remap[k] = written;
+        remap[k]                  = written;
         ++written;
     }
-    env.point_count = written;
-    auto moved = [&](uint8_t point) {
-        return point < be.point_count && point < soundsinth::model::kMaxEnvelopePoints ? remap[point] : point;
-    };
+    env.point_count   = written;
+    auto moved        = [&](uint8_t point) { return point < be.point_count && point < soundsinth::model::kMaxEnvelopePoints ? remap[point] : point; };
     env.sustain_point = moved(be.sustain_point);
-    env.sustain_end = moved(be.sustain_end);
-    env.loop_start = moved(be.loop_start);
-    env.loop_end = moved(be.loop_end);
+    env.sustain_end   = moved(be.sustain_end);
+    env.loop_start    = moved(be.loop_start);
+    env.loop_end      = moved(be.loop_end);
 }
 
 // Запись сэмпла песни из сэмпла банка bs; PCM не трогается.
 void sample_from_bank(const bank::Bank& bank, uint16_t bs, SampleDescriptor& d) {
     const bank::BankSample& src_s = bank.samples[bs];
-    d.resident_encoding = static_cast<soundsinth::model::ResidentEncoding>(src_s.resident_encoding);
-    d.channels = 1;
-    d.length_samples = src_s.length_samples;
-    d.loop_enabled = (src_s.flags & bank::kSampleLoopBit) != 0;
-    d.loop_start = src_s.loop_start;
-    d.loop_end = src_s.loop_end;
-    d.c5_speed = src_s.c5_speed; // корневая нота и подстройка уже сложены препроцессором
-    d.relative_note = 0;
-    d.finetune = 0;
-    d.default_volume = src_s.default_volume;
-    d.global_volume = src_s.global_volume;
-    d.default_panning = src_s.default_panning;
+    d.resident_encoding           = static_cast<soundsinth::model::ResidentEncoding>(src_s.resident_encoding);
+    d.channels                    = 1;
+    d.length_samples              = src_s.length_samples;
+    d.loop_enabled                = (src_s.flags & bank::kSampleLoopBit) != 0;
+    d.loop_start                  = src_s.loop_start;
+    d.loop_end                    = src_s.loop_end;
+    d.c5_speed                    = src_s.c5_speed; // корневая нота и подстройка уже сложены препроцессором
+    d.relative_note               = 0;
+    d.finetune                    = 0;
+    d.default_volume              = src_s.default_volume;
+    d.global_volume               = src_s.global_volume;
+    d.default_panning             = src_s.default_panning;
     // file_offset у .mid хранит индекс сэмпла банка: сэмплы приходят из банка,
     // а не из файла. По нему load_sample_from_bank находит, что распаковывать
     // при догрузке. Планировщик порядка сортирует по этому полю, чтобы хост не
@@ -225,11 +221,10 @@ void sample_from_bank(const bank::Bank& bank, uint16_t bs, SampleDescriptor& d) 
 // Инструмент песни i из инструмента банка used_instruments[i]: фильтр,
 // NNA, затухание, огибающие (общие с инструментами 0..i-1 - одной копией)
 // и keymap с перенумерацией сэмплов. Инструменты 0..i-1 уже построены.
-const char* build_instrument(Song& out, memory::TrackMemory& mem, const bank::Bank& bank,
-                             const uint16_t* used_instruments, uint16_t i, const uint16_t* bank_to_song_sample,
-                             uint32_t ticks_per_second_rounded, uint32_t& env_copies) {
+const char* build_instrument(Song& out, memory::TrackMemory& mem, const bank::Bank& bank, const uint16_t* used_instruments, uint16_t i,
+                             const uint16_t* bank_to_song_sample, uint32_t ticks_per_second_rounded, uint32_t& env_copies) {
     const bank::BankInstrument& bi = bank.instruments[used_instruments[i]];
-    Instrument& ins = out.instruments[i];
+    Instrument& ins                = out.instruments[i];
     instrument_from_bank(bi, ticks_per_second_rounded, ins);
 
     // Огибающая банка -> огибающая песни, общая у всех инструментов с тем же
@@ -243,7 +238,7 @@ const char* build_instrument(Song& out, memory::TrackMemory& mem, const bank::Ba
     auto copy_envelope = [&](uint16_t bank_index) -> const Envelope* {
         for (uint16_t k = 0; k <= i; ++k) {
             const bank::BankInstrument& bk = bank.instruments[used_instruments[k]];
-            const Instrument& built = out.instruments[k];
+            const Instrument& built        = out.instruments[k];
             if (bk.env_volume == bank_index && built.volume_envelope) return built.volume_envelope;
             if (k < i && bk.env_filter == bank_index && built.filter_envelope) return built.filter_envelope;
         }
@@ -255,47 +250,43 @@ const char* build_instrument(Song& out, memory::TrackMemory& mem, const bank::Ba
     };
     if (bi.env_volume != bank::kNoIndex) {
         ins.volume_envelope = copy_envelope(bi.env_volume);
-        if (!ins.volume_envelope) return "резидентная память переполнена (огибающие)";
+        if (!ins.volume_envelope) return "resident memory overflowed (envelopes)";
     }
     if (bi.env_filter != bank::kNoIndex) {
         ins.filter_envelope = copy_envelope(bi.env_filter);
-        if (!ins.filter_envelope) return "резидентная память переполнена (огибающие)";
+        if (!ins.filter_envelope) return "resident memory overflowed (envelopes)";
     }
 
     KeymapRange* km = memory::arena_new<KeymapRange>(mem.resident, bi.keymap_count);
-    if (!km) return "резидентная память переполнена (keymap)";
+    if (!km) return "resident memory overflowed (keymap)";
     fill_keymap(bank, bi, bank_to_song_sample, km);
-    ins.note_to_sample_ranges = km;
+    ins.note_to_sample_ranges      = km;
     ins.note_to_sample_range_count = static_cast<uint8_t>(bi.keymap_count > 255 ? 255 : bi.keymap_count);
-    ins.default_sample_index = 0;
+    ins.default_sample_index       = 0;
     return nullptr;
 }
 
 // Keymap копируется с перенумерацией сэмплов банка в сэмплы песни.
-void fill_keymap(const bank::Bank& bank, const bank::BankInstrument& bi, const uint16_t* bank_to_song_sample,
-                 KeymapRange* km) {
+void fill_keymap(const bank::Bank& bank, const bank::BankInstrument& bi, const uint16_t* bank_to_song_sample, KeymapRange* km) {
     for (uint16_t k = 0; k < bi.keymap_count; ++k) {
         const bank::BankKeymapRange& r = bank.keymap[bi.keymap_first + k];
-        km[k].start_note = r.start_note;
-        km[k].note_offset = static_cast<int8_t>(r.note_offset_s8);
-        km[k].sample_index = (r.sample_index == bank::kNoSample || bank_to_song_sample[r.sample_index] == 0xffff)
-                                 ? soundsinth::model::kNoSample
-                                 : bank_to_song_sample[r.sample_index];
+        km[k].start_note               = r.start_note;
+        km[k].note_offset              = static_cast<int8_t>(r.note_offset_s8);
+        km[k].sample_index             = (r.sample_index == bank::kNoSample || bank_to_song_sample[r.sample_index] == 0xffff) ? soundsinth::model::kNoSample
+                                                                                                                              : bank_to_song_sample[r.sample_index];
     }
 }
 
 // Инструменты и сэмплы песни из банка, все разом после разбора файла.
 // nullptr - готово, иначе причина отказа; env_copies - огибающих в арене.
-const char* build_instruments(Song& out, memory::TrackMemory& mem, const bank::Bank& bank,
-                              const uint16_t* used_instruments, uint16_t used_instrument_count,
-                              uint16_t used_sample_count, const uint16_t* bank_to_song_sample,
-                              uint32_t ticks_per_second_rounded, uint32_t& env_copies) {
-    out.channel_count = kMaxChannels;
+const char* build_instruments(Song& out, memory::TrackMemory& mem, const bank::Bank& bank, const uint16_t* used_instruments, uint16_t used_instrument_count,
+                              uint16_t used_sample_count, const uint16_t* bank_to_song_sample, uint32_t ticks_per_second_rounded, uint32_t& env_copies) {
+    out.channel_count    = kMaxChannels;
     out.instrument_count = used_instrument_count;
-    out.sample_count = used_sample_count;
-    out.instruments = memory::arena_new<Instrument>(mem.resident, used_instrument_count);
-    out.samples = memory::arena_new<SampleDescriptor>(mem.resident, used_sample_count);
-    if (!out.instruments || !out.samples) return "резидентная память переполнена (инструменты/сэмплы)";
+    out.sample_count     = used_sample_count;
+    out.instruments      = memory::arena_new<Instrument>(mem.resident, used_instrument_count);
+    out.samples          = memory::arena_new<SampleDescriptor>(mem.resident, used_sample_count);
+    if (!out.instruments || !out.samples) return "resident memory overflowed (instruments/samples)";
 
     for (uint32_t bs = 0; bs < bank.header->sample_count; ++bs) {
         const uint16_t si = bank_to_song_sample[bs];
@@ -305,8 +296,7 @@ const char* build_instruments(Song& out, memory::TrackMemory& mem, const bank::B
 
     env_copies = 0;
     for (uint16_t i = 0; i < used_instrument_count; ++i) {
-        if (const char* why = build_instrument(out, mem, bank, used_instruments, i, bank_to_song_sample,
-                                               ticks_per_second_rounded, env_copies)) {
+        if (const char* why = build_instrument(out, mem, bank, used_instruments, i, bank_to_song_sample, ticks_per_second_rounded, env_copies)) {
             return why;
         }
     }

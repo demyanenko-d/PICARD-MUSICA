@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 #pragma once
 
 // Побитная сверка двух Song, полученных загрузкой одного и того же файла
@@ -19,8 +20,7 @@ namespace song_compare {
 
 // Байты сэмпла в PSRAM по каталогу: данные (длина * байт на отсчёт) и у
 // Dpcm8 - точки блоков по своей цепочке. Нерезидентный - пустой вектор.
-inline std::vector<uint8_t> collect_sample_bytes(soundsinth::memory::PsramStore& psram,
-                                                 soundsinth::memory::SampleCacheCatalog& catalog, uint16_t sample_index,
+inline std::vector<uint8_t> collect_sample_bytes(soundsinth::memory::PsramStore& psram, soundsinth::memory::SampleCacheCatalog& catalog, uint16_t sample_index,
                                                  const soundsinth::model::SampleDescriptor& sd) {
     using namespace soundsinth;
     std::vector<uint8_t> out;
@@ -29,10 +29,10 @@ inline std::vector<uint8_t> collect_sample_bytes(soundsinth::memory::PsramStore&
     auto take = [&](uint16_t page, uint32_t remaining) {
         while (remaining > 0 && page != memory::kPageChainEnd) {
             const uint32_t chunk = remaining < memory::kPsramPageBytes ? remaining : memory::kPsramPageBytes;
-            const uint8_t* p = memory::psram_page_ptr(psram, page);
+            const uint8_t* p     = memory::psram_page_ptr(psram, page);
             out.insert(out.end(), p, p + chunk);
             remaining -= chunk;
-            page = memory::psram_page_next(psram, page);
+            page       = memory::psram_page_next(psram, page);
         }
     };
     take(e->first_page, sd.length_samples * soundsinth::model::resident_bytes_per_sample(sd.resident_encoding));
@@ -43,8 +43,7 @@ inline std::vector<uint8_t> collect_sample_bytes(soundsinth::memory::PsramStore&
     return out;
 }
 
-inline void check_envelopes_equal(const soundsinth::model::Envelope* a,
-                                  const soundsinth::model::Envelope* b) {
+inline void check_envelopes_equal(const soundsinth::model::Envelope* a, const soundsinth::model::Envelope* b) {
     CHECK_EQ(a == nullptr, b == nullptr);
     if (a == nullptr || b == nullptr) return;
     CHECK_EQ(a->enabled, b->enabled);
@@ -63,10 +62,9 @@ inline void check_envelopes_equal(const soundsinth::model::Envelope* a,
 }
 
 // catalog_a/catalog_b заданы - сверяются и байты каждого сэмпла в PSRAM.
-inline void check_songs_equal(const soundsinth::model::Song& a, soundsinth::memory::PsramStore& psram_a,
-                               const soundsinth::model::Song& b, soundsinth::memory::PsramStore& psram_b,
-                               soundsinth::memory::SampleCacheCatalog* catalog_a = nullptr,
-                               soundsinth::memory::SampleCacheCatalog* catalog_b = nullptr) {
+inline void check_songs_equal(const soundsinth::model::Song& a, soundsinth::memory::PsramStore& psram_a, const soundsinth::model::Song& b,
+                              soundsinth::memory::PsramStore& psram_b, soundsinth::memory::SampleCacheCatalog* catalog_a = nullptr,
+                              soundsinth::memory::SampleCacheCatalog* catalog_b = nullptr) {
     using namespace soundsinth;
     CHECK(a.pan_law == b.pan_law);
     CHECK(a.mix_levels == b.mix_levels);

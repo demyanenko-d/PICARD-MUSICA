@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 #include "core/model/envelope.h"
 
 namespace soundsinth::model {

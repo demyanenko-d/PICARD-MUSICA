@@ -1,9 +1,10 @@
+// SPDX-License-Identifier: MIT
 #pragma once
 
 // Эмуляция General Sound на уровне регистров и системы команд.
 //
-// Здесь только протокол, без звука. Музыку делает трекер: модуль уходит в
-// run_session_load. Эффекты (#38/#3E) не поддержаны.
+// Здесь только протокол, без звука. Музыку делает трекер: модуль уходит
+// платформе. Эффекты (#38/#3E) не поддержаны.
 //
 // --- Четыре регистра, два адреса ---
 //
@@ -41,8 +42,8 @@ inline constexpr uint8_t kDataBit    = 0x80u;
 // Единицы в неопределённых битах (0x7E/0xFE): плееры на
 // них не рассчитывают, а байт заметнее в логе и не путается с "шина
 // молчит" (0x00).
-inline constexpr uint8_t kStatusIdle  = 0x7eu;
-inline constexpr uint8_t kStatusData  = 0xfeu;
+inline constexpr uint8_t kStatusIdle = 0x7eu;
+inline constexpr uint8_t kStatusData = 0xfeu;
 
 // Слотов под эффекты: у оригинала 32, у Unreal 64. Пока не используется:
 // эффекты не поддержаны.
@@ -52,9 +53,8 @@ inline constexpr uint8_t kMaxFxSlots = 64;
 // NeoGS: 63 страницы по 32 КБ плюс 16 КБ фиксированной области. Софт опознаёт
 // по объёму модель карты и с другими признаками не сверяет; модуль больше
 // приёмного буфера (1 МБ) отвергается целиком.
-inline constexpr uint8_t  kDeclaredPages    = 63;
-inline constexpr uint32_t kDeclaredRamBytes =
-    32768u * (static_cast<uint32_t>(kDeclaredPages) + 1u) - 16384u;
+inline constexpr uint8_t kDeclaredPages     = 63;
+inline constexpr uint32_t kDeclaredRamBytes = 32768u * (static_cast<uint32_t>(kDeclaredPages) + 1u) - 16384u;
 
 // Режим приёма: что льётся в регистр данных от команды, задавшей вид, до
 // #D2.
@@ -97,9 +97,7 @@ public:
     bool write_data(uint8_t value);
     // IN (0xBB). Удержание платформы добавляется к биту команды поверх
     // status_: ответ команды и чтение байта ответа его не стирают.
-    uint8_t read_status() const {
-        return (hold_reserve_ || hold_parse_) ? static_cast<uint8_t>(status_ | kCommandBit) : status_;
-    }
+    uint8_t read_status() const { return (hold_reserve_ || hold_parse_) ? static_cast<uint8_t>(status_ | kCommandBit) : status_; }
     // IN (0xB3), продвигает ответ.
     uint8_t read_data();
 
@@ -118,7 +116,7 @@ public:
     // значения перед write_command: автомат о трекере не знает.
     void set_position(uint8_t order, uint8_t row) {
         order_ = order;
-        row_ = row;
+        row_   = row;
     }
 
     // --- Наблюдение (диагностика и тесты) ---
@@ -167,15 +165,15 @@ private:
     uint8_t status_ = kStatusIdle;
     // Удержание платформой: резерв памяти под приём и разбор модуля.
     volatile bool hold_reserve_ = false;
-    volatile bool hold_parse_ = false;
-    uint8_t last_cmd_ = 0;
-    uint8_t last_data_ = 0;  // последний байт от ZX, его отдаёт порт #02
-    uint8_t unknown_cmd_ = 0;
-    uint32_t unknown_count_ = 0;
-    uint16_t cmd_hist_[256] = {};
+    volatile bool hold_parse_   = false;
+    uint8_t last_cmd_           = 0;
+    uint8_t last_data_          = 0; // последний байт от ZX, его отдаёт порт #02
+    uint8_t unknown_cmd_        = 0;
+    uint32_t unknown_count_     = 0;
+    uint16_t cmd_hist_[256]     = {};
 
     // Аргумент команды - первый байт GSDAT до её подачи; 0, если его не было.
-    uint8_t arg_ = 0;
+    uint8_t arg_  = 0;
     bool has_arg_ = false;
 
     // --- Хвост команды ---
@@ -185,15 +183,15 @@ private:
     // не собран, запись в регистр данных - его байт, а не аргумент будущей
     // команды. Новая команда недособранный хвост бросает: иначе её аргумент
     // ушёл бы в чужой хвост, а сама она получила бы пустоту.
-    uint8_t tail_left_ = 0;   // сколько байт хвоста ещё придёт; чей - last_cmd_
-    uint16_t tail_word_ = 0;  // собранное: порт у #10, LEN у #14/#15, ADR.L у #17
+    uint8_t tail_left_  = 0; // сколько байт хвоста ещё придёт; чей - last_cmd_
+    uint16_t tail_word_ = 0; // собранное: порт у #10, LEN у #14/#15, ADR.L у #17
     // Регистр DE процессора карты для #18-#1B: плееры читают через него
     // переменные ПЗУ карты (mem_peek).
     uint16_t de_ = 0;
     // Блок памяти карты после хвоста #14/#15, LEN байт. ОЗУ карты нет:
     // принятые байты глотаются, отдаваемые - нули.
-    uint16_t sink_left_ = 0;   // #14: сколько байт блока ещё проглотить
-    uint16_t zeros_left_ = 0;  // #15: сколько нулей ещё отдать
+    uint16_t sink_left_  = 0; // #14: сколько байт блока ещё проглотить
+    uint16_t zeros_left_ = 0; // #15: сколько нулей ещё отдать
 
     // Регистр вывода - байт, который читается из GSDAT, когда отдавать
     // больше нечего. ПЗУ карты при старте кладёт туда ноль (адрес #014B:
@@ -201,11 +199,11 @@ private:
     uint8_t out_reg_ = 0;
 
     // Ответ: байты и сколько ещё не отдано.
-    uint8_t resp_[8] = {};
-    uint8_t resp_n_ = 0;
+    uint8_t resp_[8]  = {};
+    uint8_t resp_n_   = 0;
     uint8_t resp_pos_ = 0;
 
-    Stream stream_ = Stream::None;
+    Stream stream_         = Stream::None;
     uint32_t stream_bytes_ = 0;
 
     // --- Внутренние порты карты ---
@@ -232,9 +230,9 @@ private:
     // схема старой платы GS - #09.
     uint8_t inner_[kInnerPortCount] = {};
 
-    uint8_t order_ = 0;      // set_position
-    uint8_t row_ = 0;
-    bool hx_busy_ = false;   // #F5/#F6: не играть эффекты (регистр HX)
+    uint8_t order_  = 0; // set_position
+    uint8_t row_    = 0;
+    bool hx_busy_   = false; // #F5/#F6: не играть эффекты (регистр HX)
     uint8_t cur_fx_ = 0;     // #2E
 };
 

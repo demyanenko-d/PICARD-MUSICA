@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 // Хэш всего, что строит конвертер .mid (metadata_only): поля Song,
 // инструменты (указатели - смещениями в арене), огибающие, keymap, сэмплы,
 // паттерны и зона паттернов PSRAM целиком. Сторож рефакторинга загрузчика:
@@ -48,7 +49,10 @@ struct Hash {
             h *= 1099511628211ull;
         }
     }
-    template <typename T> void add(T x) { bytes(&x, sizeof(x)); }
+    template <typename T>
+    void add(T x) {
+        bytes(&x, sizeof(x));
+    }
 };
 
 void hash_envelope(Hash& h, const soundsinth::model::Envelope* e) {
@@ -95,7 +99,7 @@ int main(int argc, char** argv) {
     static memory::TrackMemory mem;
     memory::track_memory_create(mem);
     for (int a = 2; a < argc; ++a) {
-        const char* path = argv[a];
+        const char* path          = argv[a];
         std::vector<uint8_t> file = read_file(path);
         memory::track_memory_reset_for_new_track(mem);
         // Нули под зоной паттернов и в арене: хэш не должен зависеть от
@@ -105,13 +109,12 @@ int main(int argc, char** argv) {
         formats::MemoryByteSource mbs(file.data(), static_cast<uint32_t>(file.size()));
         soundsinth::model::Song song;
         const char* err = nullptr;
-        const bool ok = formats::midi::load(mbs.as_byte_source(), static_cast<uint32_t>(file.size()), mem, bnk, song,
-                                            &err, true);
+        const bool ok   = formats::midi::load(mbs.as_byte_source(), static_cast<uint32_t>(file.size()), mem, bnk, song, &err, true);
         Hash h;
         h.add(ok);
         if (err) h.bytes(err, std::strlen(err));
         const uint8_t* arena = mem.resident.base;
-        auto off = [&](const void* p) -> uint64_t {
+        auto off             = [&](const void* p) -> uint64_t {
             if (content) return p ? 1u : 0u; // есть ли, без места
             return p ? static_cast<uint64_t>(static_cast<const uint8_t*>(p) - arena) : ~0ull;
         };
@@ -133,7 +136,8 @@ int main(int argc, char** argv) {
             h.add(off(song.samples));
             h.add(off(song.patterns));
             h.add(off(song.order));
-            for (uint32_t i = 0; i < song.order_count; ++i) h.add(song.order[i]);
+            for (uint32_t i = 0; i < song.order_count; ++i)
+                h.add(song.order[i]);
             for (uint32_t i = 0; i < song.pattern_count; ++i) {
                 h.add(song.patterns[i].row_count);
                 h.add(song.patterns[i].channel_count);
@@ -184,8 +188,7 @@ int main(int argc, char** argv) {
         h.add(mem.psram.pattern_bump_offset);
         h.bytes(mem.psram.base, mem.psram.pattern_bump_offset);
         if (content) {
-            std::printf("%016llx %s arena=%u\n", static_cast<unsigned long long>(h.h), path,
-                        static_cast<unsigned>(ok ? mem.resident.offset : 0));
+            std::printf("%016llx %s arena=%u\n", static_cast<unsigned long long>(h.h), path, static_cast<unsigned>(ok ? mem.resident.offset : 0));
             continue;
         }
         if (!check) {
@@ -197,13 +200,11 @@ int main(int argc, char** argv) {
             soundsinth::model::PatternCell cells[64];
             for (uint32_t pi = 0; pi < song.pattern_count; ++pi) {
                 const soundsinth::model::Pattern& pat = song.patterns[pi];
-                patterns::PatternReader reader(memory::psram_pattern_ptr(mem.psram, pat.psram_offset), pat.row_count,
-                                               pat.channel_count);
+                patterns::PatternReader reader(memory::psram_pattern_ptr(mem.psram, pat.psram_offset), pat.row_count, pat.channel_count);
                 for (uint16_t r = 0; r < pat.row_count; ++r) {
                     reader.read_row(r, cells);
                     for (uint32_t c = 0; c < pat.channel_count; ++c) {
-                        if (soundsinth::model::is_real_note(cells[c].note) &&
-                            cells[c].effect.type == soundsinth::model::Effect::NoteCut) {
+                        if (soundsinth::model::is_real_note(cells[c].note) && cells[c].effect.type == soundsinth::model::Effect::NoteCut) {
                             ++cut_on_note;
                         }
                     }

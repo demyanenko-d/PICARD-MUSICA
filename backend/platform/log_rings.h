@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 #pragma once
 
 // Журнал кольцами: реализация platform/log.h поверх debug_ring.

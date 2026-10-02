@@ -1,15 +1,10 @@
+// SPDX-License-Identifier: MIT
 #pragma once
 
 // Карта SD/SDHC на SPI1 - нижний слой носителя.
 //
-// Подключение (по таблице функций pico-sdk, io_bank0.h):
-//   GPIO40 SPI1_RX   -> вывод 7 карты, DAT0 (MISO)
-//   GPIO41 SPI1_SS_N -> вывод 2, CD/DAT3 (CS)
-//   GPIO42 SPI1_SCLK -> вывод 5, CLK
-//   GPIO43 SPI1_TX   -> вывод 3, CMD (MOSI)
-//
-// Линии Card Detect на плате нет: "карта на месте" - это успешная
-// инициализация.
+// Единица обмена - сектор 512 байт. Линии Card Detect на плате нет:
+// "карта на месте" - это успешная инициализация.
 //
 // Интерфейс синхронный, посекторный. Сектор на SPI на полной скорости -
 // около 200 мкс; асинхронность добавила бы состояний без выигрыша. Единица
@@ -22,6 +17,36 @@
 
 #include <cstdint>
 
+// --- Настраиваемое под плату и провода ---
+//
+// Эти числа зависят от монтажа, а не от протокола: длинные провода к
+// карте требуют частоты пониже, медленная карта - большего срока до
+// повторной попытки. Переопределяются через -D, как у pico-sdk.
+
+// Частота SPI при инициализации. Спецификация разрешает 100..400 кГц.
+#ifndef SOUNDSINTH_SD_BAUD_INIT
+#define SOUNDSINTH_SD_BAUD_INIT 400000u
+#endif
+
+// Рабочая частота после инициализации. 25 МГц - предел обычной карты.
+#ifndef SOUNDSINTH_SD_BAUD_WORK
+#define SOUNDSINTH_SD_BAUD_WORK 25000000u
+#endif
+
+// Чтение дольше этого считается медленным и попадает в счётчики.
+#ifndef SOUNDSINTH_SD_SLOW_READ_US
+#define SOUNDSINTH_SD_SLOW_READ_US 100000u
+#endif
+
+// Срок до повторной попытки поднять карту и его потолок: срок удваивается
+// после каждой неудачи, иначе следующее же чтение начинало бы новую.
+#ifndef SOUNDSINTH_SD_REINIT_MS
+#define SOUNDSINTH_SD_REINIT_MS 1000u
+#endif
+#ifndef SOUNDSINTH_SD_REINIT_MAX_MS
+#define SOUNDSINTH_SD_REINIT_MAX_MS 32000u
+#endif
+
 namespace devices::sd {
 
 // Тип карты определяется при инициализации: у SDSC адрес в командах
@@ -30,9 +55,9 @@ namespace devices::sd {
 enum class SdKind : uint8_t { None = 0, Sdsc = 1, Sdhc = 2 };
 
 struct SdInfo {
-    bool     present      = false;
-    SdKind   kind         = SdKind::None;
-    uint32_t sector_count = 0;   // из CSD; 0, если разобрать не удалось
+    bool present          = false;
+    SdKind kind           = SdKind::None;
+    uint32_t sector_count = 0; // из CSD; 0, если разобрать не удалось
 };
 
 // Полная инициализация: SPI на 400 кГц, CMD0/CMD8/ACMD41/CMD58, чтение
@@ -57,6 +82,12 @@ void sd_card_log_handshake();
 bool sd_card_read_sector(uint32_t lba, uint8_t* dst);
 bool sd_card_write_sector(uint32_t lba, const uint8_t* src);
 
+// Пачка подряд идущих секторов одной командой (CMD18). Экономится не
+// передача, а обвязка на каждом секторе: команда, ожидание готовности,
+// разрыв выбора. Отказ - как у одиночного, но пачка бросается целиком;
+// вызывающий вправе перечитать по одному.
+bool sd_card_read_run(uint32_t lba, uint32_t count, uint8_t* dst);
+
 // Строка "sd: носитель: ..." в лог: сбои чтения сектора по причинам с начала
 // работы, в скобках прирост за период, печатается и с нулями. Хост после
 // сбоя видит только таймаут. Звать из задачи логгера по расписанию.
@@ -73,5 +104,39 @@ void sd_card_log_health();
 // пусто. Вложенные sd_card_read_sector и sd_card_write_sector из него
 // возвращают false.
 void sd_card_set_wait_service(void (*fn)(void* user), void* user);
+
+// Как часто крюк зовётся из циклов ожидания. Не литералом у потребителей:
+// тест сверяет частоту обслуживания именно с этим числом.
+// Миллисекунда. Пробовали 200 мкс - протокол хоста внутри чтения сектора
+// опрашивался не девять раз, а около сорока семи. Замером это не окупилось:
+// serve_late и потери кадров были нулём и до правки, а заказ сектора стал
+// ждать цикл дольше - за сеанс под музыку появились две задержки свыше 5 мс
+// там, где раньше не было ни одной.
+inline constexpr uint32_t kCardServicePeriodUs = 1000;
+
+// Секторов по регистру CSD (16 байт). Ноль - версия CSD неизвестна или поля
+// несогласованы; размер по нему определять нельзя.
+//
+// В заголовке потому, что проверяется таблицей: эмулятор платы всегда SDHC,
+// и ветка v1 на нём не исполняется, а ошибка в ней - чтение не того места
+// на настоящей карте SDSC.
+inline uint32_t sectors_from_csd(const uint8_t* csd) {
+    const uint8_t structure = static_cast<uint8_t>(csd[0] >> 6);
+    if (structure == 1) {
+        // CSD v2 (SDHC/SDXC): ёмкость задана прямо, в единицах по 512 КБ.
+        const uint32_t c_size = (static_cast<uint32_t>(csd[7] & 0x3f) << 16) | (static_cast<uint32_t>(csd[8]) << 8) | static_cast<uint32_t>(csd[9]);
+        return (c_size + 1u) * 1024u;
+    }
+    if (structure == 0) {
+        // CSD v1 (SDSC): ёмкость собирается из трёх полей.
+        const uint8_t read_bl_len = static_cast<uint8_t>(csd[5] & 0x0f);
+        const uint32_t c_size     = (static_cast<uint32_t>(csd[6] & 0x03) << 10) | (static_cast<uint32_t>(csd[7]) << 2) | static_cast<uint32_t>(csd[8] >> 6);
+        const uint8_t c_size_mult = static_cast<uint8_t>(((csd[9] & 0x03) << 1) | (csd[10] >> 7));
+        if (read_bl_len < 9 || read_bl_len > 11) return 0;
+        const uint32_t blocks = (c_size + 1u) << (c_size_mult + 2u);
+        return blocks << (read_bl_len - 9u);
+    }
+    return 0; // неизвестная версия CSD, размер не определить
+}
 
 } // namespace devices::sd

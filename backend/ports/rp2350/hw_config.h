@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 #pragma once
 
 // Карта аппаратных ресурсов RP2350: блоки PIO, автоматы, каналы DMA,
@@ -36,8 +37,7 @@
 //
 // Всего 16, все по остатку: порты (адресный, указателей, ответчик), в
 // режиме DivMMC ещё чтение ПЗУ (таблица страниц и байт, по паре на
-// уровень) и трапы (пять), звук (ping/pong). Занятость в лог не печатается: при подозрении перебрать
-// dma_channel_is_claimed по всем 16.
+// уровень) и трапы (пять), звук (ping/pong). Занятость в лог не печатается.
 
 #include "hardware/pio.h"
 
@@ -45,18 +45,21 @@ namespace bus {
 
 // Автомат выдачи байта - в pio1: пины данных и OE_N привязаны к этому
 // блоку. Детектор и сборка адреса пинов не ведут, они в pio0.
-inline PIO const PIO_SERVE = pio1;
+inline PIO const PIO_SERVE     = pio1;
 inline constexpr uint SM_SERVE = 2;
 // Детектор чтения и сборка адреса. Звука здесь нет.
-inline PIO const PIO_DETECT = pio0;
+inline PIO const PIO_DETECT         = pio0;
 inline constexpr uint SM_ROM_DETECT = 0;
-inline constexpr uint SM_ROM_JOIN = 1;
+inline constexpr uint SM_ROM_JOIN   = 1;
 // Наблюдатели (только читают пины, ничего не выставляют) - в pio1.
-inline PIO const PIO_WATCH = pio1;
-inline PIO const PIO_AUDIO = pio2;
+inline PIO const PIO_WATCH         = pio1;
+inline PIO const PIO_AUDIO         = pio2;
 inline constexpr uint SM_BUS_WRITE = 1; // PIO1: захват записей в память и в порты
-inline constexpr uint SM_ROM_TRAP = 2;  // PIO0: трапы DivMMC по выборке команды
-inline constexpr uint SM_PORT_DETECT = 0; // PIO1: детектор чтения порта
+inline constexpr uint SM_ROM_TRAP  = 2; // PIO0: трапы DivMMC по выборке команды
+// PIO0: решатель триггера TR-DOS. С DivMMC не бывает - там этот номер у
+// детектора чтения. Выдатчик уровня живёт в pio2 и берётся по остатку.
+inline constexpr uint SM_TRDOS_DETECT = 0;
+inline constexpr uint SM_PORT_DETECT  = 0; // PIO1: детектор чтения порта
 
 // --- Приоритеты прерываний ---
 //
@@ -73,14 +76,14 @@ inline constexpr uint SM_PORT_DETECT = 0; // PIO1: детектор чтения
 // меньше - никогда. Шинные обработчики стоят выше
 // порога намеренно и не маскируются ни одной критической секцией.
 
-inline constexpr uint8_t IRQ_PRIO_BUS_WR = 0x40;  // запись в порт
+inline constexpr uint8_t IRQ_PRIO_BUS_WR  = 0x40; // запись в порт
 inline constexpr uint8_t IRQ_PRIO_PORT_RD = 0x60; // чтение порта состоялось
 inline constexpr uint8_t IRQ_PRIO_RELAXED = 0x80; // звук, будильник сна Core1
 
 // --- Линии DMA_IRQ ---
 //
 // Индексы для dma_irqn_* и DMA_IRQ_NUM. Линии 2 и 3 свободны.
-inline constexpr uint DMA_IRQ_INDEX_AUDIO = 0;   // завершения каналов I2S
+inline constexpr uint DMA_IRQ_INDEX_AUDIO   = 0; // завершения каналов I2S
 inline constexpr uint DMA_IRQ_INDEX_PORT_RD = 1; // чтение порта состоялось
 
 } // namespace bus

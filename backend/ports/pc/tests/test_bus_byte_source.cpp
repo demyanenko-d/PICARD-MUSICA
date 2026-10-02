@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 #include "testing.h"
 
 #include <cstdio>
@@ -17,15 +18,16 @@ namespace {
 // BinaryReader на полях переменного размера.
 struct Host {
     testing_host::Link link;
-    const uint8_t* data = nullptr;
-    uint32_t size = 0;
-    uint32_t windows = 0;
+    const uint8_t* data                             = nullptr;
+    uint32_t size                                   = 0;
+    uint32_t windows                                = 0;
     uint8_t scratch[HostProtocol::kDataBufferBytes] = {};
 
     static void read_window(void* user, uint32_t offset, uint16_t len, uint8_t* dst) {
         auto* self = static_cast<Host*>(user);
         ++self->windows;
-        for (uint16_t i = 0; i < len; ++i) dst[i] = offset + i < self->size ? self->data[offset + i] : 0;
+        for (uint16_t i = 0; i < len; ++i)
+            dst[i] = offset + i < self->size ? self->data[offset + i] : 0;
     }
 
     static void pump(void* user) {
@@ -42,17 +44,18 @@ struct Rig {
 
     Rig(const std::vector<uint8_t>& file) : bus(protocol, static_cast<uint32_t>(file.size()), &Host::pump, &host) {
         host.link.attach(protocol);
-        host.data = file.data();
-        host.size = static_cast<uint32_t>(file.size());
+        host.data        = file.data();
+        host.size        = static_cast<uint32_t>(file.size());
         const uint32_t n = host.size;
-        host.link.command(HostProtocol::kHcStart, static_cast<uint8_t>(n), static_cast<uint8_t>(n >> 8),
-                          static_cast<uint8_t>(n >> 16), static_cast<uint8_t>(n >> 24), /*sector=512*/ 2, 0);
+        host.link.command(HostProtocol::kHcStart, static_cast<uint8_t>(n), static_cast<uint8_t>(n >> 8), static_cast<uint8_t>(n >> 16),
+                          static_cast<uint8_t>(n >> 24), /*sector=512*/ 2, 0);
     }
 };
 
 std::vector<uint8_t> make_file(uint32_t size) {
     std::vector<uint8_t> f(size);
-    for (uint32_t i = 0; i < size; ++i) f[i] = static_cast<uint8_t>(i * 37 + 11);
+    for (uint32_t i = 0; i < size; ++i)
+        f[i] = static_cast<uint8_t>(i * 37 + 11);
     return f;
 }
 
@@ -68,8 +71,8 @@ void check_size(uint32_t size) {
         while (pos < size) {
             const uint32_t n = step < size - pos ? step : size - pos;
             if (bs.read(bs.self, got.data() + pos, n) != n) ++short_reads;
-            pos += n;
-            step = (step % 777) + 1;
+            pos  += n;
+            step  = (step % 777) + 1;
         }
         CHECK_EQ(short_reads, 0u);
         CHECK(got == file);
@@ -88,7 +91,8 @@ void check_size(uint32_t size) {
 
 void test_sizes_and_uneven_steps() {
     std::printf("test_bus_byte_source_sizes_and_uneven_steps\n");
-    for (const uint32_t size : {1u, 511u, 512u, 4095u, 4096u, 4097u, 1084u + 1024u + 777u}) check_size(size);
+    for (const uint32_t size : {1u, 511u, 512u, 4095u, 4096u, 4097u, 1084u + 1024u + 777u})
+        check_size(size);
 }
 
 // Перемотка внутри окна - без нового запроса; на конец файла - чтение 0;

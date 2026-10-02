@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 #include "pc/wav_writer.h"
 
 namespace platform_pc {
@@ -19,10 +20,10 @@ bool WavWriter::open(const char* path, uint32_t sample_rate_hz) {
         return false;
     }
 
-    const uint16_t channels = 2;
+    const uint16_t channels        = 2;
     const uint16_t bits_per_sample = 16;
-    const uint32_t byte_rate = sample_rate_hz * channels * (bits_per_sample / 8);
-    const uint16_t block_align = static_cast<uint16_t>(channels * (bits_per_sample / 8));
+    const uint32_t byte_rate       = sample_rate_hz * channels * (bits_per_sample / 8);
+    const uint16_t block_align     = static_cast<uint16_t>(channels * (bits_per_sample / 8));
 
     std::fwrite("RIFF", 1, 4, file_);
     write_u32le(file_, 0); // патчим в close()

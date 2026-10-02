@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 #pragma once
 
 // Bump-аллокатор поверх готового буфера для временных буферов загрузчика

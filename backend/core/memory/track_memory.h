@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 #pragma once
 
 // Буферы SRAM трека.
@@ -31,6 +32,11 @@ namespace soundsinth::memory {
 // MIDI: медиана 4.6 КБ, 99.9% - 19.1, плотные файлы просят до 53. Сверху -
 // самый дорогой сценарий: у трекеров упаковщик паттернов, у живого MIDI
 // ревербератор, который стоит при полной арене.
+//
+// 80 КБ, а не 72: самый тяжёлый .mid библиотеки просит 71828 байт
+// метаданных, и на 72 КБ проходу длительности не остаётся его 9216 -
+// длительность выходит нулевая, трек не играет вовсе. Нижняя граница по
+// этому файлу - 81044 байта.
 inline constexpr uint32_t kResidentMetadataBytes = 81920;
 // Паттерн целиком: заголовок, строки и словарь. По 121750 файлам архива
 // нынешним упаковщиком худший блок 24258 байт (IT/O/orb_shy.it), словарь до
@@ -38,15 +44,16 @@ inline constexpr uint32_t kResidentMetadataBytes = 81920;
 // паттерны .mid: по библиотеке худший - DREAMING.MID с Timbres of Heaven,
 // словарь до 4956, строки до 12588.
 inline constexpr uint32_t kPatternPackBufferBytes = 30u * 1024u;
-static_assert(kPatternPackBufferBytes <= 65536u, "смещения в блоке паттерна 16-битные");
+static_assert(kPatternPackBufferBytes <= 65536u, "offsets inside a pattern block are 16-bit");
 
 // Временные буферы загрузчика: состояние конвертера .mid, заголовок
 // инструмента и строка паттерна IT, после загрузки на плате - план догрузки
 // сэмплов. Все постоянного размера, от шапки файла не зависят (таблицы
 // указателей IT и S3M читаются прямо в резидентные записи), каждое место
-// проверяет static_assert. Размер задаёт план догрузки - 6144; .mid - 5120
-// байт на ПК (указатели по 8 байт) и 4864 на плате, IT - около 2 КБ.
-inline constexpr uint32_t kLoaderScratchBytes = 6144;
+// проверяет static_assert. Размер задаёт план догрузки - три массива по
+// 810 сэмплов, 4860 байт; IT - около 2 КБ, .mid буфера не просит вовсе
+// (всё его состояние живёт в PSRAM и переживает загрузку).
+inline constexpr uint32_t kLoaderScratchBytes = 4864;
 
 // Перепаковка сэмплов: сырой кусок 8192 + кусок PCM 8192 у xm/s3m, окно
 // 8192 + кусок PCM 8192 у it, 12288 у mod. Контрольные точки Dpcm8 идут
@@ -57,6 +64,11 @@ inline constexpr uint32_t kSampleRepackBufferBytes = 16u * 1024u;
 
 // Сектор карты при проверке носителя на старте.
 inline constexpr uint32_t kBootSectorBytes = 512;
+
+// Настройки при старте: блок для записи, текст файла и состояние тома
+// FatFs. Постоянного места им не надо - живут они одну загрузку, а на
+// стеке Core0 до планировщика всего 4 КБ.
+inline constexpr uint32_t kConfigBytes = 4096 + 6144 + 1024;
 
 // Проход секвенсора: отметки посещённых (order_pos, row) 256x256 бит и
 // PlayState прохода. Размер держит static_assert у прохода.
@@ -69,12 +81,13 @@ inline constexpr uint32_t kPlayScratchBytes = 12612 + 1024;
 // Кто въехал в TrackScratch. Порядок объявления - порядок по времени.
 enum class Scratch : uint8_t {
     None,
-    BootSector,    // сектор 0 карты, до первой загрузки
-    PatternPack,   // упаковщик паттернов, внутри load()
-    XmSampleHdrs,  // заголовки сэмплов XM: после паттернов, до первого PCM
-    DurationPass,  // длительность и упреждение: после разбора, до перепаковки
-    SampleRepack,  // перепаковка PCM в резидентный кодек
-    Play,          // ревербератор и его шина: от сборки движка до сноса
+    BootSector,   // сектор 0 карты, до первой загрузки
+    Config,       // блок настроек и текст файла, при старте
+    PatternPack,  // упаковщик паттернов, внутри load()
+    XmSampleHdrs, // заголовки сэмплов XM: после паттернов, до первого PCM
+    DurationPass, // длительность и упреждение: после разбора, до перепаковки
+    SampleRepack, // перепаковка PCM в резидентный кодек
+    Play,         // ревербератор и его шина: от сборки движка до сноса
 };
 
 // Сценарии живут на вершине резидентного пула, вниз от неё, навстречу
@@ -84,7 +97,7 @@ enum class Scratch : uint8_t {
 // Отсюда же и отказ: когда арена трека доросла до сценария, место кончилось
 // по-настоящему, и сказать об этом надо, а не молча писать поверх.
 struct TrackScratch {
-    Arena* arena = nullptr;
+    Arena* arena   = nullptr;
     Scratch tenant = Scratch::None;
 };
 
@@ -95,14 +108,14 @@ struct TrackScratch {
 // последовательны по построению. Заезд под играющий ревербератор - ошибка,
 // её ловит проверка.
 inline uint8_t* scratch_take(TrackScratch& s, Scratch who, uint32_t bytes) {
-    assert(s.tenant != Scratch::Play && "пул занят ревербератором играющего трека");
+    assert(s.tenant != Scratch::Play && "the pool is held by the reverb of the playing track");
     // Проверки до арифметики: разность беззнаковая, и при незаданном пуле
     // (capacity 0) она завернулась бы в огромное смещение.
     if (s.arena == nullptr || s.arena->base == nullptr || s.arena->capacity < bytes) return nullptr;
-    Arena& a = *s.arena;
+    Arena& a         = *s.arena;
     const size_t top = (a.capacity - bytes) & ~static_cast<size_t>(7); // сценарии выровнены на 8
     if (top < a.offset) return nullptr;
-    a.floor = top;
+    a.floor  = top;
     s.tenant = who;
     arena_note_peak(a);
     return a.base + top;
@@ -126,10 +139,10 @@ inline uint8_t* scratch_take_upto(TrackScratch& s, Scratch who, uint32_t want, u
 
 // Съезд: место возвращается арене. Зовут конец загрузки и снос движка.
 inline void scratch_leave(TrackScratch& s, Scratch who) {
-    assert(s.tenant == who && "съезжает не тот жилец");
+    assert(s.tenant == who && "the wrong tenant is moving out");
     (void)who;
     s.arena->floor = s.arena->capacity;
-    s.tenant = Scratch::None;
+    s.tenant       = Scratch::None;
 }
 
 // Выселить кого бы то ни было: зовёт отказ загрузки. Путей отказа у

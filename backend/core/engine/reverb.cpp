@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 #include "core/engine/reverb.h"
 
 #include "platform/compiler.h"
@@ -19,9 +20,9 @@ namespace {
 //
 // Демпфера в обратной связи нет: возврат и без него темнее эталонного
 // (2.4..11 кГц на 8..12 дБ ниже).
-constexpr int32_t kFeedback = 30474; // 0.93
+constexpr int32_t kFeedback    = 30474; // 0.93
 constexpr int32_t kAllpassGain = 16384; // 0.5
-constexpr int32_t kQ15One = 32768;
+constexpr int32_t kQ15One      = 32768;
 
 // Вход /16 перед гребёнками: восемь гребёнок с обратной связью 0.93 дают
 // усиление около 114, иначе линии int16 переполняются. Против /32 на самых
@@ -47,22 +48,21 @@ constexpr Layout make_layout() {
     Layout l{};
     uint32_t off = 0;
     for (uint32_t i = 0; i < kReverbCombCount; ++i) {
-        l.comb_len[i] = kReverbCombLen44k[i] / kReverbRateDiv;
-        l.comb_off[i] = off;
-        off += l.comb_len[i];
+        l.comb_len[i]  = kReverbCombLen44k[i] / kReverbRateDiv;
+        l.comb_off[i]  = off;
+        off           += l.comb_len[i];
     }
     for (uint32_t i = 0; i < kReverbAllpassCount; ++i) {
-        l.allpass_len[i] = kReverbAllpassLen44k[i] / kReverbRateDiv;
-        l.allpass_off[i] = off;
-        off += l.allpass_len[i];
+        l.allpass_len[i]  = kReverbAllpassLen44k[i] / kReverbRateDiv;
+        l.allpass_off[i]  = off;
+        off              += l.allpass_len[i];
     }
     return l;
 }
 
 constexpr Layout kLayout = make_layout();
-static_assert(kLayout.allpass_off[kReverbAllpassCount - 1] + kLayout.allpass_len[kReverbAllpassCount - 1] ==
-                  kReverbSampleCount,
-              "раскладка линий разошлась с kReverbSampleCount");
+static_assert(kLayout.allpass_off[kReverbAllpassCount - 1] + kLayout.allpass_len[kReverbAllpassCount - 1] == kReverbSampleCount,
+              "the line layout diverged from kReverbSampleCount");
 
 // Q15-умножение с округлением к нулю, а не сдвигом.
 //
@@ -79,10 +79,10 @@ int32_t mul_q15(int32_t a, int32_t b) {
 
 // Всепропускающее звено a: sig через его линию.
 SOUNDSINTH_ALWAYS_INLINE int32_t allpass_step(Reverb& rv, uint32_t a, int32_t sig) {
-    int16_t* line = rv.lines + kLayout.allpass_off[a];
-    uint32_t pos = rv.allpass_pos[a];
+    int16_t* line     = rv.lines + kLayout.allpass_off[a];
+    uint32_t pos      = rv.allpass_pos[a];
     const int32_t buf = line[pos];
-    line[pos] = static_cast<int16_t>(sat_s16(sig + mul_q15(buf, kAllpassGain)));
+    line[pos]         = static_cast<int16_t>(sat_s16(sig + mul_q15(buf, kAllpassGain)));
     if (++pos >= kLayout.allpass_len[a]) pos = 0;
     rv.allpass_pos[a] = static_cast<uint16_t>(pos);
     return buf - sig;
@@ -91,8 +91,7 @@ SOUNDSINTH_ALWAYS_INLINE int32_t allpass_step(Reverb& rv, uint32_t a, int32_t si
 } // namespace
 
 // Горячий путь, на каждый блок рендера.
-void SOUNDSINTH_HOT_PATH(reverb_process)(Reverb& rv, const int32_t* bus, int32_t* mix_l, int32_t* mix_r,
-                                         uint32_t n_frames) {
+void SOUNDSINTH_HOT_PATH(reverb_process)(Reverb& rv, const int32_t* bus, int32_t* mix_l, int32_t* mix_r, uint32_t n_frames) {
     // Децимация входа: kReverbRateDiv отсчётов выхода дают один внутренний.
     // Сумма, а не выборка: иначе верх завернулся бы вниз и хвост звенел
     // бы на посторонних частотах. Полная группа делится на константу (сдвиг с
@@ -100,7 +99,7 @@ void SOUNDSINTH_HOT_PATH(reverb_process)(Reverb& rv, const int32_t* bus, int32_t
     constexpr int32_t kGroupDiv = static_cast<int32_t>(kReverbRateDiv) << kInputShift;
     for (uint32_t i = 0; i < n_frames; i += kReverbRateDiv) {
         const uint32_t taken = (n_frames - i < kReverbRateDiv) ? n_frames - i : kReverbRateDiv;
-        int32_t in = 0;
+        int32_t in           = 0;
         for (uint32_t k = 0; k < taken; ++k) {
             in += bus[i + k];
         }
@@ -111,24 +110,24 @@ void SOUNDSINTH_HOT_PATH(reverb_process)(Reverb& rv, const int32_t* bus, int32_t
         // локальной компилятор перечитывает её после каждой записи.
         int32_t acc = 0;
         for (uint32_t c = 0; c < kReverbCombCount; ++c) {
-            int16_t* line = rv.lines + kLayout.comb_off[c];
-            uint32_t pos = rv.comb_pos[c];
+            int16_t* line     = rv.lines + kLayout.comb_off[c];
+            uint32_t pos      = rv.comb_pos[c];
             const int32_t out = line[pos];
-            line[pos] = static_cast<int16_t>(sat_s16(in + mul_q15(out, kFeedback)));
+            line[pos]         = static_cast<int16_t>(sat_s16(in + mul_q15(out, kFeedback)));
             if (++pos >= kLayout.comb_len[c]) pos = 0;
-            rv.comb_pos[c] = static_cast<uint16_t>(pos);
-            acc += out;
+            rv.comb_pos[c]  = static_cast<uint16_t>(pos);
+            acc            += out;
         }
 
         // Всепропускающие последовательно, разными парами: левый - звенья 0 и
         // 2, правый - 1 и 3. Полноценный стерео потребовал бы второго
         // комплекта гребёнок и вдвое больше памяти, а расхождение каналов
         // даёт и это.
-        static_assert(kReverbAllpassCount == 4, "звенья 0, 2 - левый канал, 1, 3 - правый");
+        static_assert(kReverbAllpassCount == 4, "stages 0 and 2 are the left channel, 1 and 3 the right");
         const int32_t l0 = allpass_step(rv, 0, acc);
         const int32_t r0 = allpass_step(rv, 1, acc);
-        const int32_t l = allpass_step(rv, 2, l0);
-        const int32_t r = allpass_step(rv, 3, r0);
+        const int32_t l  = allpass_step(rv, 2, l0);
+        const int32_t r  = allpass_step(rv, 3, r0);
         const int32_t wl = mul_q15(l / (1 << kOutputShift), SOUNDSINTH_REVERB_WET_Q15);
         const int32_t wr = mul_q15(r / (1 << kOutputShift), SOUNDSINTH_REVERB_WET_Q15);
 
@@ -141,14 +140,14 @@ void SOUNDSINTH_HOT_PATH(reverb_process)(Reverb& rv, const int32_t* bus, int32_t
         // отбрасывается. Возврат не больше +-76 тыс., после сдвига около
         // 19.5 млн.
         constexpr int32_t kOne = 1 << mixbus::kMixFracBits;
-        const int32_t pl = rv.prev_l * kOne;
-        const int32_t dl = (wl - rv.prev_l) * kOne;
-        const int32_t pr = rv.prev_r * kOne;
-        const int32_t dr = (wr - rv.prev_r) * kOne;
+        const int32_t pl       = rv.prev_l * kOne;
+        const int32_t dl       = (wl - rv.prev_l) * kOne;
+        const int32_t pr       = rv.prev_r * kOne;
+        const int32_t dr       = (wr - rv.prev_r) * kOne;
         for (uint32_t k = 0; k < taken; ++k) {
-            const int32_t w = static_cast<int32_t>(k + 1);
-            mix_l[i + k] += pl + dl * w / static_cast<int32_t>(kReverbRateDiv);
-            mix_r[i + k] += pr + dr * w / static_cast<int32_t>(kReverbRateDiv);
+            const int32_t w  = static_cast<int32_t>(k + 1);
+            mix_l[i + k]    += pl + dl * w / static_cast<int32_t>(kReverbRateDiv);
+            mix_r[i + k]    += pr + dr * w / static_cast<int32_t>(kReverbRateDiv);
         }
         rv.prev_l = wl;
         rv.prev_r = wr;

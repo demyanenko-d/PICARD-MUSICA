@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 #pragma once
 
 // Резонансный фильтр IT, двухполюсный, по одному на голос.
@@ -47,8 +48,7 @@ struct FilterState {
 // sf2_response - вместо фильтра IT биквад ФНЧ RBJ, как в SF2-синтезаторах:
 // его полюса в той же двухполюсной рекурсии плюс числитель [1 2 1]/4. Резонанс r - пик r*24/128 дБ,
 // Q = 10^((r*240/128 - 3.01)/200).
-FilterCoeffs filter_compute(uint8_t cutoff, uint8_t resonance, int32_t env_modifier, uint8_t units_per_octave,
-                            bool sf2_response);
+FilterCoeffs filter_compute(uint8_t cutoff, uint8_t resonance, int32_t env_modifier, uint8_t units_per_octave, bool sf2_response);
 
 // Таблица среза при нейтральной огибающей под шкалу песни: filter_compute
 // с этой шкалой берёт срез из таблицы, с другой - считает pow, результат

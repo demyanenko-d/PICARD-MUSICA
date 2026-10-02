@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 // Поканальный экспорт (TrackerEngine::set_solo_channel): у трекерных
 // форматов сведение линейно, поэтому сумма поканальных рендеров на шине
 // int32 (до MixBus) обязана совпасть с полным рендером побитово. Не совпадёт,
@@ -42,7 +43,7 @@ void render(engine::TrackerEngine& e, std::vector<int32_t>& l, std::vector<int32
 void check_solo_sum(const char* path, uint32_t frames) {
     const std::vector<uint8_t> bytes = read_whole_file(path);
     if (bytes.empty()) {
-        std::printf("  ПРОПУСК (файл не найден): %s\n", path);
+        std::printf("  SKIP (file not found): %s\n", path);
         return;
     }
 
@@ -87,8 +88,7 @@ void check_solo_sum(const char* path, uint32_t frames) {
     // Сверка не пустая: поодиночке звучит больше одного канала.
     CHECK(audible_channels > 1);
     CHECK_EQ(diff, 0u);
-    std::printf("  %s: каналов %u, звучащих %u, кадров %u, отличий суммы %u\n", path, song.channel_count,
-                audible_channels, frames, diff);
+    std::printf("  %s: channels %u, sounding %u, frames %u, sum differences %u\n", path, song.channel_count, audible_channels, frames, diff);
 
     memory::track_memory_destroy(mem);
 }

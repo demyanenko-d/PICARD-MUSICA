@@ -1,13 +1,14 @@
+// SPDX-License-Identifier: MIT
 #include "core/memory/arena.h"
 
 namespace soundsinth::memory {
 
 void arena_init(Arena& arena, uint8_t* base, size_t capacity) {
-    arena.base = base;
+    arena.base     = base;
     arena.capacity = capacity;
-    arena.offset = 0;
-    arena.floor = capacity;
-    arena.peak = 0;
+    arena.offset   = 0;
+    arena.floor    = capacity;
+    arena.peak     = 0;
 }
 
 void* arena_alloc(Arena& arena, size_t size, size_t align) {

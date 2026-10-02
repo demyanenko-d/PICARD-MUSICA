@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 #pragma once
 
 // Заказы PCM живого потока между ядрами: тик рендера кладёт номер записи
@@ -18,7 +19,7 @@ namespace player::live {
 // Ёмкость кольца заказов. На тик приходится до нескольких десятков записей
 // (аккорд со слоями), читатель разбирает кольцо каждый свой проход.
 inline constexpr uint32_t kLiveRequestCapacity = 128;
-static_assert((kLiveRequestCapacity & (kLiveRequestCapacity - 1)) == 0, "ёмкость - степень двойки: индекс маской");
+static_assert((kLiveRequestCapacity & (kLiveRequestCapacity - 1)) == 0, "the capacity is a power of two: the index is a mask");
 
 class LiveRequestRing {
 public:

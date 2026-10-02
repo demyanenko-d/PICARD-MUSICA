@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 #include "devices/hid/joystick.h"
 
 #include "devices/hal/z80_ports.h"
@@ -5,7 +6,7 @@
 namespace devices::hid {
 namespace {
 
-uint8_t s_bits = 0;
+uint8_t s_bits  = 0;
 bool s_attached = false;
 
 } // namespace

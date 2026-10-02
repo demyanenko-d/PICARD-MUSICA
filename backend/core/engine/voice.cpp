@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 #include "core/engine/voice.h"
 
 #include <cmath>
@@ -20,19 +21,19 @@ constexpr uint32_t kC4Period = 428;
 
 // Отдельные переменные, а не структура: структура меняет распределение
 // регистров во всех вариантах цикла рендера; без замера на плате не менять.
-uint32_t s_decode_calls = 0;
-uint32_t s_discarded_dpcm8 = 0;
+uint32_t s_decode_calls     = 0;
+uint32_t s_discarded_dpcm8  = 0;
 uint32_t s_discarded_direct = 0;
-uint32_t s_direct_jumps = 0;
-uint32_t s_step_clamps = 0;
-uint32_t s_pitch_recalcs = 0;
+uint32_t s_direct_jumps     = 0;
+uint32_t s_step_clamps      = 0;
+uint32_t s_pitch_recalcs    = 0;
 
 // Продвинуть page/byte_offset на stride байт: Raw8 и Dpcm8 - 1, Raw16 - 2.
 void advance_byte_position(uint16_t& page, uint16_t& byte_offset, memory::PsramStore& psram, uint32_t stride = 1) {
     byte_offset = static_cast<uint16_t>(byte_offset + stride);
     if (byte_offset >= memory::kPsramPageBytes) {
         byte_offset = static_cast<uint16_t>(byte_offset - memory::kPsramPageBytes);
-        page = memory::psram_page_next(psram, page);
+        page        = memory::psram_page_next(psram, page);
     }
 }
 
@@ -41,8 +42,7 @@ void advance_byte_position(uint16_t& page, uint16_t& byte_offset, memory::PsramS
 // нулевого смещения и растёт по два байта. Инвариант держится, пока в
 // потоке Raw16 только значения (контрольные точки Dpcm8 дописываются после
 // данных). Ассерт ломает сборку, а не звук, при смене размера страницы.
-static_assert(memory::kPsramPageBytes % 2 == 0,
-              "Raw16: страница обязана быть чётной, иначе значение рвётся через границу");
+static_assert(memory::kPsramPageBytes % 2 == 0, "Raw16: the page must be even, otherwise a value is torn across the boundary");
 
 // Резидентно Raw8 хранит исходную 8-битную шкалу, до 16 бит раскрывается при
 // чтении.
@@ -57,17 +57,16 @@ inline int16_t raw16_from_bytes(const uint8_t* p) {
 
 // Точка петли: позиция декодера на отсчёте loop_start, ставится один раз.
 inline void mark_loop_checkpoint(Voice& v, uint16_t page, uint16_t byte_offset) {
-    v.loop_checkpoint_page = page;
+    v.loop_checkpoint_page        = page;
     v.loop_checkpoint_byte_offset = byte_offset;
-    v.loop_checkpoint_captured = true;
+    v.loop_checkpoint_captured    = true;
 }
 
 // Линейная интерполяция между prev и next, t = frac_pos.
 inline int16_t interpolate_linear(const Voice& v) {
     const int32_t delta = static_cast<int32_t>(v.next_sample) - static_cast<int32_t>(v.prev_sample);
     const int32_t interp =
-        static_cast<int32_t>(v.prev_sample) +
-        static_cast<int32_t>((static_cast<int64_t>(delta) * static_cast<int64_t>(v.frac_pos)) >> kQ16Bits);
+        static_cast<int32_t>(v.prev_sample) + static_cast<int32_t>((static_cast<int64_t>(delta) * static_cast<int64_t>(v.frac_pos)) >> kQ16Bits);
     return static_cast<int16_t>(interp);
 }
 
@@ -78,19 +77,19 @@ inline int16_t interpolate_linear(const Voice& v) {
 // |2b| <= 393210, acc между шагами меньше 2^20 - int32; произведение acc * t
 // до 2^36 - в int64.
 inline int16_t interpolate_hermite(const Voice& v) {
-    const int32_t xm1 = v.oldest_sample;
-    const int32_t x0 = v.older_sample;
-    const int32_t x1 = v.prev_sample;
-    const int32_t x2 = v.next_sample;
+    const int32_t xm1     = v.oldest_sample;
+    const int32_t x0      = v.older_sample;
+    const int32_t x1      = v.prev_sample;
+    const int32_t x2      = v.next_sample;
     const int32_t twice_c = x1 - xm1;
     const int32_t twice_v = 2 * (x0 - x1);
     const int32_t twice_w = twice_c + twice_v;
     const int32_t twice_a = twice_w + twice_v + (x2 - x0);
     const int32_t twice_b = twice_w + twice_a;
-    const int32_t t = static_cast<int32_t>(v.frac_pos);
-    int32_t acc = static_cast<int32_t>((static_cast<int64_t>(twice_a) * t) >> kQ16Bits);
-    acc = static_cast<int32_t>((static_cast<int64_t>(acc - twice_b) * t) >> kQ16Bits);
-    acc = static_cast<int32_t>((static_cast<int64_t>(acc + twice_c) * t) >> kQ16Bits);
+    const int32_t t       = static_cast<int32_t>(v.frac_pos);
+    int32_t acc           = static_cast<int32_t>((static_cast<int64_t>(twice_a) * t) >> kQ16Bits);
+    acc                   = static_cast<int32_t>((static_cast<int64_t>(acc - twice_b) * t) >> kQ16Bits);
+    acc                   = static_cast<int32_t>((static_cast<int64_t>(acc + twice_c) * t) >> kQ16Bits);
     // Кубика перелетает соседние отсчёты; буфер голоса 16-битный.
     return static_cast<int16_t>(sat_s16(x0 + (acc >> 1)));
 }
@@ -127,17 +126,17 @@ void SOUNDSINTH_HOT_PATH(dpcm_skip_forward)(Voice& v, memory::PsramStore& psram,
         const uint8_t* page = memory::psram_page_ptr(psram, v.page);
         // Сколько влезает до конца страницы - столько идём без проверки границы.
         const uint32_t in_page = memory::kPsramPageBytes - v.byte_offset;
-        const uint32_t n = count < in_page ? count : in_page;
-        const uint8_t* q = page + v.byte_offset;
+        const uint32_t n       = count < in_page ? count : in_page;
+        const uint8_t* q       = page + v.byte_offset;
         for (uint32_t i = 0; i < n; ++i) {
             predictor = dpcm8::decode_step(predictor, q[i]);
         }
-        v.byte_offset = static_cast<uint16_t>(v.byte_offset + n);
+        v.byte_offset    = static_cast<uint16_t>(v.byte_offset + n);
         v.decoded_count += n;
-        count -= n;
+        count           -= n;
         if (v.byte_offset >= memory::kPsramPageBytes) {
             v.byte_offset = 0;
-            v.page = memory::psram_page_next(psram, v.page);
+            v.page        = memory::psram_page_next(psram, v.page);
         }
     }
     v.dpcm_state.predictor = static_cast<int16_t>(predictor);
@@ -177,7 +176,7 @@ int16_t decode_and_advance_rt(Voice& v, memory::PsramStore& psram) {
 }
 
 struct SeekPosition {
-    uint16_t page = memory::kPageChainEnd;
+    uint16_t page        = memory::kPageChainEnd;
     uint16_t byte_offset = 0;
     dpcm8::Dpcm8State state; // только для Dpcm8
 };
@@ -186,15 +185,14 @@ struct SeekPosition {
 // предыдущей контрольной точки и декодирование остатка - O(страниц) +
 // O(sample_pos % kCheckpointIntervalSamples). checkpoint_first_page обязан
 // быть валиден.
-SeekPosition seek_dpcm8(memory::PsramStore& psram, uint16_t first_page, uint16_t checkpoint_first_page,
-                        uint32_t sample_pos) {
+SeekPosition seek_dpcm8(memory::PsramStore& psram, uint16_t first_page, uint16_t checkpoint_first_page, uint32_t sample_pos) {
     SeekPosition pos;
-    const uint32_t block_index = sample_pos / dpcm8::kCheckpointIntervalSamples;
-    const uint32_t remainder = sample_pos % dpcm8::kCheckpointIntervalSamples;
+    const uint32_t block_index           = sample_pos / dpcm8::kCheckpointIntervalSamples;
+    const uint32_t remainder             = sample_pos % dpcm8::kCheckpointIntervalSamples;
     const dpcm8::BlockPosition block_pos = dpcm8::locate_block(psram, first_page, checkpoint_first_page, block_index);
-    pos.page = block_pos.page;
-    pos.byte_offset = block_pos.byte_offset;
-    pos.state = block_pos.state;
+    pos.page                             = block_pos.page;
+    pos.byte_offset                      = block_pos.byte_offset;
+    pos.state                            = block_pos.state;
 
     int32_t predictor = pos.state.predictor;
     for (uint32_t i = 0; i < remainder; ++i) {
@@ -208,16 +206,15 @@ SeekPosition seek_dpcm8(memory::PsramStore& psram, uint16_t first_page, uint16_t
 // Позиция прямого кодека от известной страницы якоря, а не от first_page:
 // обходит только границы страниц между якорем и целью, без заворота петли
 // почти всегда ни одной. Только для target_pos >= anchor_pos.
-SeekPosition seek_direct_forward(memory::PsramStore& psram, uint16_t anchor_page, uint32_t anchor_pos,
-                                 uint32_t target_pos, uint32_t stride) {
+SeekPosition seek_direct_forward(memory::PsramStore& psram, uint16_t anchor_page, uint32_t anchor_pos, uint32_t target_pos, uint32_t stride) {
     SeekPosition pos;
     // Позиции в отсчётах, страницы - в байтах; у Raw16 это разные величины,
     // переводятся обе, иначе якорь и цель разъедутся.
     const uint32_t anchor_byte = anchor_pos * stride;
     const uint32_t target_byte = target_pos * stride;
-    const uint32_t page_delta = target_byte / memory::kPsramPageBytes - anchor_byte / memory::kPsramPageBytes;
-    pos.page = memory::psram_page_advance(psram, anchor_page, page_delta);
-    pos.byte_offset = static_cast<uint16_t>(target_byte % memory::kPsramPageBytes);
+    const uint32_t page_delta  = target_byte / memory::kPsramPageBytes - anchor_byte / memory::kPsramPageBytes;
+    pos.page                   = memory::psram_page_advance(psram, anchor_page, page_delta);
+    pos.byte_offset            = static_cast<uint16_t>(target_byte % memory::kPsramPageBytes);
     return pos;
 }
 
@@ -226,8 +223,7 @@ SeekPosition seek_direct_forward(memory::PsramStore& psram, uint16_t anchor_page
 // дальше - готовая. Заворот и прыжок через конец петли идут от неё, а не
 // поиском от first_page на каждом витке: у петли далеко от начала это сотни
 // обходов page_next[] на виток.
-SOUNDSINTH_NOINLINE void SOUNDSINTH_HOT_PATH(direct_loop_checkpoint)(Voice& v, memory::PsramStore& psram,
-                                                                     uint32_t stride) {
+SOUNDSINTH_NOINLINE void SOUNDSINTH_HOT_PATH(direct_loop_checkpoint)(Voice& v, memory::PsramStore& psram, uint32_t stride) {
     if (v.loop_checkpoint_captured) return;
     const SeekPosition p = seek_direct_forward(psram, v.first_page, 0, v.loop_start, stride);
     mark_loop_checkpoint(v, p.page, p.byte_offset);
@@ -246,9 +242,9 @@ int16_t read_direct_sample(memory::PsramStore& psram, const SeekPosition& pos) {
 
 // Шаг Q16.16 из периода Amiga, не меньше 1 (иначе голос не продвинется).
 uint32_t amiga_period_to_step_impl(uint16_t period, uint32_t c5_speed) {
-    const uint64_t numerator = static_cast<uint64_t>(kC4Period) * c5_speed * kQ16One;
+    const uint64_t numerator   = static_cast<uint64_t>(kC4Period) * c5_speed * kQ16One;
     const uint64_t denominator = static_cast<uint64_t>(kSampleRateHz) * period;
-    const uint32_t step = static_cast<uint32_t>(numerator / denominator);
+    const uint32_t step        = static_cast<uint32_t>(numerator / denominator);
     return step != 0 ? step : 1;
 }
 
@@ -270,13 +266,13 @@ uint32_t step_from_double(double step_f) {
 // тот же в обоих вызывающих: побитовость рендеров XM/IT держится на нём.
 uint32_t step_from_semitones(uint32_t c5_speed, double semitones) {
     const double native_hz = static_cast<double>(c5_speed) * std::pow(2.0, semitones / 12.0);
-    const double step_f = native_hz * static_cast<double>(kQ16One) / static_cast<double>(kSampleRateHz);
-    const uint32_t step = step_from_double(step_f);
+    const double step_f    = native_hz * static_cast<double>(kQ16One) / static_cast<double>(kSampleRateHz);
+    const uint32_t step    = step_from_double(step_f);
     return step != 0 ? step : 1;
 }
 
-uint32_t compute_step(const soundsinth::model::SampleDescriptor& sample, uint8_t note,
-                      soundsinth::model::FrequencyModel frequency_model, soundsinth::model::QuirkFlags quirks) {
+uint32_t compute_step(const soundsinth::model::SampleDescriptor& sample, uint8_t note, soundsinth::model::FrequencyModel frequency_model,
+                      soundsinth::model::QuirkFlags quirks) {
     const uint8_t effective_note = soundsinth::model::apply_relative_note(note, sample.relative_note);
 
     if (frequency_model == soundsinth::model::FrequencyModel::Linear) {
@@ -284,8 +280,7 @@ uint32_t compute_step(const soundsinth::model::SampleDescriptor& sample, uint8_t
         // цента. Finetune только в стиле XM (128 на полутон), подстройка
         // MOD/S3M не применяется.
         const uint8_t reference_note = linear_reference_note(quirks);
-        const double semitones = (static_cast<double>(effective_note) - static_cast<double>(reference_note)) +
-                                 static_cast<double>(sample.finetune) / 128.0;
+        const double semitones = (static_cast<double>(effective_note) - static_cast<double>(reference_note)) + static_cast<double>(sample.finetune) / 128.0;
         return step_from_semitones(sample.c5_speed, semitones);
     }
 
@@ -298,8 +293,7 @@ uint32_t compute_step(const soundsinth::model::SampleDescriptor& sample, uint8_t
 // концом незацикленного - не звучит), IT - играет с начала, со старыми
 // эффектами - с последнего отсчёта; на этом у IT пишут музыку (сэмпл в 20
 // отсчётов с Oxx до 0xFE). false - нота не звучит.
-bool resolve_start_offset(const soundsinth::model::SampleDescriptor& sample, soundsinth::model::QuirkFlags quirks,
-                          bool loop_ok, uint32_t& offset) {
+bool resolve_start_offset(const soundsinth::model::SampleDescriptor& sample, soundsinth::model::QuirkFlags quirks, bool loop_ok, uint32_t& offset) {
     // Прореженный сэмпл вдвое короче: смещение делится до проверки.
     if (sample.decimated) offset /= 2;
     // Конец петли для смещения - исходный, до разворота ping-pong.
@@ -311,8 +305,7 @@ bool resolve_start_offset(const soundsinth::model::SampleDescriptor& sample, sou
             offset = sample.loop_start;
         }
     }
-    const bool past_end =
-        offset >= sample.length_samples || (sample.loop_enabled && offset_loop_end > 0 && offset >= offset_loop_end);
+    const bool past_end = offset >= sample.length_samples || (sample.loop_enabled && offset_loop_end > 0 && offset >= offset_loop_end);
     if (!past_end) return true;
     if ((quirks & soundsinth::model::kQuirkItOffsetPastEndRestarts) == 0) return false;
     // Позиция ровно на длине снова была бы за концом - берётся последний отсчёт.
@@ -327,10 +320,10 @@ bool resolve_start_offset(const soundsinth::model::SampleDescriptor& sample, sou
 // завороте или прыжке.
 void seek_voice_to(Voice& voice, memory::PsramStore& psram, uint16_t checkpoint_first_page, uint32_t offset) {
     if (soundsinth::model::resident_is_direct(voice.resident_encoding)) {
-        const SeekPosition target = seek_direct_forward(
-            psram, voice.first_page, 0, offset, soundsinth::model::resident_bytes_per_sample(voice.resident_encoding));
-        voice.page = target.page;
-        voice.byte_offset = target.byte_offset;
+        const SeekPosition target =
+            seek_direct_forward(psram, voice.first_page, 0, offset, soundsinth::model::resident_bytes_per_sample(voice.resident_encoding));
+        voice.page          = target.page;
+        voice.byte_offset   = target.byte_offset;
         voice.decoded_count = offset;
         return;
     }
@@ -341,14 +334,14 @@ void seek_voice_to(Voice& voice, memory::PsramStore& psram, uint16_t checkpoint_
         return;
     }
     const SeekPosition target = seek_dpcm8(psram, voice.first_page, checkpoint_first_page, offset);
-    voice.page = target.page;
-    voice.byte_offset = target.byte_offset;
-    voice.dpcm_state = target.state;
-    voice.decoded_count = offset;
+    voice.page                = target.page;
+    voice.byte_offset         = target.byte_offset;
+    voice.dpcm_state          = target.state;
+    voice.decoded_count       = offset;
     // loop_start почти никогда не выровнен по kCheckpointIntervalSamples:
     // seek_dpcm8, а не locate_block.
     if (voice.loop_enabled && offset > voice.loop_start) {
-        const SeekPosition loop_pos = seek_dpcm8(psram, voice.first_page, checkpoint_first_page, voice.loop_start);
+        const SeekPosition loop_pos      = seek_dpcm8(psram, voice.first_page, checkpoint_first_page, voice.loop_start);
         voice.loop_checkpoint_dpcm_state = loop_pos.state;
         mark_loop_checkpoint(voice, loop_pos.page, loop_pos.byte_offset);
     }
@@ -368,8 +361,8 @@ void prime_interpolation(Voice& voice, memory::PsramStore& psram, uint32_t lengt
             // Dpcm8: точка захвачена - проходом через loop_start или в seek_voice_to.
             voice.dpcm_state = voice.loop_checkpoint_dpcm_state;
         }
-        voice.page = voice.loop_checkpoint_page;
-        voice.byte_offset = voice.loop_checkpoint_byte_offset;
+        voice.page          = voice.loop_checkpoint_page;
+        voice.byte_offset   = voice.loop_checkpoint_byte_offset;
         voice.decoded_count = voice.loop_start;
     }
     if (voice.decoded_count < length_samples) {
@@ -382,8 +375,8 @@ void prime_interpolation(Voice& voice, memory::PsramStore& psram, uint32_t lengt
 
 } // namespace
 
-TriggerStart voice_trigger_start(const soundsinth::model::SampleDescriptor& sample, uint16_t first_page,
-                                uint32_t start_offset, soundsinth::model::QuirkFlags quirks) {
+TriggerStart voice_trigger_start(const soundsinth::model::SampleDescriptor& sample, uint16_t first_page, uint32_t start_offset,
+                                 soundsinth::model::QuirkFlags quirks) {
     TriggerStart s{};
     s.offset = start_offset;
     if (sample.length_samples == 0 || first_page == memory::kPageChainEnd) {
@@ -393,26 +386,25 @@ TriggerStart voice_trigger_start(const soundsinth::model::SampleDescriptor& samp
     // без петли. Заворот смещения - только по проверенной петле: у битой
     // длина петли ноль или "отрицательная".
     s.loop_ok = sample.loop_enabled && sample.loop_start < sample.loop_end && sample.loop_end <= sample.length_samples;
-    s.sounds = resolve_start_offset(sample, quirks, s.loop_ok, s.offset);
+    s.sounds  = resolve_start_offset(sample, quirks, s.loop_ok, s.offset);
     return s;
 }
 
-void voice_trigger_prepared(Voice& voice, memory::PsramStore& psram, const soundsinth::model::SampleDescriptor& sample,
-                            uint16_t first_page, uint16_t checkpoint_first_page, const TriggerStart& start,
-                            bool hermite) {
+void voice_trigger_prepared(Voice& voice, memory::PsramStore& psram, const soundsinth::model::SampleDescriptor& sample, uint16_t first_page,
+                            uint16_t checkpoint_first_page, const TriggerStart& start, bool hermite) {
     voice = Voice{};
     if (!start.sounds) return; // нота не звучит: пустой или нерезидентный сэмпл, смещение за концом
     const uint32_t offset = start.offset;
 
     voice.resident_encoding = sample.resident_encoding;
-    voice.hermite = hermite;
-    voice.first_page = first_page;
-    voice.page = first_page;
+    voice.hermite           = hermite;
+    voice.first_page        = first_page;
+    voice.page              = first_page;
 
     // Петля всегда прямая, ping-pong развёрнут при упаковке.
     voice.loop_enabled = start.loop_ok;
-    voice.loop_start = sample.loop_start;
-    voice.loop_end = voice.loop_enabled ? sample.loop_end : sample.length_samples;
+    voice.loop_start   = sample.loop_start;
+    voice.loop_end     = voice.loop_enabled ? sample.loop_end : sample.length_samples;
 
     voice.decoded_count = 0;
     if (offset > 0) seek_voice_to(voice, psram, checkpoint_first_page, offset);
@@ -421,10 +413,9 @@ void voice_trigger_prepared(Voice& voice, memory::PsramStore& psram, const sound
     voice.active = true;
 }
 
-void voice_trigger(Voice& voice, memory::PsramStore& psram, const soundsinth::model::SampleDescriptor& sample,
-                   uint16_t first_page, uint8_t note, soundsinth::model::FrequencyModel frequency_model,
-                   uint32_t start_offset, soundsinth::model::QuirkFlags quirks, uint16_t checkpoint_first_page,
-                   bool set_step) {
+void voice_trigger(Voice& voice, memory::PsramStore& psram, const soundsinth::model::SampleDescriptor& sample, uint16_t first_page, uint8_t note,
+                   soundsinth::model::FrequencyModel frequency_model, uint32_t start_offset, soundsinth::model::QuirkFlags quirks,
+                   uint16_t checkpoint_first_page, bool set_step) {
     const TriggerStart start = voice_trigger_start(sample, first_page, start_offset, quirks);
     voice_trigger_prepared(voice, psram, sample, first_page, checkpoint_first_page, start, voice_hermite(sample, quirks));
     if (set_step) voice.step = compute_step(sample, note, frequency_model, quirks);
@@ -437,19 +428,18 @@ uint32_t voice_step_amiga(uint16_t period, uint32_t c5_speed) {
 
 uint32_t voice_step_linear(int32_t amount_units, uint32_t c5_speed) {
     ++s_pitch_recalcs;
-    return step_from_semitones(c5_speed,
-                               static_cast<double>(amount_units) / static_cast<double>(kLinearAmountUnitsPerSemitone));
+    return step_from_semitones(c5_speed, static_cast<double>(amount_units) / static_cast<double>(kLinearAmountUnitsPerSemitone));
 }
 
 void voice_recompute_amiga_step(Voice& voice, uint16_t period, uint32_t c5_speed) {
-    voice.step = voice_step_amiga(period, c5_speed);
-    voice.pitch_memo = period;
+    voice.step          = voice_step_amiga(period, c5_speed);
+    voice.pitch_memo    = period;
     voice.pitch_memo_c5 = c5_speed;
 }
 
 void voice_recompute_linear_step(Voice& voice, int32_t amount_units, uint32_t c5_speed) {
-    voice.step = voice_step_linear(amount_units, c5_speed);
-    voice.pitch_memo = amount_units;
+    voice.step          = voice_step_linear(amount_units, c5_speed);
+    voice.pitch_memo    = amount_units;
     voice.pitch_memo_c5 = c5_speed;
 }
 
@@ -464,14 +454,13 @@ void voice_recompute_linear_step(Voice& voice, int32_t amount_units, uint32_t c5
 // последних родных отсчётов она берёт (kUsed), столько быстрые пути ниже
 // оставляют обычному проходу, который сдвигает окно.
 template <ResidentEncoding kEnc, bool kHermite>
-uint32_t SOUNDSINTH_HOT_PATH(voice_render_impl)(Voice& voice, memory::PsramStore& psram, int16_t* out,
-                                                uint32_t n_frames) {
-    constexpr uint32_t kUsed = kHermite ? 4u : 2u;
-    constexpr bool kDirect = soundsinth::model::resident_is_direct(kEnc);
+uint32_t SOUNDSINTH_HOT_PATH(voice_render_impl)(Voice& voice, memory::PsramStore& psram, int16_t* out, uint32_t n_frames) {
+    constexpr uint32_t kUsed   = kHermite ? 4u : 2u;
+    constexpr bool kDirect     = soundsinth::model::resident_is_direct(kEnc);
     constexpr uint32_t kStride = soundsinth::model::resident_bytes_per_sample(kEnc);
     // Быстрые пути - от kUsed + 1 целых шагов.
     constexpr uint32_t kFastPathMinFrac = (kUsed + 1u) << kQ16Bits;
-    uint32_t produced = 0;
+    uint32_t produced                   = 0;
     while (produced < n_frames && voice.active) {
         if constexpr (kHermite) {
             out[produced++] = interpolate_hermite(voice);
@@ -494,14 +483,14 @@ uint32_t SOUNDSINTH_HOT_PATH(voice_render_impl)(Voice& voice, memory::PsramStore
         if constexpr (kDirect) {
             if (voice.active && voice.frac_pos >= kFastPathMinFrac) {
                 const uint32_t n_steps = voice.frac_pos >> kQ16Bits;
-                const uint32_t start = voice.decoded_count;
+                const uint32_t start   = voice.decoded_count;
                 // Позиция после ровно steps продвижений от start - та же арифметика, что
                 // последовательный цикл за steps итераций, с учётом нескольких витков петли
                 // (%). Годится, пока путь в зацикленной области: конец незацикленного
                 // сэмпла внутри пачки уже отсечён (fast_ok).
                 auto advance_wrapped = [&](uint32_t steps) -> uint32_t {
                     if (start + steps < voice.loop_end) return start + steps;
-                    const uint32_t loop_len = voice.loop_end - voice.loop_start; // > 0 гарантировано в voice_trigger
+                    const uint32_t loop_len       = voice.loop_end - voice.loop_start; // > 0 гарантировано в voice_trigger
                     const uint32_t past_first_leg = steps - (voice.loop_end - start);
                     return voice.loop_start + past_first_leg % loop_len;
                 };
@@ -512,35 +501,34 @@ uint32_t SOUNDSINTH_HOT_PATH(voice_render_impl)(Voice& voice, memory::PsramStore
                     if (wraps) direct_loop_checkpoint(voice, psram, kStride);
                     auto seek = [&](uint32_t t) -> SeekPosition {
                         return t >= start ? seek_direct_forward(psram, voice.page, start, t, kStride)
-                                          : seek_direct_forward(psram, voice.loop_checkpoint_page, voice.loop_start, t,
-                                                                kStride);
+                                          : seek_direct_forward(psram, voice.loop_checkpoint_page, voice.loop_start, t, kStride);
                     };
                     // decoded_count/page/byte_offset после пачки указывают на следующую
                     // непрочитанную позицию - после n_steps продвижений. prev и next - два
                     // последних отсчёта пачки: после n_steps-2 и n_steps-1 продвижений.
-                    const uint32_t target = advance_wrapped(n_steps);
-                    const uint32_t next_target = advance_wrapped(n_steps - 1);
-                    const uint32_t prev_target = advance_wrapped(n_steps - 2);
+                    const uint32_t target         = advance_wrapped(n_steps);
+                    const uint32_t next_target    = advance_wrapped(n_steps - 1);
+                    const uint32_t prev_target    = advance_wrapped(n_steps - 2);
                     const SeekPosition target_pos = seek(target);
-                    const SeekPosition next_pos = seek(next_target);
-                    const SeekPosition prev_pos = seek(prev_target);
-                    voice.prev_sample = read_direct_sample<kEnc>(psram, prev_pos);
-                    voice.next_sample = read_direct_sample<kEnc>(psram, next_pos);
+                    const SeekPosition next_pos   = seek(next_target);
+                    const SeekPosition prev_pos   = seek(prev_target);
+                    voice.prev_sample             = read_direct_sample<kEnc>(psram, prev_pos);
+                    voice.next_sample             = read_direct_sample<kEnc>(psram, next_pos);
                     if constexpr (kHermite) {
                         // Окну нужны ещё два отсчёта перед prev - позиции n_steps-3 и n_steps-4
                         // (порог выше гарантирует n_steps >= 5).
-                        const uint32_t older_target = advance_wrapped(n_steps - 3);
-                        const uint32_t oldest_target = advance_wrapped(n_steps - 4);
-                        const SeekPosition older_pos = seek(older_target);
+                        const uint32_t older_target   = advance_wrapped(n_steps - 3);
+                        const uint32_t oldest_target  = advance_wrapped(n_steps - 4);
+                        const SeekPosition older_pos  = seek(older_target);
                         const SeekPosition oldest_pos = seek(oldest_target);
-                        voice.older_sample = read_direct_sample<kEnc>(psram, older_pos);
-                        voice.oldest_sample = read_direct_sample<kEnc>(psram, oldest_pos);
+                        voice.older_sample            = read_direct_sample<kEnc>(psram, older_pos);
+                        voice.oldest_sample           = read_direct_sample<kEnc>(psram, oldest_pos);
                     }
-                    voice.decoded_count = target;
-                    voice.page = target_pos.page;
-                    voice.byte_offset = target_pos.byte_offset;
-                    voice.frac_pos &= (kQ16One - 1);
-                    fast_path_done = true;
+                    voice.decoded_count  = target;
+                    voice.page           = target_pos.page;
+                    voice.byte_offset    = target_pos.byte_offset;
+                    voice.frac_pos      &= (kQ16One - 1);
+                    fast_path_done       = true;
                     ++s_direct_jumps;
                 }
             }
@@ -555,12 +543,12 @@ uint32_t SOUNDSINTH_HOT_PATH(voice_render_impl)(Voice& voice, memory::PsramStore
         if constexpr (kEnc == ResidentEncoding::Dpcm8) {
             if (!fast_path_done && voice.active && voice.frac_pos >= kFastPathMinFrac) {
                 const uint32_t whole = voice.frac_pos >> kQ16Bits;
-                const uint32_t skip = whole - kUsed; // последние kUsed - обычным путём
+                const uint32_t skip  = whole - kUsed; // последние kUsed - обычным путём
                 if (voice.decoded_count + whole <= voice.loop_end &&
-                    !(voice.loop_enabled && !voice.loop_checkpoint_captured &&
-                      voice.decoded_count <= voice.loop_start && voice.loop_start < voice.decoded_count + skip)) {
+                    !(voice.loop_enabled && !voice.loop_checkpoint_captured && voice.decoded_count <= voice.loop_start &&
+                      voice.loop_start < voice.decoded_count + skip)) {
                     dpcm_skip_forward(voice, psram, skip);
-                    voice.frac_pos -= static_cast<uint32_t>(skip) << kQ16Bits;
+                    voice.frac_pos    -= static_cast<uint32_t>(skip) << kQ16Bits;
                     s_discarded_dpcm8 += skip;
                 }
             }
@@ -575,7 +563,7 @@ uint32_t SOUNDSINTH_HOT_PATH(voice_render_impl)(Voice& voice, memory::PsramStore
             voice.frac_pos -= kQ16One;
             if constexpr (kHermite) {
                 voice.oldest_sample = voice.older_sample;
-                voice.older_sample = voice.prev_sample;
+                voice.older_sample  = voice.prev_sample;
             }
             voice.prev_sample = voice.next_sample;
             if (voice.decoded_count >= voice.loop_end) {
@@ -592,8 +580,8 @@ uint32_t SOUNDSINTH_HOT_PATH(voice_render_impl)(Voice& voice, memory::PsramStore
                     // decoded_count не мог дойти до loop_end, не пройдя loop_start.
                     voice.dpcm_state = voice.loop_checkpoint_dpcm_state;
                 }
-                voice.page = voice.loop_checkpoint_page;
-                voice.byte_offset = voice.loop_checkpoint_byte_offset;
+                voice.page          = voice.loop_checkpoint_page;
+                voice.byte_offset   = voice.loop_checkpoint_byte_offset;
                 voice.decoded_count = voice.loop_start;
             }
             voice.next_sample = decode_and_advance<kEnc>(voice, psram);
@@ -632,22 +620,22 @@ uint32_t SOUNDSINTH_HOT_PATH(voice_render)(Voice& voice, memory::PsramStore& psr
 }
 
 void voice_reset_debug_counters() {
-    s_decode_calls = 0;
-    s_discarded_dpcm8 = 0;
+    s_decode_calls     = 0;
+    s_discarded_dpcm8  = 0;
     s_discarded_direct = 0;
-    s_direct_jumps = 0;
-    s_step_clamps = 0;
-    s_pitch_recalcs = 0;
+    s_direct_jumps     = 0;
+    s_step_clamps      = 0;
+    s_pitch_recalcs    = 0;
 }
 
 VoiceDebugCounters voice_debug_counters() {
     VoiceDebugCounters c{};
-    c.decode_calls = s_decode_calls;
-    c.discarded_dpcm8 = s_discarded_dpcm8;
+    c.decode_calls     = s_decode_calls;
+    c.discarded_dpcm8  = s_discarded_dpcm8;
     c.discarded_direct = s_discarded_direct;
-    c.direct_jumps = s_direct_jumps;
-    c.step_clamps = s_step_clamps;
-    c.pitch_recalcs = s_pitch_recalcs;
+    c.direct_jumps     = s_direct_jumps;
+    c.step_clamps      = s_step_clamps;
+    c.pitch_recalcs    = s_pitch_recalcs;
     return c;
 }
 

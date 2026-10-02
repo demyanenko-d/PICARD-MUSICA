@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 #include "platform/memory.h"
 
 #include <cstdint>
@@ -34,8 +35,7 @@ uint8_t* resident_storage_acquire(size_t bytes) {
     // пула - ошибка бюджета; nullptr превратился бы в неработающую загрузку
     // трека без внятной причины.
     if (s_resident_taken || bytes > sizeof(s_resident_pool)) {
-        panic("resident_storage_acquire: пул %zu Б, запрошено %zu Б, занят=%d", sizeof(s_resident_pool), bytes,
-              static_cast<int>(s_resident_taken));
+        panic("resident_storage_acquire: pool %zu B, requested %zu B, taken=%d", sizeof(s_resident_pool), bytes, static_cast<int>(s_resident_taken));
     }
     s_resident_taken = true;
     return s_resident_pool;
@@ -61,9 +61,9 @@ void psram_base_release(uint8_t* /*base*/) {
 // Строки выбрасываются по адресу (операция 2 окна обслуживания кэша), не
 // по set/way. Кэш общий у обоих ядер.
 uint8_t* __not_in_flash_func(psram_write_alias)(uint8_t* p, size_t bytes) {
-    const uintptr_t offset = reinterpret_cast<uintptr_t>(p) - XIP_BASE;
+    const uintptr_t offset                   = reinterpret_cast<uintptr_t>(p) - XIP_BASE;
     constexpr uintptr_t kInvalidateByAddress = 2u;
-    constexpr uintptr_t kLineBytes = 8u;
+    constexpr uintptr_t kLineBytes           = 8u;
     for (uintptr_t o = offset; o < offset + bytes; o += kLineBytes) {
         *reinterpret_cast<volatile uint8_t*>(XIP_MAINTENANCE_BASE + o + kInvalidateByAddress) = 0;
     }

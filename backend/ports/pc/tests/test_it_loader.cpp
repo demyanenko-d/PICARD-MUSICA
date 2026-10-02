@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 #include "testing.h"
 
 #include <algorithm>
@@ -37,40 +38,49 @@ namespace {
 // смещении 550 заголовка инструмента, за заголовком - keyboard_hi (120
 // старших байтов номеров сэмплов), если он задан. pattern - свои упакованные
 // данные паттерна на rows строк вместо стандартных четырёх.
-std::vector<uint8_t> build_synthetic_it(bool with_signed_pan_pitch_env = false, uint16_t extra_samples = 0,
-                                        const char* ext_magic = nullptr, const uint8_t* keyboard_hi = nullptr,
-                                        const std::vector<uint8_t>* pattern = nullptr, uint16_t rows = 4) {
+std::vector<uint8_t> build_synthetic_it(bool with_signed_pan_pitch_env = false, uint16_t extra_samples = 0, const char* ext_magic = nullptr,
+                                        const uint8_t* keyboard_hi = nullptr, const std::vector<uint8_t>* pattern = nullptr, uint16_t rows = 4) {
     std::vector<uint8_t> f;
-    auto put8 = [&](uint8_t v) { f.push_back(v); };
-    auto put16 = [&](uint16_t v) { f.push_back(static_cast<uint8_t>(v & 0xFF)); f.push_back(static_cast<uint8_t>(v >> 8)); };
-    auto put32 = [&](uint32_t v) { for (int i = 0; i < 4; ++i) f.push_back(static_cast<uint8_t>((v >> (8 * i)) & 0xFF)); };
+    auto put8  = [&](uint8_t v) { f.push_back(v); };
+    auto put16 = [&](uint16_t v) {
+        f.push_back(static_cast<uint8_t>(v & 0xFF));
+        f.push_back(static_cast<uint8_t>(v >> 8));
+    };
+    auto put32 = [&](uint32_t v) {
+        for (int i = 0; i < 4; ++i)
+            f.push_back(static_cast<uint8_t>((v >> (8 * i)) & 0xFF));
+    };
     auto put_str = [&](const char* s, size_t n) {
         size_t len = std::strlen(s);
-        for (size_t i = 0; i < n; ++i) f.push_back(i < len ? static_cast<uint8_t>(s[i]) : 0);
+        for (size_t i = 0; i < n; ++i)
+            f.push_back(i < len ? static_cast<uint8_t>(s[i]) : 0);
     };
 
     put_str("IMPM", 4);
     put_str("ITTEST", 26);
-    put8(4); put8(16); // highlight minor/major
-    put16(1);  // ordnum
-    put16(1);  // insnum
-    put16(static_cast<uint16_t>(1 + extra_samples));  // smpnum
-    put16(1);  // patnum
-    put16(0x0214); // cwtv
-    put16(0x0214); // cmwt
-    put16(0x04);   // flags: instrumentMode
-    put16(0);      // special
-    put8(128);     // globalvol
-    put8(48);      // mv
-    put8(6);       // speed
-    put8(125);     // tempo
-    put8(0);       // sep
-    put8(0);       // pwd
-    put16(0);      // msglength
-    put32(0);      // msgoffset
-    put32(0);      // reserved
-    for (int i = 0; i < 64; ++i) put8(32); // chnpan
-    for (int i = 0; i < 64; ++i) put8(64); // chnvol
+    put8(4);
+    put8(16);                                        // highlight minor/major
+    put16(1);                                        // ordnum
+    put16(1);                                        // insnum
+    put16(static_cast<uint16_t>(1 + extra_samples)); // smpnum
+    put16(1);                                        // patnum
+    put16(0x0214);                                   // cwtv
+    put16(0x0214);                                   // cmwt
+    put16(0x04);                                     // flags: instrumentMode
+    put16(0);                                        // special
+    put8(128);                                       // globalvol
+    put8(48);                                        // mv
+    put8(6);                                         // speed
+    put8(125);                                       // tempo
+    put8(0);                                         // sep
+    put8(0);                                         // pwd
+    put16(0);                                        // msglength
+    put32(0);                                        // msgoffset
+    put32(0);                                        // reserved
+    for (int i = 0; i < 64; ++i)
+        put8(32); // chnpan
+    for (int i = 0; i < 64; ++i)
+        put8(64); // chnvol
     CHECK_EQ(f.size(), static_cast<size_t>(192));
 
     put8(0); // order[0] = паттерн 0
@@ -79,28 +89,34 @@ std::vector<uint8_t> build_synthetic_it(bool with_signed_pan_pitch_env = false, 
     put32(0);
     const size_t smp_ptr_pos = f.size();
     put32(0);
-    for (uint16_t i = 0; i < extra_samples; ++i) put32(0);
+    for (uint16_t i = 0; i < extra_samples; ++i)
+        put32(0);
     const size_t pat_ptr_pos = f.size();
     put32(0);
 
     const uint32_t inst_offset = static_cast<uint32_t>(f.size());
     put_str("IMPI", 4);
-    for (int i = 0; i < 13; ++i) put8(0); // filename
-    put8(1);  // nna = Continue
-    put8(2);  // dct = Sample
-    put8(1);  // dca = Off
-    put16(100); // fadeout
-    put8(0);  // pps
-    put8(0);  // ppc
-    put8(100); // gbv (global volume)
-    put8(0);  // dfp
-    put8(0);  // rv
-    put8(0);  // rp
-    put16(0); // trkvers
-    put8(1);  // nos
-    put8(0);  // reserved1
-    for (int i = 0; i < 26; ++i) put8(0); // name
-    put8(0); put8(0); put8(0); put8(0);   // ifc/ifr/mch/mpr
+    for (int i = 0; i < 13; ++i)
+        put8(0); // filename
+    put8(1);     // nna = Continue
+    put8(2);     // dct = Sample
+    put8(1);     // dca = Off
+    put16(100);  // fadeout
+    put8(0);     // pps
+    put8(0);     // ppc
+    put8(100);   // gbv (global volume)
+    put8(0);     // dfp
+    put8(0);     // rv
+    put8(0);     // rp
+    put16(0);    // trkvers
+    put8(1);     // nos
+    put8(0);     // reserved1
+    for (int i = 0; i < 26; ++i)
+        put8(0); // name
+    put8(0);
+    put8(0);
+    put8(0);
+    put8(0);  // ifc/ifr/mch/mpr
     put16(0); // mbank
     // keyboard[240]: все ноты -> сэмпл 1 (единственный), питч тождественный
     // (note[n]==n), без переразметки клавиш, см. instrument.h
@@ -108,18 +124,28 @@ std::vector<uint8_t> build_synthetic_it(bool with_signed_pan_pitch_env = false, 
     // put8(60); с тех пор как учитывается note-байт, а не только sample, это
     // потребовало бы полной keymap-таблицы, а тест проверяет другое
     // ("единственный сэмпл -> без keymap").
-    for (int n = 0; n < 120; ++n) { put8(static_cast<uint8_t>(n)); put8(1); }
+    for (int n = 0; n < 120; ++n) {
+        put8(static_cast<uint8_t>(n));
+        put8(1);
+    }
     CHECK_EQ(f.size() - inst_offset, static_cast<size_t>(64 + 240));
 
     // volenv: enabled(0x01), 2 точки, sustain/loop не используются.
     put8(0x01); // flags
     put8(2);    // num
-    put8(0); put8(0); // lpb/lpe
-    put8(0); put8(0); // slb/sle
+    put8(0);
+    put8(0); // lpb/lpe
+    put8(0);
+    put8(0); // slb/sle
     // data[25] узлов по 3 байта (value, tick LE) - используются первые 2.
-    put8(static_cast<uint8_t>(static_cast<int8_t>(64))); put16(0);  // point0: value=64, tick=0
-    put8(static_cast<uint8_t>(static_cast<int8_t>(0)));  put16(20); // point1: value=0, tick=20
-    for (int i = 2; i < 25; ++i) { put8(0); put16(0); }
+    put8(static_cast<uint8_t>(static_cast<int8_t>(64)));
+    put16(0); // point0: value=64, tick=0
+    put8(static_cast<uint8_t>(static_cast<int8_t>(0)));
+    put16(20); // point1: value=0, tick=20
+    for (int i = 2; i < 25; ++i) {
+        put8(0);
+        put16(0);
+    }
     put8(0); // reserved
     CHECK_EQ(f.size() - inst_offset, static_cast<size_t>(64 + 240 + 82));
 
@@ -127,58 +153,96 @@ std::vector<uint8_t> build_synthetic_it(bool with_signed_pan_pitch_env = false, 
         // panenv: enabled(0x01), 1 точка, сырое значение -20 (файловая шкала IT,
         // знаковая -32..32); на выходе загрузчика ожидается 32+(-20)=12 (см.
         // formats/it.cpp value_offset).
-        put8(0x01); put8(1); put8(0); put8(0); put8(0); put8(0);
-        put8(static_cast<uint8_t>(static_cast<int8_t>(-20))); put16(0);
-        for (int i = 1; i < 25; ++i) { put8(0); put16(0); }
+        put8(0x01);
+        put8(1);
+        put8(0);
+        put8(0);
+        put8(0);
+        put8(0);
+        put8(static_cast<uint8_t>(static_cast<int8_t>(-20)));
+        put16(0);
+        for (int i = 1; i < 25; ++i) {
+            put8(0);
+            put16(0);
+        }
         put8(0);
         // pitchenv: enabled(0x01) | envFilter(0x80) - это огибающая фильтра, а не
         // питча: загрузчик должен вернуть nullptr для Instrument::pitch_envelope
         // (см. .cpp), несмотря на envEnabled.
-        put8(0x01 | 0x80); put8(1); put8(0); put8(0); put8(0); put8(0);
-        put8(static_cast<uint8_t>(static_cast<int8_t>(10))); put16(0);
-        for (int i = 1; i < 25; ++i) { put8(0); put16(0); }
+        put8(0x01 | 0x80);
+        put8(1);
+        put8(0);
+        put8(0);
+        put8(0);
+        put8(0);
+        put8(static_cast<uint8_t>(static_cast<int8_t>(10)));
+        put16(0);
+        for (int i = 1; i < 25; ++i) {
+            put8(0);
+            put16(0);
+        }
         put8(0);
     } else {
         // panenv/pitchenv: выключены (flags=0), остальное нулями.
         for (int e = 0; e < 2; ++e) {
-            put8(0); put8(0); put8(0); put8(0); put8(0); put8(0);
-            for (int i = 0; i < 25; ++i) { put8(0); put16(0); }
+            put8(0);
+            put8(0);
+            put8(0);
+            put8(0);
+            put8(0);
+            put8(0);
+            for (int i = 0; i < 25; ++i) {
+                put8(0);
+                put16(0);
+            }
             put8(0);
         }
     }
     if (ext_magic != nullptr) {
         put_str(ext_magic, 4);
     } else {
-        put8(0); put8(0); put8(0); put8(0); // dummy[4]
+        put8(0);
+        put8(0);
+        put8(0);
+        put8(0); // dummy[4]
     }
     CHECK_EQ(f.size() - inst_offset, static_cast<size_t>(554));
     if (keyboard_hi != nullptr) {
-        for (int n = 0; n < 120; ++n) put8(keyboard_hi[n]);
+        for (int n = 0; n < 120; ++n)
+            put8(keyboard_hi[n]);
     }
 
     const uint32_t smp_offset = static_cast<uint32_t>(f.size());
     put_str("IMPS", 4);
-    for (int i = 0; i < 13; ++i) put8(0); // filename
-    put8(64);  // gvl
+    for (int i = 0; i < 13; ++i)
+        put8(0);       // filename
+    put8(64);          // gvl
     put8(0x01 | 0x10); // flags: dataPresent + loop
-    put8(48);  // vol
-    for (int i = 0; i < 26; ++i) put8(0); // name
-    put8(0x01); // cvt: signed PCM
-    put8(0);    // dfp
-    put32(4);   // length
-    put32(0);   // loopbegin
-    put32(4);   // loopend
+    put8(48);          // vol
+    for (int i = 0; i < 26; ++i)
+        put8(0); // name
+    put8(0x01);  // cvt: signed PCM
+    put8(0);     // dfp
+    put32(4);    // length
+    put32(0);    // loopbegin
+    put32(4);    // loopend
     put32(8363); // C5Speed
-    put32(0);   // susloopbegin
-    put32(0);   // susloopend
+    put32(0);    // susloopbegin
+    put32(0);    // susloopend
     const size_t sample_pointer_pos = f.size();
-    put32(0);   // samplepointer - заполним ниже
-    put8(0); put8(0); put8(0); put8(0); // vis/vid/vir/vit
+    put32(0); // samplepointer - заполним ниже
+    put8(0);
+    put8(0);
+    put8(0);
+    put8(0); // vis/vid/vir/vit
     CHECK_EQ(f.size() - smp_offset, static_cast<size_t>(80));
 
     const uint32_t pat_offset = static_cast<uint32_t>(f.size());
     std::vector<uint8_t> packed;
-    auto pb = [&](std::initializer_list<uint8_t> bytes) { for (uint8_t b : bytes) packed.push_back(b); };
+    auto pb = [&](std::initializer_list<uint8_t> bytes) {
+        for (uint8_t b : bytes)
+            packed.push_back(b);
+    };
     // Row0: ch0 note=48+instr=1, новая маска 0x03.
     pb({0x81, 0x03, 48, 1});
     pb({0x00}); // конец строки 0
@@ -197,17 +261,19 @@ std::vector<uint8_t> build_synthetic_it(bool with_signed_pan_pitch_env = false, 
     if (pattern != nullptr) packed = *pattern;
 
     put16(static_cast<uint16_t>(packed.size())); // packed length
-    put16(rows);                                  // numRows
-    put32(0);                                     // reserved
-    for (uint8_t b : packed) put8(b);
+    put16(rows);                                 // numRows
+    put32(0);                                    // reserved
+    for (uint8_t b : packed)
+        put8(b);
 
     const uint32_t sample_data_offset = static_cast<uint32_t>(f.size());
-    const int8_t pcm[4] = {10, -10, 20, -20};
-    for (int8_t v : pcm) put8(static_cast<uint8_t>(v));
+    const int8_t pcm[4]               = {10, -10, 20, -20};
+    for (int8_t v : pcm)
+        put8(static_cast<uint8_t>(v));
 
     // --- Заполнить указатели ---
     auto patch32 = [&](size_t pos, uint32_t v) {
-        f[pos] = static_cast<uint8_t>(v & 0xFF);
+        f[pos]     = static_cast<uint8_t>(v & 0xFF);
         f[pos + 1] = static_cast<uint8_t>((v >> 8) & 0xFF);
         f[pos + 2] = static_cast<uint8_t>((v >> 16) & 0xFF);
         f[pos + 3] = static_cast<uint8_t>((v >> 24) & 0xFF);
@@ -231,10 +297,13 @@ void test_synthetic_exact() {
 
     Song song;
     const char* error = nullptr;
-    const bool ok = formats::it::load(mbs.as_byte_source(), mem, song, &error);
+    const bool ok     = formats::it::load(mbs.as_byte_source(), mem, song, &error);
     if (!ok) std::printf("  load() failed: %s\n", error ? error : "(no message)");
     CHECK(ok);
-    if (!ok) { memory::track_memory_destroy(mem); return; }
+    if (!ok) {
+        memory::track_memory_destroy(mem);
+        return;
+    }
 
     CHECK_EQ(song.pattern_count, static_cast<uint16_t>(1));
     CHECK_EQ(song.sample_count, static_cast<uint16_t>(1));
@@ -269,8 +338,8 @@ void test_synthetic_exact() {
     // Паттерн всегда упакован с channel_count=kMaxChannels(64), см.
     // formats/it.cpp (упрощение: нет отдельного прохода ради точного числа
     // активных каналов на паттерн).
-    patterns::PatternReader reader(memory::psram_pattern_ptr(mem.psram, song.patterns[0].psram_offset),
-                                    song.patterns[0].row_count, song.patterns[0].channel_count);
+    patterns::PatternReader reader(memory::psram_pattern_ptr(mem.psram, song.patterns[0].psram_offset), song.patterns[0].row_count,
+                                   song.patterns[0].channel_count);
     std::vector<soundsinth::model::PatternCell> cells(song.patterns[0].channel_count);
 
     reader.read_row(0, cells.data());
@@ -295,9 +364,10 @@ void test_synthetic_exact() {
     auto* cache_entry = memory::sample_cache_find(mem.sample_cache, 0);
     CHECK(cache_entry != nullptr);
     if (cache_entry) {
-        const auto* p = reinterpret_cast<const int8_t*>(memory::psram_page_ptr(mem.psram, cache_entry->first_page));
+        const auto* p        = reinterpret_cast<const int8_t*>(memory::psram_page_ptr(mem.psram, cache_entry->first_page));
         const int8_t want[4] = {10, -10, 20, -20};
-        for (int i = 0; i < 4; ++i) CHECK_EQ(p[i], want[i]);
+        for (int i = 0; i < 4; ++i)
+            CHECK_EQ(p[i], want[i]);
     }
 
     memory::track_memory_destroy(mem);
@@ -307,22 +377,27 @@ void test_synthetic_exact() {
 // 20, -20}; 16 бит знаковый и беззнаковый; стерео (флаг 0x04) - левый канал.
 void test_pcm_variants() {
     std::printf("test_it_pcm_variants\n");
-    struct Case { uint8_t flags_add; uint8_t cvt; std::vector<uint8_t> data; bool wide; };
+    struct Case {
+        uint8_t flags_add;
+        uint8_t cvt;
+        std::vector<uint8_t> data;
+        bool wide;
+    };
     const Case cases[] = {
         {0x00, 0x00, {138, 118, 148, 108}, false},
-        {0x02, 0x01, {0xE8, 0x03, 0x18, 0xFC, 0xD0, 0x07, 0x30, 0xF8}, true},  // 1000, -1000, 2000, -2000
-        {0x02, 0x00, {0xE8, 0x83, 0x18, 0x7C, 0xD0, 0x87, 0x30, 0x78}, true},  // то же + 32768
-        {0x04, 0x01, {10, 246, 20, 236, 9, 9, 9, 9}, false},                   // левый {10, -10, 20, -20}
+        {0x02, 0x01, {0xE8, 0x03, 0x18, 0xFC, 0xD0, 0x07, 0x30, 0xF8}, true}, // 1000, -1000, 2000, -2000
+        {0x02, 0x00, {0xE8, 0x83, 0x18, 0x7C, 0xD0, 0x87, 0x30, 0x78}, true}, // то же + 32768
+        {0x04, 0x01, {10, 246, 20, 236, 9, 9, 9, 9}, false},                  // левый {10, -10, 20, -20}
     };
     for (const Case& c : cases) {
         std::vector<uint8_t> file = build_synthetic_it();
-        const char kImps[4] = {'I', 'M', 'P', 'S'};
-        auto it = std::search(file.begin(), file.end(), kImps, kImps + 4);
+        const char kImps[4]       = {'I', 'M', 'P', 'S'};
+        auto it                   = std::search(file.begin(), file.end(), kImps, kImps + 4);
         CHECK(it != file.end());
         if (it == file.end()) return;
         const size_t smp = static_cast<size_t>(it - file.begin());
-        file[smp + 18] = static_cast<uint8_t>(file[smp + 18] | c.flags_add);
-        file[smp + 46] = c.cvt;
+        file[smp + 18]   = static_cast<uint8_t>(file[smp + 18] | c.flags_add);
+        file[smp + 46]   = c.cvt;
         file.resize(file.size() - 4); // PCM синтетики - последние 4 байта
         file.insert(file.end(), c.data.begin(), c.data.end());
         formats::MemoryByteSource src(file.data(), static_cast<uint32_t>(file.size()));
@@ -335,13 +410,15 @@ void test_pcm_variants() {
         CHECK(e != nullptr);
         if (e && c.wide) {
             CHECK(song.samples[0].resident_encoding == soundsinth::model::ResidentEncoding::Raw16);
-            const uint8_t* p = memory::psram_page_ptr(mem.psram, e->first_page);
+            const uint8_t* p      = memory::psram_page_ptr(mem.psram, e->first_page);
             const int16_t want[4] = {1000, -1000, 2000, -2000};
-            for (int i = 0; i < 4; ++i) CHECK_EQ(static_cast<int16_t>(p[2 * i] | (p[2 * i + 1] << 8)), want[i]);
+            for (int i = 0; i < 4; ++i)
+                CHECK_EQ(static_cast<int16_t>(p[2 * i] | (p[2 * i + 1] << 8)), want[i]);
         } else if (e) {
-            const auto* p = reinterpret_cast<const int8_t*>(memory::psram_page_ptr(mem.psram, e->first_page));
+            const auto* p        = reinterpret_cast<const int8_t*>(memory::psram_page_ptr(mem.psram, e->first_page));
             const int8_t want[4] = {10, -10, 20, -20};
-            for (int i = 0; i < 4; ++i) CHECK_EQ(p[i], want[i]);
+            for (int i = 0; i < 4; ++i)
+                CHECK_EQ(p[i], want[i]);
         }
         memory::track_memory_destroy(mem);
     }
@@ -352,7 +429,7 @@ void test_real_small_file_smoke() {
 
     std::ifstream in("SD/test_music/it/00009.it", std::ios::binary);
     if (!in) {
-        std::printf("  файл не найден — ПРОПУСК (запуск не из корня репозитория?)\n");
+        std::printf("  file not found - SKIP (not started from the repository root?)\n");
         return;
     }
     std::vector<uint8_t> file((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
@@ -364,7 +441,7 @@ void test_real_small_file_smoke() {
 
     Song song;
     const char* error = nullptr;
-    const bool ok = formats::it::load(mbs.as_byte_source(), mem, song, &error);
+    const bool ok     = formats::it::load(mbs.as_byte_source(), mem, song, &error);
     if (!ok) std::printf("  load() failed: %s\n", error ? error : "(no message)");
     CHECK(ok);
     if (ok) {
@@ -398,7 +475,7 @@ void test_pan_pitch_envelope_offset_and_filter_flag() {
 
     Song song;
     const char* error = nullptr;
-    const bool ok = formats::it::load(mbs.as_byte_source(), mem, song, &error);
+    const bool ok     = formats::it::load(mbs.as_byte_source(), mem, song, &error);
     if (!ok) std::printf("  load() failed: %s\n", error ? error : "(no message)");
     CHECK(ok);
     if (ok) {
@@ -406,7 +483,7 @@ void test_pan_pitch_envelope_offset_and_filter_flag() {
         CHECK(inst.panning_envelope != nullptr);
         CHECK_EQ(inst.panning_envelope->point_count, static_cast<uint8_t>(1));
         CHECK_EQ(inst.panning_envelope->points[0].value, static_cast<int16_t>(12)); // 32+(-20)=12, а не мусор от переполнения
-        CHECK(inst.pitch_envelope == nullptr); // envFilter - фильтр, а не питч, не подключаем
+        CHECK(inst.pitch_envelope == nullptr);                                      // envFilter - фильтр, а не питч, не подключаем
     }
 
     memory::track_memory_destroy(mem);
@@ -418,7 +495,7 @@ void test_chnpan_mute_bit() {
     std::printf("test_it_chnpan_mute_bit\n");
 
     std::vector<uint8_t> file = build_synthetic_it();
-    file[0x40] = 0x80 | 16;
+    file[0x40]                = 0x80 | 16;
     formats::MemoryByteSource mbs(file.data(), static_cast<uint32_t>(file.size()));
 
     memory::TrackMemory mem;
@@ -426,7 +503,7 @@ void test_chnpan_mute_bit() {
 
     Song song;
     const char* error = nullptr;
-    const bool ok = formats::it::load(mbs.as_byte_source(), mem, song, &error);
+    const bool ok     = formats::it::load(mbs.as_byte_source(), mem, song, &error);
     CHECK(ok);
     if (ok) {
         CHECK(song.channel_muted == 1);
@@ -467,11 +544,12 @@ void test_modplug_signature() {
     };
     for (const Case& c : cases) {
         std::vector<uint8_t> file = build_synthetic_it();
-        file[0x28] = static_cast<uint8_t>(c.cwtv);
-        file[0x29] = static_cast<uint8_t>(c.cwtv >> 8);
-        file[0x2A] = static_cast<uint8_t>(c.cmwt);
-        file[0x2B] = static_cast<uint8_t>(c.cmwt >> 8);
-        for (int i = 0; i < 4; ++i) file[0x3C + i] = static_cast<uint8_t>(c.reserved >> (8 * i));
+        file[0x28]                = static_cast<uint8_t>(c.cwtv);
+        file[0x29]                = static_cast<uint8_t>(c.cwtv >> 8);
+        file[0x2A]                = static_cast<uint8_t>(c.cmwt);
+        file[0x2B]                = static_cast<uint8_t>(c.cmwt >> 8);
+        for (int i = 0; i < 4; ++i)
+            file[0x3C + i] = static_cast<uint8_t>(c.reserved >> (8 * i));
         formats::MemoryByteSource mbs(file.data(), static_cast<uint32_t>(file.size()));
         memory::TrackMemory mem;
         memory::track_memory_create(mem);
@@ -489,12 +567,15 @@ void test_modplug_signature() {
 // 0xFF - ModPlug-ADPCM, сэмпл не публикуется.
 void test_uncompressed_delta_and_adpcm() {
     std::printf("test_it_uncompressed_delta_and_adpcm\n");
-    struct Case { uint8_t cvt; bool published; };
+    struct Case {
+        uint8_t cvt;
+        bool published;
+    };
     const Case cases[] = {{0x05, true}, {0xFF, false}};
     for (const Case& c : cases) {
         std::vector<uint8_t> file = build_synthetic_it();
-        const char kImps[4] = {'I', 'M', 'P', 'S'};
-        auto it = std::search(file.begin(), file.end(), kImps, kImps + 4);
+        const char kImps[4]       = {'I', 'M', 'P', 'S'};
+        auto it                   = std::search(file.begin(), file.end(), kImps, kImps + 4);
         CHECK(it != file.end());
         if (it == file.end()) return;
         *(it + 46) = c.cvt;
@@ -506,9 +587,10 @@ void test_uncompressed_delta_and_adpcm() {
         const memory::SampleCacheEntry* e = memory::sample_cache_find(mem.sample_cache, 0);
         CHECK_EQ(e != nullptr, c.published);
         if (e) {
-            const auto* p = reinterpret_cast<const int8_t*>(memory::psram_page_ptr(mem.psram, e->first_page));
+            const auto* p        = reinterpret_cast<const int8_t*>(memory::psram_page_ptr(mem.psram, e->first_page));
             const int8_t want[4] = {10, -10, 20, -20};
-            for (int i = 0; i < 4; ++i) CHECK_EQ(p[i], want[i]);
+            for (int i = 0; i < 4; ++i)
+                CHECK_EQ(p[i], want[i]);
         }
         memory::track_memory_destroy(mem);
     }
@@ -520,17 +602,18 @@ void test_uncompressed_delta_and_adpcm() {
 void test_envelope_sanitized() {
     std::printf("test_it_envelope_sanitized\n");
     std::vector<uint8_t> file = build_synthetic_it();
-    const char kImpi[4] = {'I', 'M', 'P', 'I'};
-    auto it = std::search(file.begin(), file.end(), kImpi, kImpi + 4);
+    const char kImpi[4]       = {'I', 'M', 'P', 'I'};
+    auto it                   = std::search(file.begin(), file.end(), kImpi, kImpi + 4);
     CHECK(it != file.end());
     if (it == file.end()) return;
-    const size_t env = static_cast<size_t>(it - file.begin()) + 304;
-    file[env + 0] = 0x01 | 0x02; // включена, петля
-    file[env + 1] = 3;
-    file[env + 2] = 1;
-    file[env + 3] = 9; // конец петли за точками
+    const size_t env       = static_cast<size_t>(it - file.begin()) + 304;
+    file[env + 0]          = 0x01 | 0x02; // включена, петля
+    file[env + 1]          = 3;
+    file[env + 2]          = 1;
+    file[env + 3]          = 9; // конец петли за точками
     const uint8_t nodes[9] = {64, 0, 0, 32, 200, 0, 0, 20, 0};
-    for (int i = 0; i < 9; ++i) file[env + 6 + i] = nodes[i];
+    for (int i = 0; i < 9; ++i)
+        file[env + 6 + i] = nodes[i];
     formats::MemoryByteSource src(file.data(), static_cast<uint32_t>(file.size()));
     memory::TrackMemory mem;
     memory::track_memory_create(mem);
@@ -554,8 +637,8 @@ void test_envelope_sanitized() {
 void test_keymap_ranges() {
     std::printf("test_it_keymap_ranges\n");
     std::vector<uint8_t> file = build_synthetic_it();
-    const char kImpi[4] = {'I', 'M', 'P', 'I'};
-    auto it = std::search(file.begin(), file.end(), kImpi, kImpi + 4);
+    const char kImpi[4]       = {'I', 'M', 'P', 'I'};
+    auto it                   = std::search(file.begin(), file.end(), kImpi, kImpi + 4);
     CHECK(it != file.end());
     if (it == file.end()) return;
     const size_t kb = static_cast<size_t>(it - file.begin()) + 64;
@@ -564,7 +647,7 @@ void test_keymap_ranges() {
         if (n < 60) note = n + 12;
         if (n == 62) note = 61;
         if (n > 100) note = 72;
-        file[kb + n * 2] = static_cast<uint8_t>(note);
+        file[kb + n * 2]     = static_cast<uint8_t>(note);
         file[kb + n * 2 + 1] = n == 100 ? 0 : 1;
     }
     formats::MemoryByteSource src(file.data(), static_cast<uint32_t>(file.size()));
@@ -576,12 +659,16 @@ void test_keymap_ranges() {
     CHECK_EQ(ins.note_to_sample_range_count, static_cast<uint8_t>(6));
     if (ins.note_to_sample_ranges != nullptr && ins.note_to_sample_range_count == 6) {
         const uint8_t starts[6] = {0, 60, 62, 63, 100, 101 | soundsinth::model::kKeymapFixedNote};
-        for (int r = 0; r < 6; ++r) CHECK_EQ(ins.note_to_sample_ranges[r].start_note, starts[r]);
+        for (int r = 0; r < 6; ++r)
+            CHECK_EQ(ins.note_to_sample_ranges[r].start_note, starts[r]);
         CHECK_EQ(ins.note_to_sample_ranges[4].sample_index, soundsinth::model::kNoSample);
     }
-    struct Case { uint8_t key; bool ok; uint8_t note; };
-    const Case cases[] = {{5, true, 17}, {61, true, 61}, {62, true, 61}, {99, true, 99},
-                          {100, false, 0}, {101, true, 72}, {119, true, 72}};
+    struct Case {
+        uint8_t key;
+        bool ok;
+        uint8_t note;
+    };
+    const Case cases[] = {{5, true, 17}, {61, true, 61}, {62, true, 61}, {99, true, 99}, {100, false, 0}, {101, true, 72}, {119, true, 72}};
     for (const Case& c : cases) {
         uint16_t idx = 0xFFFF;
         uint8_t note = 0;
@@ -600,9 +687,12 @@ void test_keymap_ranges() {
 void test_keymap_high_bytes() {
     std::printf("test_it_keymap_high_bytes\n");
     uint8_t hi[120] = {};
-    hi[5] = 1;
-    hi[6] = 2;
-    struct Case { const char* magic; bool high; };
+    hi[5]           = 1;
+    hi[6]           = 2;
+    struct Case {
+        const char* magic;
+        bool high;
+    };
     const Case cases[] = {{"XTPM", true}, {"MPTX", true}, {nullptr, false}};
     for (const Case& c : cases) {
         std::vector<uint8_t> file = build_synthetic_it(false, 299, c.magic, hi);
@@ -611,12 +701,12 @@ void test_keymap_high_bytes() {
         memory::track_memory_create(mem);
         Song song;
         const char* error = nullptr;
-        const bool ok = formats::it::load(src.as_byte_source(), mem, song, &error);
+        const bool ok     = formats::it::load(src.as_byte_source(), mem, song, &error);
         if (!ok) std::printf("  load: %s\n", error ? error : "?");
         CHECK(ok);
         CHECK_EQ(song.sample_count, static_cast<uint16_t>(300));
-        uint16_t idx = 0xFFFF;
-        uint8_t note = 0;
+        uint16_t idx  = 0xFFFF;
+        uint8_t note  = 0;
         bool unmapped = false;
         CHECK(soundsinth::model::resolve_sample_index(song, 1, 5, &idx, &note));
         CHECK_EQ(idx, static_cast<uint16_t>(c.high ? 256 : 0));
@@ -635,7 +725,7 @@ void test_header_table() {
     std::printf("test_it_header_table\n");
     auto patch = [](std::vector<uint8_t>& f) {
         const uint8_t row2[3] = {0x82, 0x04, 200}; // строка 2: канал 2 -> канал 5
-        auto it = std::search(f.begin(), f.end(), row2, row2 + 3);
+        auto it               = std::search(f.begin(), f.end(), row2, row2 + 3);
         CHECK(it != f.end());
         if (it != f.end()) *it = 0x85;
     };
@@ -670,8 +760,8 @@ void test_header_table() {
     }
     {
         std::vector<uint8_t> f = build_synthetic_it();
-        f[0x2C] = 0x04 | 0x08 | 0x10 | 0x20;
-        f[0x2D] = 0x10; // 0x1000
+        f[0x2C]                = 0x04 | 0x08 | 0x10 | 0x20;
+        f[0x2D]                = 0x10; // 0x1000
         formats::MemoryByteSource src(f.data(), static_cast<uint32_t>(f.size()));
         memory::TrackMemory mem;
         memory::track_memory_create(mem);
@@ -687,7 +777,10 @@ void test_header_table() {
         CHECK_EQ(song.filter_units_per_octave, static_cast<uint8_t>(20));
         memory::track_memory_destroy(mem);
     }
-    struct Flow { uint16_t cwtv; uint32_t want; };
+    struct Flow {
+        uint16_t cwtv;
+        uint32_t want;
+    };
     const Flow flows[] = {
         {0x0103, soundsinth::model::kFlowLoopGlobalTarget},
         {0x0200, soundsinth::model::kFlowLoopDelaysSameRowBreak},
@@ -695,8 +788,8 @@ void test_header_table() {
     };
     for (const Flow& c : flows) {
         std::vector<uint8_t> f = build_synthetic_it();
-        f[0x28] = static_cast<uint8_t>(c.cwtv & 0xFF);
-        f[0x29] = static_cast<uint8_t>(c.cwtv >> 8);
+        f[0x28]                = static_cast<uint8_t>(c.cwtv & 0xFF);
+        f[0x29]                = static_cast<uint8_t>(c.cwtv >> 8);
         formats::MemoryByteSource src(f.data(), static_cast<uint32_t>(f.size()));
         memory::TrackMemory mem;
         memory::track_memory_create(mem);
@@ -711,7 +804,7 @@ namespace {
 
 // Колонка громкости IT - таблица Load_it.cpp OpenMPT, независимо от загрузчика.
 soundsinth::model::VolumeColumnCommand it_volume_ref(uint8_t v) {
-    using T = VolumeColumnType;
+    using T  = VolumeColumnType;
     auto cmd = [](T t, int p) { return soundsinth::model::VolumeColumnCommand{t, static_cast<uint8_t>(p)}; };
     if (v <= 64) return cmd(T::SetVolume, v);
     if (v >= 128 && v <= 192) return cmd(T::SetPanning, v - 128);
@@ -733,32 +826,60 @@ soundsinth::model::VolumeColumnCommand it_volume_ref(uint8_t v) {
 // (расхождение, пачка поведения). Колонка громкости - все 256 байт.
 void test_effect_letters() {
     std::printf("test_it_effect_letters\n");
-    struct Row { uint8_t cmd, param; Effect type; uint8_t want; };
+    struct Row {
+        uint8_t cmd, param;
+        Effect type;
+        uint8_t want;
+    };
     const Row table[] = {
-        {1, 6, Effect::SetSpeed, 6},          {2, 3, Effect::PositionJump, 3},
-        {3, 0x15, Effect::PatternBreak, 0x15}, {4, 0xF1, Effect::VolumeSlide, 0xF1},
-        {5, 0x12, Effect::PortaDown, 0x12},   {6, 0xE2, Effect::PortaUp, 0xE2},
-        {7, 0x20, Effect::TonePorta, 0x20},   {8, 0x44, Effect::Vibrato, 0x44},
-        {9, 0x21, Effect::Tremor, 0x21},      {10, 0x37, Effect::Arpeggio, 0x37},
-        {11, 0x02, Effect::VibratoVolSlide, 0x02}, {12, 0x20, Effect::TonePortaVolSlide, 0x20},
-        {13, 0x30, Effect::SetChannelVolume, 0x30}, {14, 0xF1, Effect::ChannelVolumeSlide, 0xF1},
-        {15, 0x10, Effect::SampleOffset, 0x10}, {16, 0x02, Effect::PanningSlide, 0x02},
-        {17, 0x13, Effect::Retrigger, 0x13},  {18, 0x44, Effect::Tremolo, 0x44},
-        {20, 0x96, Effect::SetTempo, 0x96},   {20, 0x05, Effect::SetTempo, 0x05},
-        {21, 0x44, Effect::FineVibrato, 0x44}, {22, 0x40, Effect::SetGlobalVolume, 0x40},
-        {22, 0x90, Effect::SetGlobalVolume, 0x90}, {23, 0x21, Effect::GlobalVolumeSlide, 0x21},
-        {24, 0x80, Effect::SetPanning, 0x80}, {25, 0x44, Effect::Panbrello, 0x44},
-        {26, 0x50, Effect::SetMidiMacro, 0x50}, {28, 0x51, Effect::SmoothMidiMacro, 0x51},
-        {19, 0x11, Effect::GlissandoControl, 1}, {19, 0x22, Effect::SetFinetune, 2},
-        {19, 0x31, Effect::SetVibratoWaveform, 1}, {19, 0x42, Effect::SetTremoloWaveform, 2},
-        {19, 0x53, Effect::SetPanbrelloWaveform, 3}, {19, 0x62, Effect::FinePatternDelay, 2},
-        {19, 0x8C, Effect::SetPanning4Bit, 0xC}, {19, 0x91, Effect::SoundControl, 1},
-        {19, 0xA2, Effect::HighOffset, 2},    {19, 0xB3, Effect::PatternLoop, 3},
-        {19, 0xC4, Effect::NoteCut, 4},       {19, 0xD5, Effect::NoteDelay, 5},
-        {19, 0xE6, Effect::PatternDelay, 6},  {19, 0xF7, Effect::SetActiveMidiMacro, 7},
-        {19, 0x05, Effect::None, 0},          {19, 0x75, Effect::None, 0},
-        {0, 0x10, Effect::None, 0},           {27, 0x10, Effect::None, 0},
-        {29, 0x12, Effect::None, 0},          {30, 0x40, Effect::None, 0},
+        {1, 6, Effect::SetSpeed, 6},
+        {2, 3, Effect::PositionJump, 3},
+        {3, 0x15, Effect::PatternBreak, 0x15},
+        {4, 0xF1, Effect::VolumeSlide, 0xF1},
+        {5, 0x12, Effect::PortaDown, 0x12},
+        {6, 0xE2, Effect::PortaUp, 0xE2},
+        {7, 0x20, Effect::TonePorta, 0x20},
+        {8, 0x44, Effect::Vibrato, 0x44},
+        {9, 0x21, Effect::Tremor, 0x21},
+        {10, 0x37, Effect::Arpeggio, 0x37},
+        {11, 0x02, Effect::VibratoVolSlide, 0x02},
+        {12, 0x20, Effect::TonePortaVolSlide, 0x20},
+        {13, 0x30, Effect::SetChannelVolume, 0x30},
+        {14, 0xF1, Effect::ChannelVolumeSlide, 0xF1},
+        {15, 0x10, Effect::SampleOffset, 0x10},
+        {16, 0x02, Effect::PanningSlide, 0x02},
+        {17, 0x13, Effect::Retrigger, 0x13},
+        {18, 0x44, Effect::Tremolo, 0x44},
+        {20, 0x96, Effect::SetTempo, 0x96},
+        {20, 0x05, Effect::SetTempo, 0x05},
+        {21, 0x44, Effect::FineVibrato, 0x44},
+        {22, 0x40, Effect::SetGlobalVolume, 0x40},
+        {22, 0x90, Effect::SetGlobalVolume, 0x90},
+        {23, 0x21, Effect::GlobalVolumeSlide, 0x21},
+        {24, 0x80, Effect::SetPanning, 0x80},
+        {25, 0x44, Effect::Panbrello, 0x44},
+        {26, 0x50, Effect::SetMidiMacro, 0x50},
+        {28, 0x51, Effect::SmoothMidiMacro, 0x51},
+        {19, 0x11, Effect::GlissandoControl, 1},
+        {19, 0x22, Effect::SetFinetune, 2},
+        {19, 0x31, Effect::SetVibratoWaveform, 1},
+        {19, 0x42, Effect::SetTremoloWaveform, 2},
+        {19, 0x53, Effect::SetPanbrelloWaveform, 3},
+        {19, 0x62, Effect::FinePatternDelay, 2},
+        {19, 0x8C, Effect::SetPanning4Bit, 0xC},
+        {19, 0x91, Effect::SoundControl, 1},
+        {19, 0xA2, Effect::HighOffset, 2},
+        {19, 0xB3, Effect::PatternLoop, 3},
+        {19, 0xC4, Effect::NoteCut, 4},
+        {19, 0xD5, Effect::NoteDelay, 5},
+        {19, 0xE6, Effect::PatternDelay, 6},
+        {19, 0xF7, Effect::SetActiveMidiMacro, 7},
+        {19, 0x05, Effect::None, 0},
+        {19, 0x75, Effect::None, 0},
+        {0, 0x10, Effect::None, 0},
+        {27, 0x10, Effect::None, 0},
+        {29, 0x12, Effect::None, 0},
+        {30, 0x40, Effect::None, 0},
         {31, 0x40, Effect::None, 0},
     };
     constexpr size_t kRows = sizeof(table) / sizeof(table[0]);
@@ -786,8 +907,7 @@ void test_effect_letters() {
         CHECK_EQ(song.channel_count, static_cast<uint8_t>(1));
         const soundsinth::model::Pattern& pat = song.patterns[0];
         CHECK_EQ(pat.row_count, static_cast<uint16_t>(256));
-        patterns::PatternReader reader(memory::psram_pattern_ptr(mem.psram, pat.psram_offset), pat.row_count,
-                                       pat.channel_count);
+        patterns::PatternReader reader(memory::psram_pattern_ptr(mem.psram, pat.psram_offset), pat.row_count, pat.channel_count);
         uint32_t bad = 0;
         for (size_t row = 0; row < 256; ++row) {
             soundsinth::model::PatternCell cells[1];
@@ -795,20 +915,17 @@ void test_effect_letters() {
             const soundsinth::model::VolumeColumnCommand want_vol = it_volume_ref(static_cast<uint8_t>(row));
             if (cells[0].volume.type != want_vol.type || cells[0].volume.param != want_vol.param) {
                 if (++bad <= 5) {
-                    std::printf("  громкость %u: тип %d param %u, ждали %d %u\n", static_cast<unsigned>(row),
-                                static_cast<int>(cells[0].volume.type), cells[0].volume.param,
-                                static_cast<int>(want_vol.type), want_vol.param);
+                    std::printf("  volume %u: type %d param %u, expected %d %u\n", static_cast<unsigned>(row), static_cast<int>(cells[0].volume.type),
+                                cells[0].volume.param, static_cast<int>(want_vol.type), want_vol.param);
                 }
             }
             if (row >= kRows) continue;
             const soundsinth::model::EffectCommand& e = cells[0].effect;
-            const bool none = table[row].type == Effect::None;
-            if (e.type != table[row].type || (!none && e.param != table[row].want) ||
-                e.rate != soundsinth::model::SlideRate::PerTick) {
+            const bool none                           = table[row].type == Effect::None;
+            if (e.type != table[row].type || (!none && e.param != table[row].want) || e.rate != soundsinth::model::SlideRate::PerTick) {
                 if (++bad <= 5) {
-                    std::printf("  буква %u param %02X: тип %d param %02X, ждали %d %02X\n", table[row].cmd,
-                                table[row].param, static_cast<int>(e.type), e.param, static_cast<int>(table[row].type),
-                                table[row].want);
+                    std::printf("  letter %u param %02X: type %d param %02X, expected %d %02X\n", table[row].cmd, table[row].param, static_cast<int>(e.type),
+                                e.param, static_cast<int>(table[row].type), table[row].want);
                 }
             }
         }
@@ -821,19 +938,21 @@ void test_effect_letters() {
 // четырьмя байтами своих данных в конце файла.
 void add_second_sample(std::vector<uint8_t>& f, uint8_t vol) {
     const char kImps[4] = {'I', 'M', 'P', 'S'};
-    auto it = std::search(f.begin(), f.end(), kImps, kImps + 4);
+    auto it             = std::search(f.begin(), f.end(), kImps, kImps + 4);
     CHECK(it != f.end());
     if (it == f.end()) return;
     std::vector<uint8_t> hdr(it, it + 80);
-    hdr[19] = vol;
-    const uint32_t hdr_offset = static_cast<uint32_t>(f.size());
+    hdr[19]                    = vol;
+    const uint32_t hdr_offset  = static_cast<uint32_t>(f.size());
     const uint32_t data_offset = hdr_offset + 80;
-    for (int i = 0; i < 4; ++i) hdr[72 + i] = static_cast<uint8_t>(data_offset >> (8 * i));
+    for (int i = 0; i < 4; ++i)
+        hdr[72 + i] = static_cast<uint8_t>(data_offset >> (8 * i));
     f.insert(f.end(), hdr.begin(), hdr.end());
     const uint8_t pcm[4] = {1, 2, 3, 4};
     f.insert(f.end(), pcm, pcm + 4);
     const size_t second_ptr = 192 + 1 + 4 + 4; // за order, указателем инструмента и первого сэмпла
-    for (int i = 0; i < 4; ++i) f[second_ptr + i] = static_cast<uint8_t>(hdr_offset >> (8 * i));
+    for (int i = 0; i < 4; ++i)
+        f[second_ptr + i] = static_cast<uint8_t>(hdr_offset >> (8 * i));
 }
 
 // Режим сэмплов (флаг instrumentMode снят): инструмент на сэмпл, keymap и
@@ -841,7 +960,7 @@ void add_second_sample(std::vector<uint8_t>& f, uint8_t vol) {
 void test_sample_mode() {
     std::printf("test_it_sample_mode\n");
     std::vector<uint8_t> f = build_synthetic_it(false, 1);
-    f[0x2C] = 0;
+    f[0x2C]                = 0;
     add_second_sample(f, 20);
     formats::MemoryByteSource src(f.data(), static_cast<uint32_t>(f.size()));
     memory::TrackMemory mem;
@@ -875,24 +994,25 @@ void test_sample_mode() {
 void test_old_instrument() {
     std::printf("test_it_old_instrument\n");
     std::vector<uint8_t> f = build_synthetic_it();
-    f[0x2A] = 0x00; // cmwt 0x0100
-    f[0x2B] = 0x01;
-    const char kImpi[4] = {'I', 'M', 'P', 'I'};
-    auto it = std::search(f.begin(), f.end(), kImpi, kImpi + 4);
+    f[0x2A]                = 0x00; // cmwt 0x0100
+    f[0x2B]                = 0x01;
+    const char kImpi[4]    = {'I', 'M', 'P', 'I'};
+    auto it                = std::search(f.begin(), f.end(), kImpi, kImpi + 4);
     CHECK(it != f.end());
     if (it == f.end()) return;
-    const size_t h = static_cast<size_t>(it - f.begin());
-    f[h + 17] = 0x01 | 0x04; // флаги огибающей
-    f[h + 18] = 0;           // петля
-    f[h + 19] = 0;
-    f[h + 20] = 1;           // удержание
-    f[h + 21] = 1;
-    f[h + 24] = 100;         // fadeout
-    f[h + 25] = 0;
-    f[h + 26] = 2;           // NNA Off
-    f[h + 27] = 1;           // DNC Note
+    const size_t h         = static_cast<size_t>(it - f.begin());
+    f[h + 17]              = 0x01 | 0x04; // флаги огибающей
+    f[h + 18]              = 0;           // петля
+    f[h + 19]              = 0;
+    f[h + 20]              = 1; // удержание
+    f[h + 21]              = 1;
+    f[h + 24]              = 100; // fadeout
+    f[h + 25]              = 0;
+    f[h + 26]              = 2; // NNA Off
+    f[h + 27]              = 1; // DNC Note
     const uint8_t nodes[8] = {0, 64, 10, 32, 20, 0, 0xFF, 0};
-    for (int i = 0; i < 8; ++i) f[h + 504 + i] = nodes[i];
+    for (int i = 0; i < 8; ++i)
+        f[h + 504 + i] = nodes[i];
     formats::MemoryByteSource src(f.data(), static_cast<uint32_t>(f.size()));
     memory::TrackMemory mem;
     memory::track_memory_create(mem);
@@ -924,13 +1044,13 @@ void test_old_instrument() {
 void test_empty_envelopes() {
     std::printf("test_it_empty_envelopes\n");
     std::vector<uint8_t> f = build_synthetic_it(true);
-    const char kImpi[4] = {'I', 'M', 'P', 'I'};
-    auto it = std::search(f.begin(), f.end(), kImpi, kImpi + 4);
+    const char kImpi[4]    = {'I', 'M', 'P', 'I'};
+    auto it                = std::search(f.begin(), f.end(), kImpi, kImpi + 4);
     CHECK(it != f.end());
     if (it == f.end()) return;
     const size_t h = static_cast<size_t>(it - f.begin());
     for (size_t env : {304u, 386u, 468u}) {
-        f[h + env] = 0x01;
+        f[h + env]     = 0x01;
         f[h + env + 1] = 0;
     }
     formats::MemoryByteSource src(f.data(), static_cast<uint32_t>(f.size()));
@@ -959,14 +1079,14 @@ void test_empty_envelopes() {
 void test_load_stats() {
     std::printf("test_it_load_stats\n");
     std::vector<uint8_t> body = {0x81, 0x08, 19, 0x05, 0x00}; // канал 1: S05
-    std::vector<uint8_t> f = build_synthetic_it(false, 0, nullptr, nullptr, &body, 1);
-    const char kImps[4] = {'I', 'M', 'P', 'S'};
-    auto it = std::search(f.begin(), f.end(), kImps, kImps + 4);
+    std::vector<uint8_t> f    = build_synthetic_it(false, 0, nullptr, nullptr, &body, 1);
+    const char kImps[4]       = {'I', 'M', 'P', 'S'};
+    auto it                   = std::search(f.begin(), f.end(), kImps, kImps + 4);
     CHECK(it != f.end());
     if (it == f.end()) return;
-    const size_t h = static_cast<size_t>(it - f.begin());
-    f[h + 18] |= 0x20; // петля удержания
-    f[h + 77] = 5;     // глубина автовибрато
+    const size_t h  = static_cast<size_t>(it - f.begin());
+    f[h + 18]      |= 0x20; // петля удержания
+    f[h + 77]       = 5;    // глубина автовибрато
     for (const bool cut : {false, true}) {
         formats::MemoryByteSource src(f.data(), static_cast<uint32_t>(f.size()) - (cut ? 2u : 0u));
         memory::TrackMemory mem;

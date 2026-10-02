@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 #pragma once
 
 // mixbus::SoundSource, играющий Song: секвенсор, диспетчер эффектов и
@@ -45,12 +46,12 @@ public:
     // сумма поканальных рендеров равна полному. Вызов render_add длиннее
     // discard_frames режется на куски. Без discard solo не включается.
     void set_solo_channel(int32_t ch, int32_t* discard, uint32_t discard_frames) {
-        const bool ok = ch >= 0 && discard != nullptr && discard_frames > 0;
-        solo_channel_ = ok ? ch : -1;
-        solo_discard_ = ok ? discard : nullptr;
+        const bool ok        = ch >= 0 && discard != nullptr && discard_frames > 0;
+        solo_channel_        = ok ? ch : -1;
+        solo_discard_        = ok ? discard : nullptr;
         solo_discard_frames_ = ok ? discard_frames : 0;
-        mixer_.discard_l = solo_discard_;
-        mixer_.discard_r = ok ? discard + discard_frames : nullptr;
+        mixer_.discard_l     = solo_discard_;
+        mixer_.discard_r     = ok ? discard + discard_frames : nullptr;
     }
 
     // Сколько слотов сводится сейчас, по rebuild_active_indices(): звучащие
@@ -173,7 +174,7 @@ public:
 
     using TickRunner = void (*)(void* user);
     void set_tick_runner(TickRunner fn, void* user) {
-        tick_runner_ = fn;
+        tick_runner_      = fn;
         tick_runner_user_ = user;
     }
 
@@ -182,7 +183,7 @@ public:
     // строка без событий. Ставится до первого рендера.
     using LiveRowFn = const soundsinth::model::PatternCell* (*)(void* user);
     void set_live_row_source(LiveRowFn fn, void* user) {
-        live_row_ = fn;
+        live_row_      = fn;
         live_row_user_ = user;
         // У живой песни нет ни одной воспроизводимой позиции order, и
         // sequencer_init объявил её законченной. Живой режим играет
@@ -191,7 +192,7 @@ public:
     }
 
     void set_tick_observer(TickObserver fn, void* user) {
-        tick_observer_ = fn;
+        tick_observer_      = fn;
         tick_observer_user_ = user;
     }
 
@@ -201,8 +202,7 @@ private:
     // DispatchContext::on_note_trigger_nna: static-обёртка над
     // handle_note_trigger_nna, self приходит через void* user (как у
     // row_callback и render_add).
-    static void on_note_trigger_nna(void* user, uint8_t channel, uint16_t new_instrument_1based,
-                                    uint16_t new_sample_index, uint8_t new_resolved_note);
+    static void on_note_trigger_nna(void* user, uint8_t channel, uint16_t new_instrument_1based, uint16_t new_sample_index, uint8_t new_resolved_note);
 
     void advance_tick();
     // Шаги тика после непрерывных эффектов, по порядку: огибающие фоновых
@@ -226,8 +226,7 @@ private:
     // в фон, по NewNoteAction его инструмента. Вызывается из
     // dispatch_row_effects до того, как новая нота перезапишет
     // channels_[channel]/mixer_.voices[channel].
-    void handle_note_trigger_nna(uint8_t channel, uint16_t new_instrument_1based, uint16_t new_sample_index,
-                                 uint8_t new_resolved_note);
+    void handle_note_trigger_nna(uint8_t channel, uint16_t new_instrument_1based, uint16_t new_sample_index, uint8_t new_resolved_note);
 
     // Пересобирает mixer_.active/mixer_.active_count раз за тик (в конце
     // advance_tick()), не за отсчёт. render_add() ходит по этому списку, а не
@@ -278,34 +277,33 @@ private:
     uint8_t voice_count_ = 0; // из них с voice_render, не больше SOUNDSINTH_MAX_VOICES
     // Сэмплы слотов, которые читают PSRAM на этом тике, - для TickObserver.
     uint16_t sample_map_[SOUNDSINTH_MAX_SLOTS];
-    uint8_t sample_map_count_ = 0;
-    uint32_t voices_unlisted_ = 0;
-    uint32_t voice_demand_peak_ = 0;
-    uint32_t triggers_without_sample_ = 0;
+    uint8_t sample_map_count_            = 0;
+    uint32_t voices_unlisted_            = 0;
+    uint32_t voice_demand_peak_          = 0;
+    uint32_t triggers_without_sample_    = 0;
     uint16_t missing_ring_[kMissingRing] = {};
-    TickObserver tick_observer_ = nullptr;
-    LiveRowFn live_row_ = nullptr;
-    void* live_row_user_ = nullptr;
-    TickRunner tick_runner_ = nullptr;
-    void* tick_runner_user_ = nullptr;
-    void* tick_observer_user_ = nullptr;
-    uint32_t peak_active_count_ = 0;
+    TickObserver tick_observer_          = nullptr;
+    LiveRowFn live_row_                  = nullptr;
+    void* live_row_user_                 = nullptr;
+    TickRunner tick_runner_              = nullptr;
+    void* tick_runner_user_              = nullptr;
+    void* tick_observer_user_            = nullptr;
+    uint32_t peak_active_count_          = 0;
 
     // Счётчик тика обнуляется в начале advance_tick(); остальные - максимумы с
     // создания движка.
-    uint32_t voice_triggers_this_tick_ = 0;
+    uint32_t voice_triggers_this_tick_    = 0;
     uint32_t max_voice_triggers_per_tick_ = 0;
-    uint32_t max_tick_duration_us_ = 0;
-    uint32_t worst_tick_active_count_ = 0;
-    uint32_t worst_tick_triggers_ = 0;
+    uint32_t max_tick_duration_us_        = 0;
+    uint32_t worst_tick_active_count_     = 0;
+    uint32_t worst_tick_triggers_         = 0;
 
     uint32_t voice_loop_total_us_ = 0;
-    uint64_t voice_sample_count_ = 0;
+    uint64_t voice_sample_count_  = 0;
 
     uint32_t load_ewma_q8_ = 0;
 
     bool model_load_enabled_ = false; // только без часов: загрузка по модели цены голоса
-
 
     // Антиклик. Громкость считается раз в тик, ступенька на каждой строке
     // слышна как щелчок и видна в рендере разрывами по сетке строк. Здесь
@@ -316,13 +314,13 @@ private:
     // 1200 отсчётов это около 4% из них.
     // Длина сглаживания: из песни, если она задала свою (Song::volume_ramp_samples),
     // иначе SOUNDSINTH_VOLUME_RAMP_SAMPLES.
-    uint32_t ramp_samples_ = 0; // ставится в конструкторе: из Song или config.h
-    bool wave_tail_ = false; // волновое гашение вместо замороженного отсчёта (только .mid)
-    bool envelope_db_ = false; // огибающая громкости в децибелах (kQuirkEnvelopeDecibel, .mid)
+    uint32_t ramp_samples_ = 0;     // ставится в конструкторе: из Song или config.h
+    bool wave_tail_        = false; // волновое гашение вместо замороженного отсчёта (только .mid)
+    bool envelope_db_      = false; // огибающая громкости в децибелах (kQuirkEnvelopeDecibel, .mid)
 
     // Длина сглаживания и гашения не больше kMaxRampSamples: счётчики - байт.
     static constexpr uint32_t kMaxRampSamples = UINT8_MAX;
-    static_assert(SOUNDSINTH_VOLUME_RAMP_SAMPLES <= kMaxRampSamples, "счётчики VoiceRamp - uint8_t");
+    static_assert(SOUNDSINTH_VOLUME_RAMP_SAMPLES <= kMaxRampSamples, "VoiceRamp counters are uint8_t");
 
     // Коэффициенты фильтра пересчитываются раз в тик вместе с громкостями
     // (rebuild_active_indices), состояние живёт в mixer_ и сбрасывается на
@@ -331,11 +329,9 @@ private:
     // | uint16(env_modifier) << 16. Совпал - коэффициенты верны, пересчёт не
     // нужен. cutoff и resonance 0..127, env_modifier -256..1784 и кратен 8:
     // маркеры ниже ключом не бывают.
-    static constexpr uint32_t kFilterMemoNone = 0xFFFFFFFFu;
-    static constexpr uint32_t kFilterMemoNoteTrigger =
-        0xFFFFFFFEu; // нота запущена после прошлого расчёта (не Retrigger)
+    static constexpr uint32_t kFilterMemoNone        = 0xFFFFFFFFu;
+    static constexpr uint32_t kFilterMemoNoteTrigger = 0xFFFFFFFEu; // нота запущена после прошлого расчёта (не Retrigger)
     uint32_t filter_memo_[SOUNDSINTH_MAX_SLOTS];
-
 
     // Голос idx в список играющих этого тика.
     SOUNDSINTH_ALWAYS_INLINE void push_active(uint8_t idx) { link_.list_push(idx); }
@@ -344,17 +340,16 @@ private:
     // Посыл в ревербератор и маршрут (solo) голосов списка - для mixer_, раз в тик.
     void update_voice_routes();
 
-
     uint32_t frames_rendered_ = 0;
 
     // Общий ревербератор и его шина - только при song.reverb_enabled (.mid), в
     // буфере сценариев трека. У трекерных форматов nullptr: посылов
     // нет, и этот путь не выполняется.
-    Reverb* reverb_ = nullptr;
+    Reverb* reverb_      = nullptr;
     int32_t* reverb_bus_ = nullptr;
 
-    int32_t solo_channel_ = -1;
-    int32_t* solo_discard_ = nullptr;
+    int32_t solo_channel_         = -1;
+    int32_t* solo_discard_        = nullptr;
     uint32_t solo_discard_frames_ = 0;
     // В конце: поля горячего пути не сдвигаются.
     bool worst_tick_row_start_ = false;
@@ -362,6 +357,6 @@ private:
 
 // Движок пересоздаётся в статическом хранилище размещающим new: член с
 // кучей вернул бы malloc в прошивку.
-static_assert(std::is_trivially_destructible_v<TrackerEngine>, "TrackerEngine без собственной памяти");
+static_assert(std::is_trivially_destructible_v<TrackerEngine>, "TrackerEngine has no memory of its own");
 
 } // namespace soundsinth::engine

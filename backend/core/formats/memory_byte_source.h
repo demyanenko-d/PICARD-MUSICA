@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 #pragma once
 
 // ByteSource поверх буфера в памяти, файл уже прочитан целиком. Для
@@ -16,14 +17,12 @@ class MemoryByteSource {
 public:
     MemoryByteSource(const void* data, uint32_t size) : data_(static_cast<const uint8_t*>(data)), size_(size) {}
 
-    ByteSource as_byte_source() {
-        return ByteSource{this, &read_fn, &seek_fn, &size_fn};
-    }
+    ByteSource as_byte_source() { return ByteSource{this, &read_fn, &seek_fn, &size_fn}; }
 
 private:
     static uint32_t read_fn(void* self, void* dst, uint32_t n) {
-        auto* src = static_cast<MemoryByteSource*>(self);
-        const uint32_t avail = src->size_ - src->pos_;
+        auto* src              = static_cast<MemoryByteSource*>(self);
+        const uint32_t avail   = src->size_ - src->pos_;
         const uint32_t to_copy = std::min(n, avail);
         std::memcpy(dst, src->data_ + src->pos_, to_copy);
         src->pos_ += to_copy;
@@ -37,9 +36,7 @@ private:
         src->pos_ = offset;
         return true;
     }
-    static uint32_t size_fn(void* self) {
-        return static_cast<MemoryByteSource*>(self)->size_;
-    }
+    static uint32_t size_fn(void* self) { return static_cast<MemoryByteSource*>(self)->size_; }
 
     const uint8_t* data_;
     uint32_t size_;

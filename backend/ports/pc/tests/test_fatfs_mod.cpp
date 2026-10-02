@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 #include "testing.h"
 
 #include <cstdio>
@@ -31,12 +32,12 @@ void test_fatfs_matches_memory_bytesource() {
     std::printf("test_fatfs_mod_matches_memory_bytesource\n");
 
     if (!platform_pc::mount_disk_image("build/sd.img")) {
-        std::printf("  build/sd.img не найден — ПРОПУСК (собрать: scripts\\build_sd.bat)\n");
+        std::printf("  build/sd.img not found - SKIP (build it: scripts\\build_sd.bat)\n");
         return;
     }
     static FATFS fs;
     if (f_mount(&fs, "", 1) != FR_OK) {
-        std::printf("  f_mount(build/sd.img) не удался — ПРОПУСК\n");
+        std::printf("  f_mount(build/sd.img) failed - SKIP\n");
         return;
     }
 
@@ -55,13 +56,13 @@ void test_fatfs_matches_memory_bytesource() {
 
     soundsinth::model::Song song_a;
     const char* error_a = nullptr;
-    const bool ok_a = formats::mod::load(fatfs_src.as_byte_source(), mem_a, song_a, &error_a);
+    const bool ok_a     = formats::mod::load(fatfs_src.as_byte_source(), mem_a, song_a, &error_a);
     if (!ok_a) std::printf("  FatFsByteSource load() failed: %s\n", error_a ? error_a : "(no message)");
     CHECK(ok_a);
 
     soundsinth::model::Song song_b;
     const char* error_b = nullptr;
-    const bool ok_b = formats::mod::load(mem_src.as_byte_source(), mem_b, song_b, &error_b);
+    const bool ok_b     = formats::mod::load(mem_src.as_byte_source(), mem_b, song_b, &error_b);
     if (!ok_b) std::printf("  MemoryByteSource load() failed: %s\n", error_b ? error_b : "(no message)");
     CHECK(ok_b);
 

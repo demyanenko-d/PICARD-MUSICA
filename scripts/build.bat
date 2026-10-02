@@ -11,8 +11,8 @@ REM  Nine artefacts:
 REM    1. UNIMOD.$C                  TR-DOS application (Hobeta, for a real machine)
 REM    2. UNIMOD.sna                 the same app as a 128K snapshot, for emulators
 REM    3. UMPLAYER.WMF               Wild Commander plugin for TS-Config
-REM    4. soundsinth_zcontroller.uf2 firmware WITH the Z-Controller emulator
-REM    5. soundsinth_plain.uf2       firmware WITHOUT it
+REM    4. soundsinth.uf2             firmware, one image for every machine
+REM    5. example/set_config_*.txt   ready-made settings files
 REM    6. bank.uf2                   instrument bank for flash, on its own
 REM    7. GeneralUser-GS.LICENSE.txt licence of the SoundFont in that bank
 REM    8. SGM.ssb                    bigger bank FOR THE SD CARD (30 MB, does not fit flash)
@@ -27,12 +27,10 @@ REM  at once. With an emulator that does Z-Controller and a card image this
 REM  covers the file list, sorting and navigation -- everything that does
 REM  not need the board itself.
 REM
-REM  Both firmwares come from ONE source tree, built in build\zc and build\plain.
-REM  SOUNDSINTH_ZCONTROLLER reaches the compiler as -D and overrides the
-REM  default of SOUNDSINTH_RP2350_ZCONTROLLER (it sits under #ifndef).
-REM  Separate build dirs (not a reconfigure in place) keep
-REM  both variants incrementally rebuildable without trashing each other's
-REM  cache. Every build directory in this repo lives under build\.
+REM  The firmware is one image. The Z-Controller emulator used to be a
+REM  build switch and is a setting on the card now; the two images that
+REM  switch produced came out byte for byte the same. Every build
+REM  directory in this repo lives under build\.
 REM ===========================================================================
 
 cd /d "%~dp0.."
@@ -56,16 +54,22 @@ echo === [3/8] Wild Commander plugin ===
 call "%~dp0build_plugin.bat" || goto :fail
 
 echo.
-echo === [4/8] firmware WITH Z-Controller ===
-cmake -S . -B build\zc -G Ninja -DSOUNDSINTH_ZCONTROLLER=1 >nul || goto :fail
+echo === [4/8] firmware ===
+REM  One image for every machine: the Z-Controller emulator is a setting
+REM  on the card now, not a build switch, and the two images it used to
+REM  produce came out byte for byte the same.
+cmake -S . -B build\zc -G Ninja >nul || goto :fail
 cmake --build build\zc -j 8 || goto :fail
-copy /y "build\zc\soundsinth_firmware.uf2" "%PICARD%\soundsinth_zcontroller.uf2" >nul || goto :fail
+copy /y "build\zc\soundsinth_firmware.uf2" "%PICARD%\soundsinth.uf2" >nul || goto :fail
 
 echo.
-echo === [5/8] firmware WITHOUT Z-Controller ===
-cmake -S . -B build\plain -G Ninja -DSOUNDSINTH_ZCONTROLLER=0 >nul || goto :fail
-cmake --build build\plain -j 8 || goto :fail
-copy /y "build\plain\soundsinth_firmware.uf2" "%PICARD%\soundsinth_plain.uf2" >nul || goto :fail
+echo === [5/8] example settings files ===
+REM  Written by the same code the board writes them with, so they cannot
+REM  drift from the firmware.
+if not exist "%RELEASE%\example" mkdir "%RELEASE%\example"
+for %%P in (tsconfig trdos divmmc) do (
+    "build\pc\tools\Release\config_example.exe" %%P "%RELEASE%\example\set_config_%%P.txt" || goto :fail
+)
 echo.
 echo === [6/8] bank image ===
 REM  The bank ships as its OWN .uf2, apart from the firmware.
@@ -109,8 +113,7 @@ node "%~dp0tools\uf2_abs_block.js" "%PICARD%\bank.uf2" "%~dp0..\build\zc\soundsi
 node "%~dp0tools\uf2_check.js" "%PICARD%\bank.uf2" || goto :fail
 :banks_done
 
-node "%~dp0tools\uf2_check.js" "%PICARD%\soundsinth_zcontroller.uf2" || goto :fail
-node "%~dp0tools\uf2_check.js" "%PICARD%\soundsinth_plain.uf2" || goto :fail
+node "%~dp0tools\uf2_check.js" "%PICARD%\soundsinth.uf2" || goto :fail
 
 REM  [7/8] Licences for the banks that are present.
 REM

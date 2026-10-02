@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 // Перемотка вперёд (TrackerEngine::seek_to_frame).
 //
 // Прыжком по строкам состояние канала не восстановить: инструмент,
@@ -34,13 +35,13 @@ using LoadFn = bool (*)(formats::ByteSource, memory::TrackMemory&, soundsinth::m
 
 // Где стоит секвенсор и на чём он играет: этим сравниваются два пути.
 struct Spot {
-    uint16_t order_pos = 0;
+    uint16_t order_pos   = 0;
     uint16_t pattern_idx = 0;
-    uint16_t row = 0;
+    uint16_t row         = 0;
     uint16_t tick_in_row = 0;
-    uint16_t tempo = 0;
-    uint16_t speed = 0;
-    uint32_t frames = 0;
+    uint16_t tempo       = 0;
+    uint16_t speed       = 0;
+    uint32_t frames      = 0;
 };
 
 Spot spot_of(const engine::TrackerEngine& eng) {
@@ -49,18 +50,18 @@ Spot spot_of(const engine::TrackerEngine& eng) {
 }
 
 bool same_spot(const Spot& a, const Spot& b) {
-    return a.order_pos == b.order_pos && a.pattern_idx == b.pattern_idx && a.row == b.row &&
-           a.tick_in_row == b.tick_in_row && a.tempo == b.tempo && a.speed == b.speed && a.frames == b.frames;
+    return a.order_pos == b.order_pos && a.pattern_idx == b.pattern_idx && a.row == b.row && a.tick_in_row == b.tick_in_row && a.tempo == b.tempo &&
+           a.speed == b.speed && a.frames == b.frames;
 }
 
 void check_seek_matches_playback(LoadFn load, const char* path, uint32_t target_frames) {
     // Рендер идёт буферами и в цель попадает только кратной им: иначе он
     // перелетает на остаток буфера, и пути разойдутся по числу кадров, а не
     // по существу.
-    target_frames -= target_frames % SOUNDSINTH_AUDIO_BUFFER_FRAMES;
-    const std::vector<uint8_t> bytes = read_whole_file(path);
+    target_frames                    -= target_frames % SOUNDSINTH_AUDIO_BUFFER_FRAMES;
+    const std::vector<uint8_t> bytes  = read_whole_file(path);
     if (bytes.empty()) {
-        std::printf("  ПРОПУСК (файл не найден): %s\n", path);
+        std::printf("  SKIP (file not found): %s\n", path);
         return;
     }
 
@@ -100,10 +101,9 @@ void check_seek_matches_playback(LoadFn load, const char* path, uint32_t target_
 
     const bool ok = same_spot(played, sought);
     CHECK(ok);
-    std::printf("  %s: игра order=%u patt=%u row=%u tick=%u темп=%u/%u кадров=%u | перемотка %u/%u/%u/%u %u/%u/%u %s\n",
-                path, played.order_pos, played.pattern_idx, played.row, played.tick_in_row, played.tempo, played.speed,
-                played.frames, sought.order_pos, sought.pattern_idx, sought.row, sought.tick_in_row, sought.tempo,
-                sought.speed, sought.frames, ok ? "совпало" : "РАЗОШЛОСЬ");
+    std::printf("  %s: play order=%u patt=%u row=%u tick=%u tempo=%u/%u frames=%u | seek %u/%u/%u/%u %u/%u/%u %s\n", path, played.order_pos, played.pattern_idx,
+                played.row, played.tick_in_row, played.tempo, played.speed, played.frames, sought.order_pos, sought.pattern_idx, sought.row, sought.tick_in_row,
+                sought.tempo, sought.speed, sought.frames, ok ? "matched" : "DIFFERS");
 }
 
 // Перематывать назад и в уже сыгранное нечего: движок для этого
@@ -111,7 +111,7 @@ void check_seek_matches_playback(LoadFn load, const char* path, uint32_t target_
 void check_seek_refuses_backwards(LoadFn load, const char* path) {
     const std::vector<uint8_t> bytes = read_whole_file(path);
     if (bytes.empty()) {
-        std::printf("  ПРОПУСК (файл не найден): %s\n", path);
+        std::printf("  SKIP (file not found): %s\n", path);
         return;
     }
     memory::TrackMemory mem;
@@ -142,16 +142,15 @@ void check_seek_refuses_backwards(LoadFn load, const char* path) {
 // skip_frames берётся с двух сторон: с ним выход на кадре конца - нули,
 // без него на том же кадре ещё звучит. Второе - не придирка, а
 // доказательство, что проверка ловит.
-void check_seek_keeps_end_fade(LoadFn load, const char* path, uint32_t end_frame, uint32_t play_frames,
-                              uint32_t seek_frames) {
+void check_seek_keeps_end_fade(LoadFn load, const char* path, uint32_t end_frame, uint32_t play_frames, uint32_t seek_frames) {
     const std::vector<uint8_t> bytes = read_whole_file(path);
     if (bytes.empty()) {
-        std::printf("  ПРОПУСК (файл не найден): %s\n", path);
+        std::printf("  SKIP (file not found): %s\n", path);
         return;
     }
     constexpr uint32_t kChunk = SOUNDSINTH_AUDIO_BUFFER_FRAMES;
-    uint32_t tail_peak[2] = {0, 0};
-    uint32_t heard[2] = {0, 0};
+    uint32_t tail_peak[2]     = {0, 0};
+    uint32_t heard[2]         = {0, 0};
     for (int with_skip = 0; with_skip < 2; ++with_skip) {
         memory::TrackMemory mem;
         memory::track_memory_create(mem);
@@ -173,7 +172,8 @@ void check_seek_keeps_end_fade(LoadFn load, const char* path, uint32_t end_frame
         uint32_t rendered = 0;
         for (; rendered < play_frames; rendered += kChunk) {
             bus.render(out.data(), kChunk);
-            for (int16_t v : out) heard[with_skip] += static_cast<uint32_t>(v < 0 ? -v : v);
+            for (int16_t v : out)
+                heard[with_skip] += static_cast<uint32_t>(v < 0 ? -v : v);
         }
         CHECK(eng.seek_to_frame(rendered + seek_frames));
         if (with_skip) bus.skip_frames(seek_frames);
@@ -195,11 +195,10 @@ void check_seek_keeps_end_fade(LoadFn load, const char* path, uint32_t end_frame
         }
         memory::track_memory_destroy(mem);
     }
-    CHECK(heard[1] > 0);          // трек вообще звучал
-    CHECK_EQ(tail_peak[1], 0u);   // с прыжком, отданным шине, конец - тишина
-    CHECK(tail_peak[0] > 0);      // без него на том же кадре ещё звучит
-    std::printf("  %s: за кадром конца пик %u (о прыжке сказано) против %u (не сказано)\n", path, tail_peak[1],
-                tail_peak[0]);
+    CHECK(heard[1] > 0);        // трек вообще звучал
+    CHECK_EQ(tail_peak[1], 0u); // с прыжком, отданным шине, конец - тишина
+    CHECK(tail_peak[0] > 0);    // без него на том же кадре ещё звучит
+    std::printf("  %s: past the end frame peak %u (jump announced) against %u (not announced)\n", path, tail_peak[1], tail_peak[0]);
 }
 
 // Перемотка в самый конец: цель обрезана по кадру конца трека, и выход
@@ -209,11 +208,11 @@ void check_seek_keeps_end_fade(LoadFn load, const char* path, uint32_t end_frame
 void check_seek_to_end_stays_silent(LoadFn load, const char* path, uint32_t end_frame, uint32_t play_frames) {
     const std::vector<uint8_t> bytes = read_whole_file(path);
     if (bytes.empty()) {
-        std::printf("  ПРОПУСК (файл не найден): %s\n", path);
+        std::printf("  SKIP (file not found): %s\n", path);
         return;
     }
     constexpr uint32_t kChunk = SOUNDSINTH_AUDIO_BUFFER_FRAMES;
-    uint32_t peak[2] = {0, 0};
+    uint32_t peak[2]          = {0, 0};
     for (int to_end = 0; to_end < 2; ++to_end) {
         memory::TrackMemory mem;
         memory::track_memory_create(mem);
@@ -233,7 +232,8 @@ void check_seek_to_end_stays_silent(LoadFn load, const char* path, uint32_t end_
 
         std::vector<int16_t> out(kChunk * 2);
         uint32_t rendered = 0;
-        for (; rendered < play_frames; rendered += kChunk) bus.render(out.data(), kChunk);
+        for (; rendered < play_frames; rendered += kChunk)
+            bus.render(out.data(), kChunk);
         // Порядок платы: на время перемотки выход гасится паузой, прыжок
         // делается по тихому проходу, затем пауза снимается.
         bus.set_paused(true);
@@ -261,7 +261,7 @@ void check_seek_to_end_stays_silent(LoadFn load, const char* path, uint32_t end_
     }
     CHECK_EQ(peak[1], 0u); // прыжок в конец - выход не возвращается
     CHECK(peak[0] > 0);    // прыжок не до конца - трек играет дальше
-    std::printf("  %s: после прыжка в конец пик %u, не до конца %u\n", path, peak[1], peak[0]);
+    std::printf("  %s: after the jump to the end peak %u, short of the end %u\n", path, peak[1], peak[0]);
 }
 void test_seek_lands_where_playback_would() {
     std::printf("test_seek_lands_where_playback_would\n");
@@ -272,10 +272,8 @@ void test_seek_lands_where_playback_would() {
 
 void test_seek_keeps_end_fade() {
     std::printf("test_seek_keeps_end_fade\n");
-    check_seek_keeps_end_fade(&formats::it::load, "SD/test_music/it/ivi-lite__v61.it", 44100u * 18u, 44100u * 4u,
-                              44100u * 5u);
-    check_seek_keeps_end_fade(&formats::xm::load, "SD/test_music/xm/final_fantasy.xm", 44100u * 18u, 44100u * 4u,
-                              44100u * 5u);
+    check_seek_keeps_end_fade(&formats::it::load, "SD/test_music/it/ivi-lite__v61.it", 44100u * 18u, 44100u * 4u, 44100u * 5u);
+    check_seek_keeps_end_fade(&formats::xm::load, "SD/test_music/xm/final_fantasy.xm", 44100u * 18u, 44100u * 4u, 44100u * 5u);
 }
 
 void test_seek_to_end_stays_silent() {

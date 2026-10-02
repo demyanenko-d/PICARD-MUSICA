@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 #pragma once
 
 // Арбитр голосов: кому из голосов звучать, когда их больше, чем можно. Пул
@@ -20,27 +21,24 @@ public:
     // индексом. Каналов не больше SOUNDSINTH_MAX_VOICES, поэтому за ними
     // всегда есть kPool слотов.
     static constexpr uint8_t kPool = SOUNDSINTH_MAX_NNA_VOICES;
-    static_assert(SOUNDSINTH_MAX_SLOTS >= SOUNDSINTH_MAX_VOICES + SOUNDSINTH_MAX_NNA_VOICES,
-                  "за каналами - полный пул NNA");
-    static_assert(SOUNDSINTH_MAX_SLOTS <= UINT8_MAX, "индекс слота - байт");
-    static_assert(SOUNDSINTH_MAX_NNA_VOICES >= 1, "пул NNA не пустой: выбор слота всегда находит место");
+    static_assert(SOUNDSINTH_MAX_SLOTS >= SOUNDSINTH_MAX_VOICES + SOUNDSINTH_MAX_NNA_VOICES, "the full NNA pool comes after the channels");
+    static_assert(SOUNDSINTH_MAX_SLOTS <= UINT8_MAX, "the slot index is a byte");
+    static_assert(SOUNDSINTH_MAX_NNA_VOICES >= 1, "the NNA pool is not empty: slot selection always finds room");
 
     // channels и link - общие с управляющей частью, живут не меньше арбитра.
     // wave_tail - волновое гашение (.mid), envelope_db - огибающая в децибелах.
     void init(ChannelState* channels, VoiceLink* link, uint8_t channel_count, bool wave_tail, bool envelope_db) {
-        channels_ = channels;
-        link_ = link;
+        channels_      = channels;
+        link_          = link;
         channel_count_ = channel_count;
-        wave_tail_ = wave_tail;
-        envelope_db_ = envelope_db;
+        wave_tail_     = wave_tail;
+        envelope_db_   = envelope_db;
     }
 
     bool slot_active(uint8_t slot) const { return slots_[slot].active; }
     // Канал, с которого голос слота ушёл в фон.
     uint8_t origin_channel(uint8_t slot) const { return slots_[slot].origin_channel; }
-    bool is_tail_of(uint8_t slot, uint8_t channel) const {
-        return slots_[slot].active && slots_[slot].origin_channel == channel;
-    }
+    bool is_tail_of(uint8_t slot, uint8_t channel) const { return slots_[slot].active && slots_[slot].origin_channel == channel; }
 
     // Голос слота idx (канал или пул) снят: флаги канала, голоса и пула.
     // Гашение - у вызывающего или на пересборке списка.
@@ -82,7 +80,7 @@ private:
     // Учёт одного слота пула. Поля для DCT (инструмент, сэмпл, нота старого
     // голоса) не дублируются: они в скопированном ChannelState слота.
     struct SlotInfo {
-        bool active = false;
+        bool active            = false;
         uint8_t origin_channel = 0; // канал-источник: DCT/DCA ищут только среди его фоновых голосов
         // Номер выделения; при краже слота из равных по громкости уходит самый старый.
         uint32_t alloc_seq = 0;
@@ -93,21 +91,21 @@ private:
     uint8_t pick_slot(int32_t killed) const;
 
     ChannelState* channels_ = nullptr;
-    VoiceLink* link_ = nullptr;
-    uint8_t channel_count_ = 0;
-    bool wave_tail_ = false;
-    bool envelope_db_ = false;
+    VoiceLink* link_        = nullptr;
+    uint8_t channel_count_  = 0;
+    bool wave_tail_         = false;
+    bool envelope_db_       = false;
 
     SlotInfo slots_[kPool];
     uint32_t alloc_seq_counter_ = 0;
-    uint32_t tails_dropped_ = 0;
-    uint32_t steals_ = 0;
+    uint32_t tails_dropped_     = 0;
+    uint32_t steals_            = 0;
 
     // Сколько голосов разрешено держать активными. Опускается под перегрузкой
     // и поднимается, когда отпустило. При выключенном сбросе равен
     // SOUNDSINTH_MAX_VOICES и ни на что не влияет.
-    uint8_t budget_ = SOUNDSINTH_MAX_VOICES;
-    uint32_t culled_ = 0;
+    uint8_t budget_    = SOUNDSINTH_MAX_VOICES;
+    uint32_t culled_   = 0;
     bool cull_enabled_ = false;
     // Тики низкой нагрузки с последней перегрузки или подъёма.
     uint8_t budget_rise_ticks_ = 0;

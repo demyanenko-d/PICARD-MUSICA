@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 #pragma once
 
 // Живой вход MIDI: события потока -> строки ячеек тем же конвертером, что у
@@ -32,8 +33,8 @@ namespace soundsinth::formats::midi {
 // Потолки живой песни - в резидентной арене вместе с конвертером и таблицей
 // распаковки банка; пул keymap - весь остаток арены.
 inline constexpr uint16_t kLiveMaxInstruments = 128;
-inline constexpr uint16_t kLiveMaxSamples = 384;
-inline constexpr uint16_t kLiveEnvelopes = 112;
+inline constexpr uint16_t kLiveMaxSamples     = 384;
+inline constexpr uint16_t kLiveEnvelopes      = 112;
 // Столько записей держать свободными или уходящими: отдача идёт заранее,
 // нота не ждёт подтверждения с другого ядра.
 inline constexpr uint16_t kLiveRecordReserve = 32;
@@ -56,8 +57,8 @@ public:
     // Песня заново поверх памяти трека: вызывающий уже сбросил память
     // (track_memory_reset_for_new_track). ticks_per_row и tempo - сетка и
     // темп живого режима. nullptr - готово, иначе причина отказа.
-    const char* begin(soundsinth::model::Song& song, memory::TrackMemory& mem, const bank::Bank& bank, uint8_t ticks_per_row,
-                      uint8_t tempo, RequestFn request, RetireFn retire, void* user);
+    const char* begin(soundsinth::model::Song& song, memory::TrackMemory& mem, const bank::Bank& bank, uint8_t ticks_per_row, uint8_t tempo, RequestFn request,
+                      RetireFn retire, void* user);
 
     // PCM записи выброшен, номер свободен.
     void record_retired(uint16_t song_sample);
@@ -142,34 +143,34 @@ private:
     soundsinth::model::KeymapRange* keymap_alloc(uint16_t count, uint16_t building);
     void keymap_compact(uint16_t building);
 
-    Converter* cv_ = nullptr;
+    Converter* cv_                 = nullptr;
     soundsinth::model::Song* song_ = nullptr;
-    memory::TrackMemory* mem_ = nullptr;
-    RequestFn request_ = nullptr;
-    RetireFn retire_ = nullptr;
-    void* user_ = nullptr;
+    memory::TrackMemory* mem_      = nullptr;
+    RequestFn request_             = nullptr;
+    RetireFn retire_               = nullptr;
+    void* user_                    = nullptr;
     // Записи сэмплов: сэмпл банка (kNoSample - свободна), состояние, строка
     // последнего звучания. Уходящая ждёт record_retired.
-    uint16_t* record_bank_ = nullptr;
-    uint8_t* record_state_ = nullptr;
-    uint32_t* record_row_ = nullptr;
-    uint16_t records_free_ = 0;
-    uint16_t records_leaving_ = 0;
-    uint32_t records_retired_ = 0;
-    uint32_t row_ = 0;
+    uint16_t* record_bank_             = nullptr;
+    uint8_t* record_state_             = nullptr;
+    uint32_t* record_row_              = nullptr;
+    uint16_t records_free_             = 0;
+    uint16_t records_leaving_          = 0;
+    uint32_t records_retired_          = 0;
+    uint32_t row_                      = 0;
     uint32_t ticks_per_second_rounded_ = 0;
-    uint32_t instruments_failed_ = 0;
-    uint32_t samples_capped_ = 0;
-    uint32_t instruments_evicted_ = 0;
-    uint32_t instruments_built_ = 0;
-    uint32_t records_allocated_ = 0;
-    uint32_t instruments_late_ = 0;
-    uint32_t records_late_ = 0;
-    uint32_t records_retired_recent_ = 0;
+    uint32_t instruments_failed_       = 0;
+    uint32_t samples_capped_           = 0;
+    uint32_t instruments_evicted_      = 0;
+    uint32_t instruments_built_        = 0;
+    uint32_t records_allocated_        = 0;
+    uint32_t instruments_late_         = 0;
+    uint32_t records_late_             = 0;
+    uint32_t records_retired_recent_   = 0;
     // Идёт упреждающая подготовка: заведённое сейчас заведено заранее.
-    bool in_prefetch_ = false;
-    uint32_t keymap_visits_ = 0;
-    uint32_t retire_calls_ = 0;
+    bool in_prefetch_              = false;
+    uint32_t keymap_visits_        = 0;
+    uint32_t retire_calls_         = 0;
     uint32_t retire_keymap_visits_ = 0;
     uint32_t retire_record_visits_ = 0;
     LoadStats stats_{};
@@ -180,14 +181,14 @@ private:
     // инструментов на месте и когда место освободилось (занимать давно
     // освобождённые: доигрывающий хвост ещё держит недавнее).
     soundsinth::model::Envelope* envelopes_ = nullptr;
-    uint16_t* envelope_bank_ = nullptr;
-    uint8_t* envelope_refs_ = nullptr;
-    uint32_t* envelope_freed_ = nullptr;
-    uint32_t envelope_clock_ = 0;
+    uint16_t* envelope_bank_                = nullptr;
+    uint8_t* envelope_refs_                 = nullptr;
+    uint32_t* envelope_freed_               = nullptr;
+    uint32_t envelope_clock_                = 0;
 
     soundsinth::model::KeymapRange* keymap_pool_ = nullptr;
-    uint32_t keymap_capacity_ = 0;
-    uint32_t keymap_used_ = 0;
+    uint32_t keymap_capacity_                    = 0;
+    uint32_t keymap_used_                        = 0;
 };
 
 } // namespace soundsinth::formats::midi

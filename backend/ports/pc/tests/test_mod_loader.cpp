@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 #include "testing.h"
 
 #include <cstdio>
@@ -33,11 +34,14 @@ std::vector<uint8_t> build_synthetic_mod() {
     // Сэмпл 1 (индекс 0 при счёте с нуля): length_words=4 (BE), finetune=0,
     // volume=64, без петли.
     const uint32_t s0 = 20;
-    f[s0 + 22] = 0x00; f[s0 + 23] = 0x04; // length_words = 4 (BE) -> 8 сэмплов
-    f[s0 + 24] = 0x00;                     // finetune
-    f[s0 + 25] = 64;                        // volume
-    f[s0 + 26] = 0x00; f[s0 + 27] = 0x00;  // loop_start_words
-    f[s0 + 28] = 0x00; f[s0 + 29] = 0x00;  // loop_size_words (0 -> без петли)
+    f[s0 + 22]        = 0x00;
+    f[s0 + 23]        = 0x04; // length_words = 4 (BE) -> 8 сэмплов
+    f[s0 + 24]        = 0x00; // finetune
+    f[s0 + 25]        = 64;   // volume
+    f[s0 + 26]        = 0x00;
+    f[s0 + 27]        = 0x00; // loop_start_words
+    f[s0 + 28]        = 0x00;
+    f[s0 + 29]        = 0x00; // loop_size_words (0 -> без петли)
     // Остальные 30 сэмплов уже нули (пустые "инструменты-таблички").
 
     f[950] = 1; // song_length
@@ -48,7 +52,10 @@ std::vector<uint8_t> build_synthetic_mod() {
 
     auto cell = [&](uint32_t row, uint32_t ch, uint8_t b0, uint8_t b1, uint8_t b2, uint8_t b3) {
         const uint32_t pos = 1084 + (row * 4 + ch) * 4;
-        f[pos + 0] = b0; f[pos + 1] = b1; f[pos + 2] = b2; f[pos + 3] = b3;
+        f[pos + 0]         = b0;
+        f[pos + 1]         = b1;
+        f[pos + 2]         = b2;
+        f[pos + 3]         = b3;
     };
     // row0/ch0: период 856 (C-1, tuning 0) + инструмент 1, без эффекта.
     // b0 = (sampleHi<<4)|periodHi; period=856=0x358 -> periodHi=3;
@@ -65,8 +72,9 @@ std::vector<uint8_t> build_synthetic_mod() {
 
     // Сэмпл 1 PCM: 8 байт signed 8-bit, произвольный узнаваемый паттерн.
     const uint32_t sample_data_start = 1084 + 1024;
-    const int8_t pcm[8] = {10, -10, 20, -20, 30, -30, 40, -40};
-    for (int i = 0; i < 8; ++i) f[sample_data_start + i] = static_cast<uint8_t>(pcm[i]);
+    const int8_t pcm[8]              = {10, -10, 20, -20, 30, -30, 40, -40};
+    for (int i = 0; i < 8; ++i)
+        f[sample_data_start + i] = static_cast<uint8_t>(pcm[i]);
 
     return f;
 }
@@ -79,21 +87,21 @@ void test_panning_heuristics() {
     std::printf("test_mod_loader_panning_heuristics\n");
     using namespace soundsinth::model;
     struct Case {
-        uint8_t loop_words;     // 1 - петли нет, как пишет ProTracker; 0 - файл не для Amiga
+        uint8_t loop_words; // 1 - петли нет, как пишет ProTracker; 0 - файл не для Amiga
         uint8_t fx1, param1, fx2, param2;
-        QuirkFlags expected;    // среди kQuirkModIgnorePanning | kQuirkMod7BitPanning | kQuirkGlissandoPtMode
+        QuirkFlags expected; // среди kQuirkModIgnorePanning | kQuirkMod7BitPanning | kQuirkGlissandoPtMode
     };
     const Case cases[] = {
         {1, 0x8, 0x10, 0x0, 0x00, kQuirkModIgnorePanning | kQuirkGlissandoPtMode},
         {1, 0xE, 0x82, 0x8, 0x20, kQuirkModIgnorePanning | kQuirkGlissandoPtMode}, // E82 -> 0x20, всё ещё метки
         {1, 0x8, 0x00, 0x8, 0x80, kQuirkMod7BitPanning | kQuirkGlissandoPtMode},
-        {1, 0x8, 0x00, 0x8, 0xC0, kQuirkGlissandoPtMode},                          // байтовая шкала
-        {0, 0x8, 0x10, 0x0, 0x00, 0},                                              // петля длиной 0: не ProTracker
+        {1, 0x8, 0x00, 0x8, 0xC0, kQuirkGlissandoPtMode}, // байтовая шкала
+        {0, 0x8, 0x10, 0x0, 0x00, 0},                     // петля длиной 0: не ProTracker
     };
     constexpr QuirkFlags kMask = kQuirkModIgnorePanning | kQuirkMod7BitPanning | kQuirkGlissandoPtMode;
     for (const Case& c : cases) {
-        std::vector<uint8_t> file = build_synthetic_mod();
-        file[20 + 29] = c.loop_words;
+        std::vector<uint8_t> file        = build_synthetic_mod();
+        file[20 + 29]                    = c.loop_words;
         file[1084 + (5 * 4 + 0) * 4 + 2] = c.fx1;
         file[1084 + (5 * 4 + 0) * 4 + 3] = c.param1;
         file[1084 + (6 * 4 + 0) * 4 + 2] = c.fx2;
@@ -106,8 +114,8 @@ void test_panning_heuristics() {
         CHECK(formats::mod::load(mbs.as_byte_source(), mem, song, &error));
         CHECK_EQ(song.quirks & kMask, c.expected);
         if (c.fx1 == 0xE) {
-            patterns::PatternReader reader(memory::psram_pattern_ptr(mem.psram, song.patterns[0].psram_offset),
-                                            song.patterns[0].row_count, song.patterns[0].channel_count);
+            patterns::PatternReader reader(memory::psram_pattern_ptr(mem.psram, song.patterns[0].psram_offset), song.patterns[0].row_count,
+                                           song.patterns[0].channel_count);
             PatternCell cells[4];
             reader.read_row(5, cells);
             CHECK(cells[0].effect.type == Effect::SetPanning4Bit);
@@ -130,7 +138,7 @@ void test_amiga_period_extended_octaves() {
     CHECK_EQ(amiga_period_to_note(3424), static_cast<uint8_t>(12));
     CHECK_EQ(amiga_period_to_note(4000), static_cast<uint8_t>(12)); // длиннее таблицы - самая низкая
     CHECK_EQ(amiga_period_to_note(107), static_cast<uint8_t>(72));
-    CHECK_EQ(amiga_period_to_note(57), static_cast<uint8_t>(83));  // между 60 и 56 ближе 56
+    CHECK_EQ(amiga_period_to_note(57), static_cast<uint8_t>(83)); // между 60 и 56 ближе 56
     CHECK_EQ(amiga_period_to_note(28), static_cast<uint8_t>(95));
     CHECK_EQ(amiga_period_to_note(20), static_cast<uint8_t>(95));  // короче таблицы - самая высокая
     CHECK_EQ(amiga_period_to_note(832), static_cast<uint8_t>(37)); // середина 856 и 808 - более высокая нота
@@ -156,7 +164,7 @@ void test_synthetic_exact() {
 
     Song song;
     const char* error = nullptr;
-    const bool ok = formats::mod::load(mbs.as_byte_source(), mem, song, &error);
+    const bool ok     = formats::mod::load(mbs.as_byte_source(), mem, song, &error);
     if (!ok) std::printf("  load() failed: %s\n", error ? error : "(no message)");
     CHECK(ok);
 
@@ -186,8 +194,8 @@ void test_synthetic_exact() {
 
     // Паттерн: распаковать и сверить те ячейки, что были заданы.
     CHECK(song.patterns[0].psram_offset != soundsinth::model::Pattern::kInvalidOffset);
-    patterns::PatternReader reader(memory::psram_pattern_ptr(mem.psram, song.patterns[0].psram_offset),
-                                    song.patterns[0].row_count, song.patterns[0].channel_count);
+    patterns::PatternReader reader(memory::psram_pattern_ptr(mem.psram, song.patterns[0].psram_offset), song.patterns[0].row_count,
+                                   song.patterns[0].channel_count);
 
     soundsinth::model::PatternCell row_cells[4];
     reader.read_row(0, row_cells);
@@ -224,8 +232,9 @@ void test_synthetic_exact() {
     if (cache_entry) {
         CHECK(cache_entry->first_page != memory::kPageChainEnd);
         const int8_t want[8] = {10, -10, 20, -20, 30, -30, 40, -40};
-        const auto* got = reinterpret_cast<const int8_t*>(memory::psram_page_ptr(mem.psram, cache_entry->first_page));
-        for (int i = 0; i < 8; ++i) CHECK_EQ(got[i], want[i]);
+        const auto* got      = reinterpret_cast<const int8_t*>(memory::psram_page_ptr(mem.psram, cache_entry->first_page));
+        for (int i = 0; i < 8; ++i)
+            CHECK_EQ(got[i], want[i]);
     }
 
     memory::track_memory_destroy(mem);
@@ -239,7 +248,7 @@ void test_real_small_file_smoke() {
     // библиотеки: тест воспроизводим на любой машине с репозиторием.
     std::ifstream in("SD/test_music/mod/ptiswap.mod", std::ios::binary);
     if (!in) {
-        std::printf("  файл не найден (test_music/mod/ptiswap.mod) — ПРОПУСК (запуск не из корня репозитория?)\n");
+        std::printf("  file not found (test_music/mod/ptiswap.mod) - SKIP (not started from the repository root?)\n");
         return;
     }
     std::vector<uint8_t> file((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
@@ -251,7 +260,7 @@ void test_real_small_file_smoke() {
 
     Song song;
     const char* error = nullptr;
-    const bool ok = formats::mod::load(mbs.as_byte_source(), mem, song, &error);
+    const bool ok     = formats::mod::load(mbs.as_byte_source(), mem, song, &error);
     if (!ok) std::printf("  load() failed: %s\n", error ? error : "(no message)");
     CHECK(ok);
     if (ok) {
@@ -272,21 +281,24 @@ void test_real_small_file_smoke() {
 // MOD на channels каналов с сигнатурой sig: строка 0 канала 0 - нота с
 // периодом period и инструментом 1, строка 1 - F7D. Порядок - order (не
 // больше 128 байт), restart - байт 951.
-std::vector<uint8_t> build_mod(const char* sig, uint32_t channels, uint16_t period,
-                               const std::vector<uint8_t>& order = {0}, uint8_t restart = 0) {
+std::vector<uint8_t> build_mod(const char* sig, uint32_t channels, uint16_t period, const std::vector<uint8_t>& order = {0}, uint8_t restart = 0) {
     const uint32_t pattern_bytes = 64u * channels * 4u;
     std::vector<uint8_t> f(1084 + pattern_bytes + 8, 0);
     std::memcpy(f.data(), "TESTSONG", 8);
     f[20 + 23] = 0x04; // сэмпл 1: 4 слова
     f[20 + 25] = 64;
-    f[20 + 29] = 1;    // петли нет, как пишет ProTracker (длина 0 - файл не для Amiga)
-    f[950] = static_cast<uint8_t>(order.size());
-    f[951] = restart;
-    for (size_t i = 0; i < order.size(); ++i) f[952 + i] = order[i];
+    f[20 + 29] = 1; // петли нет, как пишет ProTracker (длина 0 - файл не для Amiga)
+    f[950]     = static_cast<uint8_t>(order.size());
+    f[951]     = restart;
+    for (size_t i = 0; i < order.size(); ++i)
+        f[952 + i] = order[i];
     std::memcpy(&f[1080], sig, 4);
     auto cell = [&](uint32_t row, uint32_t ch, uint8_t b0, uint8_t b1, uint8_t b2, uint8_t b3) {
         const uint32_t pos = 1084 + (row * channels + ch) * 4;
-        f[pos] = b0; f[pos + 1] = b1; f[pos + 2] = b2; f[pos + 3] = b3;
+        f[pos]             = b0;
+        f[pos + 1]         = b1;
+        f[pos + 2]         = b2;
+        f[pos + 3]         = b3;
     };
     cell(0, 0, static_cast<uint8_t>(period >> 8), static_cast<uint8_t>(period & 0xFF), 0x10, 0x00);
     cell(1, 0, 0x00, 0x00, 0x0F, 0x7D);
@@ -297,12 +309,14 @@ std::vector<uint8_t> build_mod(const char* sig, uint32_t channels, uint16_t peri
 std::vector<uint8_t> build_old_mod() {
     std::vector<uint8_t> f(600 + 1024 + 8, 0);
     std::memcpy(f.data(), "OLDSONG", 7);
-    f[20 + 23] = 0x04;
-    f[20 + 25] = 64;
-    f[470] = 1; // song_length
-    f[472] = 0; // order[0]
+    f[20 + 23]         = 0x04;
+    f[20 + 25]         = 64;
+    f[470]             = 1; // song_length
+    f[472]             = 0; // order[0]
     const uint32_t pos = 600;
-    f[pos] = 0x03; f[pos + 1] = 0x58; f[pos + 2] = 0x10;
+    f[pos]             = 0x03;
+    f[pos + 1]         = 0x58;
+    f[pos + 2]         = 0x10;
     return f;
 }
 
@@ -314,13 +328,12 @@ struct ModLoaded {
         memory::track_memory_create(mem);
         formats::MemoryByteSource src(f.data(), static_cast<uint32_t>(f.size()));
         const char* err = nullptr;
-        ok = formats::mod::load(src.as_byte_source(), mem, song, &err);
+        ok              = formats::mod::load(src.as_byte_source(), mem, song, &err);
     }
     ~ModLoaded() { memory::track_memory_destroy(mem); }
     soundsinth::model::PatternCell cell(uint16_t row, uint8_t ch) {
         const soundsinth::model::Pattern& pat = song.patterns[0];
-        patterns::PatternReader reader(memory::psram_pattern_ptr(mem.psram, pat.psram_offset), pat.row_count,
-                                       pat.channel_count);
+        patterns::PatternReader reader(memory::psram_pattern_ptr(mem.psram, pat.psram_offset), pat.row_count, pat.channel_count);
         soundsinth::model::PatternCell cells[64];
         reader.read_row(row, cells);
         return cells[ch];
@@ -398,7 +411,11 @@ void test_signatures_and_header() {
 // октавах 1..7 (12..95) замыкается.
 void test_preamp_and_period_round_trip() {
     std::printf("test_mod_preamp_and_period_round_trip\n");
-    struct Case { const char* sig; uint32_t channels; uint8_t preamp; };
+    struct Case {
+        const char* sig;
+        uint32_t channels;
+        uint8_t preamp;
+    };
     const Case cases[] = {{"TDZ1", 1, 128}, {"M.K.", 4, 64}, {"8CHN", 8, 32}, {"16CH", 16, 32}};
     for (const Case& c : cases) {
         ModLoaded m(build_mod(c.sig, c.channels, 856));
@@ -414,8 +431,7 @@ void test_preamp_and_period_round_trip() {
 
 // MOD с сэмплом 1 длиной len_words и петлёй (начало, длина в словах), PCM -
 // нули нужной длины.
-std::vector<uint8_t> build_mod_with_loop(const char* sig, uint32_t channels, uint16_t len_words, uint16_t start_words,
-                                         uint16_t size_words) {
+std::vector<uint8_t> build_mod_with_loop(const char* sig, uint32_t channels, uint16_t len_words, uint16_t start_words, uint16_t size_words) {
     std::vector<uint8_t> f = build_mod(sig, channels, 856);
     f.resize(1084 + 64u * channels * 4u + len_words * 2u, 0);
     f[20 + 22] = static_cast<uint8_t>(len_words >> 8);
@@ -441,12 +457,8 @@ void test_sample_loops() {
         uint32_t start, end;
     };
     const Case cases[] = {
-        {"M.K.", 4, 100, 10, 20, true, 20, 60},
-        {"M.K.", 4, 100, 80, 30, true, 80, 140},
-        {"M.K.", 4, 100, 0, 4, false, 0, 0},
-        {"6CHN", 6, 100, 0, 4, true, 0, 8},
-        {"M.K.", 4, 4, 0, 4, true, 0, 8},
-        {"M.K.", 4, 10, 15, 4, true, 19, 20},
+        {"M.K.", 4, 100, 10, 20, true, 20, 60}, {"M.K.", 4, 100, 80, 30, true, 80, 140}, {"M.K.", 4, 100, 0, 4, false, 0, 0},
+        {"6CHN", 6, 100, 0, 4, true, 0, 8},     {"M.K.", 4, 4, 0, 4, true, 0, 8},        {"M.K.", 4, 10, 15, 4, true, 19, 20},
         {"M.K.", 4, 100, 10, 1, false, 0, 0},
     };
     for (const Case& c : cases) {
@@ -473,7 +485,10 @@ void test_loop_past_end() {
         uint32_t length;
     };
     const Case cases[] = {
-        {"M.K.", 4, 100, false, 280}, {"M.K.", 4, 40, false, 240}, {"M.K.", 4, 100, true, 200}, {"6CHN", 6, 100, false, 200},
+        {"M.K.", 4, 100, false, 280},
+        {"M.K.", 4, 40, false, 240},
+        {"M.K.", 4, 100, true, 200},
+        {"6CHN", 6, 100, false, 200},
     };
     for (const Case& c : cases) {
         std::vector<uint8_t> f = build_mod_with_loop(c.sig, c.channels, 100, 70, 70);
@@ -503,9 +518,9 @@ void test_old_format_loops() {
     f[20 + 22] = 0;
     f[20 + 23] = 100; // сэмпл 1: 200 байт
     f[20 + 24] = 0x05;
-    f[20 + 27] = 56;  // начало петли - 56 байт
-    f[20 + 29] = 20;  // петля 40 байт
-    f[50 + 23] = 10;  // сэмпл 2: 20 байт
+    f[20 + 27] = 56; // начало петли - 56 байт
+    f[20 + 29] = 20; // петля 40 байт
+    f[50 + 23] = 10; // сэмпл 2: 20 байт
     f[50 + 25] = 64;
     f[50 + 26] = 0x01; // начало петли 256 байт - за концом
     f[50 + 29] = 4;
@@ -556,16 +571,16 @@ void test_sample_fail_reasons() {
             }
         }
         const uint32_t free_before = memory::psram_free_page_count(mem.psram);
-        const char* reason = nullptr;
-        const uint16_t index = c == Case::BadIndex ? song.sample_count : 0;
+        const char* reason         = nullptr;
+        const uint16_t index       = c == Case::BadIndex ? song.sample_count : 0;
         CHECK(!formats::mod::load_sample_pcm(src.as_byte_source(), mem, song, index, &reason));
         CHECK(reason != nullptr);
         if (reason != nullptr) {
-            const char* want = c == Case::NoPsram      ? "PSRAM кончилась"
-                               : c == Case::CatalogFull ? "в каталоге сэмплов нет места"
-                               : c == Case::Truncated   ? "чтение оборвалось: сэмпл с 2108, всего 8 байт"
-                                                        : "номер сэмпла вне песни";
-            if (std::strncmp(reason, want, std::strlen(want)) != 0) std::printf("  причина: %s\n", reason);
+            const char* want = c == Case::NoPsram       ? "PSRAM exhausted"
+                               : c == Case::CatalogFull ? "no room in the sample catalog"
+                               : c == Case::Truncated   ? "read broke off: sample at 2108, 8 bytes total"
+                                                        : "sample number outside the song";
+            if (std::strncmp(reason, want, std::strlen(want)) != 0) std::printf("  reason: %s\n", reason);
             CHECK(std::strncmp(reason, want, std::strlen(want)) == 0);
         }
         CHECK_EQ(memory::psram_free_page_count(mem.psram), free_before);
@@ -591,7 +606,7 @@ void test_full_load_counts_failures() {
         if (cut != 0) {
             CHECK_EQ(ls.first_failed_sample, static_cast<uint16_t>(0));
             CHECK(ls.first_failure != nullptr);
-            CHECK_EQ(memory::psram_free_page_count(mem.psram), mem.psram.sample_page_count);
+            CHECK_EQ(memory::psram_free_page_count(mem.psram), memory::psram_sample_page_count(mem.psram));
         }
         memory::track_memory_destroy(mem);
     }

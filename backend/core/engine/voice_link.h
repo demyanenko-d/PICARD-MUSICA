@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 #pragma once
 
 // Связь управляющей части со звуковой: единственное место, через которое тик
@@ -22,17 +23,17 @@ class VoiceLink {
 public:
     // mixer и psram живут не меньше связи; ramp_samples у микшера уже задан.
     void init(VoiceMixer* mixer, memory::PsramStore* psram) {
-        mixer_ = mixer;
-        psram_ = psram;
+        mixer_        = mixer;
+        psram_        = psram;
         ramp_samples_ = mixer->ramp_samples;
         for (uint16_t s = 0; s < SOUNDSINTH_MAX_SLOTS; ++s) {
-            restart_[s] = true; // VoiceRamp нового слота ждёт разгона с тишины
-            filter_on_[s] = false;
-            gain_l_[s] = 0;
-            gain_r_[s] = 0;
-            step_[s] = 0;
-            enc_[s] = soundsinth::model::ResidentEncoding::Raw8;
-            pitch_memo_[s] = 0;
+            restart_[s]       = true; // VoiceRamp нового слота ждёт разгона с тишины
+            filter_on_[s]     = false;
+            gain_l_[s]        = 0;
+            gain_r_[s]        = 0;
+            step_[s]          = 0;
+            enc_[s]           = soundsinth::model::ResidentEncoding::Raw8;
+            pitch_memo_[s]    = 0;
             pitch_memo_c5_[s] = 0;
         }
     }
@@ -105,7 +106,7 @@ public:
     // каждый съедала бы кольцо. Пачка уходит перед любой другой командой -
     // порядок в кольце тот же, что у вызовов.
     void list_push(uint8_t slot) {
-        list_[list_count_++] = slot;
+        list_[list_count_++]                 = slot;
         pending_list_[pending_list_count_++] = slot;
         if (pending_list_count_ == kListPerCommand) flush_pending_list();
     }
@@ -126,9 +127,9 @@ public:
         send(VoiceOp::Stop, slot);
     }
 
-void trigger(uint8_t slot, const soundsinth::model::SampleDescriptor& sample, uint16_t first_page, uint8_t note,
-                 soundsinth::model::FrequencyModel frequency_model, uint32_t start_offset,
-                 soundsinth::model::QuirkFlags quirks, uint16_t checkpoint_first_page);
+    void trigger(uint8_t slot, const soundsinth::model::SampleDescriptor& sample, uint16_t first_page, uint8_t note,
+                 soundsinth::model::FrequencyModel frequency_model, uint32_t start_offset, soundsinth::model::QuirkFlags quirks,
+                 uint16_t checkpoint_first_page);
 
     // Высота звучащего голоса: шаг считает тик, вниз уходит готовое число. Тот
     // же вход - выход сразу (кэш питча): иначе каждый голос каждый тик стоил бы
@@ -136,23 +137,23 @@ void trigger(uint8_t slot, const soundsinth::model::SampleDescriptor& sample, ui
     void set_pitch_amiga(uint8_t slot, uint16_t period, uint32_t c5_speed) {
         if (!playing(slot)) return; // нечего двигать
         if (pitch_memo_[slot] == period && pitch_memo_c5_[slot] == c5_speed) return;
-        pitch_memo_[slot] = period;
+        pitch_memo_[slot]    = period;
         pitch_memo_c5_[slot] = c5_speed;
-        step_[slot] = voice_step_amiga(period, c5_speed);
+        step_[slot]          = voice_step_amiga(period, c5_speed);
         send_step(slot);
     }
     void set_pitch_linear(uint8_t slot, int32_t amount_units, uint32_t c5_speed) {
         if (!playing(slot)) return;
         if (pitch_memo_[slot] == amount_units && pitch_memo_c5_[slot] == c5_speed) return;
-        pitch_memo_[slot] = amount_units;
+        pitch_memo_[slot]    = amount_units;
         pitch_memo_c5_[slot] = c5_speed;
-        step_[slot] = voice_step_linear(amount_units, c5_speed);
+        step_[slot]          = voice_step_linear(amount_units, c5_speed);
         send_step(slot);
     }
 
-void fade_before_missing(uint8_t slot);
+    void fade_before_missing(uint8_t slot);
 
-void move(uint8_t from, uint8_t to);
+    void move(uint8_t from, uint8_t to);
 
     // Снятый голос: гашение последнего значения, если оно слышно; усиления - в ноль.
     void fade(uint8_t slot) {
@@ -162,7 +163,7 @@ void move(uint8_t from, uint8_t to);
 
     // Голоса списка, снятые с прошлого тика: последнее значение гаснет;
     // wave_tail (.mid) - гаснет продолжение волны.
-void fade_stopped(bool wave_tail);
+    void fade_stopped(bool wave_tail);
 
     // --- Команды сведения ---
     void set_gains(uint8_t slot, int32_t l, int32_t r) {
@@ -196,14 +197,14 @@ void fade_stopped(bool wave_tail);
         filter_on_[slot] = false;
         send(VoiceOp::FilterOff, slot);
     }
-void set_filter(uint8_t slot, const FilterCoeffs& c);
+    void set_filter(uint8_t slot, const FilterCoeffs& c);
     // Маршрут держится в голосе между тиками: та же пара - команды нет. У
     // трекерных файлов посыла нет вовсе, и после первого тика маршрут молчит.
     void set_route(uint8_t slot, bool to_discard, uint8_t send_level) {
         const uint8_t packed = static_cast<uint8_t>(send_level | (to_discard ? 0x80u : 0u));
         if (route_known_[slot] && route_[slot] == packed) return;
         route_known_[slot] = true;
-        route_[slot] = packed;
+        route_[slot]       = packed;
         VoiceCommand cmd{VoiceOp::SetRoute, slot, send_level, static_cast<uint8_t>(to_discard ? 1 : 0), {}};
         push(cmd);
     }
@@ -243,39 +244,39 @@ private:
         queue_.push(cmd);
     }
 
-    VoiceMixer* mixer_ = nullptr;
+    VoiceMixer* mixer_         = nullptr;
     memory::PsramStore* psram_ = nullptr;
-    uint32_t ramp_samples_ = 0;
+    uint32_t ramp_samples_     = 0;
     VoiceQueue queue_;
     uint32_t queue_full_ = 0;
 
     // Фильтр ведёт сам тик: он его и включает, и снимает.
     bool filter_on_[SOUNDSINTH_MAX_SLOTS] = {};
-    bool restart_[SOUNDSINTH_MAX_SLOTS] = {};
+    bool restart_[SOUNDSINTH_MAX_SLOTS]   = {};
 
     // Модель звучания голоса: тик считает её сам, чтобы не спрашивать микшер.
     // Позиция растёт на шаг за кадр, целая часть - декодированные отсчёты;
     // дойдя до конца без петли, голос молкнет. Всё это тик знает: шаг задаёт
     // он, сэмпл и петлю видит при запуске, число кадров в тике - тоже.
-    uint32_t sounding_frac_[SOUNDSINTH_MAX_SLOTS] = {};    // Q16.16
-    uint32_t sounding_decoded_[SOUNDSINTH_MAX_SLOTS] = {};
+    uint32_t sounding_frac_[SOUNDSINTH_MAX_SLOTS]       = {}; // Q16.16
+    uint32_t sounding_decoded_[SOUNDSINTH_MAX_SLOTS]    = {};
     uint32_t sounding_loop_start_[SOUNDSINTH_MAX_SLOTS] = {};
-    uint32_t sounding_loop_end_[SOUNDSINTH_MAX_SLOTS] = {};
-    bool sounding_loop_[SOUNDSINTH_MAX_SLOTS] = {};
-    bool sounding_[SOUNDSINTH_MAX_SLOTS] = {};
+    uint32_t sounding_loop_end_[SOUNDSINTH_MAX_SLOTS]   = {};
+    bool sounding_loop_[SOUNDSINTH_MAX_SLOTS]           = {};
+    bool sounding_[SOUNDSINTH_MAX_SLOTS]                = {};
 
     // Модель гашения: сколько отсчётов слоту ещё гаснуть и каким хвостом.
     // Замороженный - одно умножение на отсчёт; волновой (.mid) продолжает
     // читать сэмпл и стоит как живой голос, поэтому считается отдельно.
     uint32_t tail_frames_[SOUNDSINTH_MAX_SLOTS] = {};
-    bool tail_wave_[SOUNDSINTH_MAX_SLOTS] = {};
+    bool tail_wave_[SOUNDSINTH_MAX_SLOTS]       = {};
     void model_tail(uint8_t slot) {
         tail_frames_[slot] = ramp_samples_;
-        tail_wave_[slot] = false;
+        tail_wave_[slot]   = false;
     }
     void model_wave_tail(uint8_t slot) {
         tail_frames_[slot] = ramp_samples_;
-        tail_wave_[slot] = true;
+        tail_wave_[slot]   = true;
     }
     void advance_tails(uint32_t frames) {
         for (uint16_t s = 0; s < SOUNDSINTH_MAX_SLOTS; ++s) {
@@ -292,10 +293,9 @@ private:
         for (uint8_t k = 0; k < list_count_; ++k) {
             const uint8_t s = list_[k];
             if (!sounding_[s]) continue;
-            const uint64_t total = static_cast<uint64_t>(sounding_frac_[s]) +
-                                   static_cast<uint64_t>(frames) * static_cast<uint64_t>(step_[s]);
-            uint32_t whole = static_cast<uint32_t>(total >> 16);
-            sounding_frac_[s] = static_cast<uint32_t>(total) & 0xFFFFu;
+            const uint64_t total = static_cast<uint64_t>(sounding_frac_[s]) + static_cast<uint64_t>(frames) * static_cast<uint64_t>(step_[s]);
+            uint32_t whole       = static_cast<uint32_t>(total >> 16);
+            sounding_frac_[s]    = static_cast<uint32_t>(total) & 0xFFFFu;
             if (whole == 0) continue;
             if (!sounding_loop_[s]) {
                 // Голос жив, пока успевает декодировать все нужные отсчёты:
@@ -313,28 +313,30 @@ private:
             const uint32_t len = sounding_loop_end_[s] - sounding_loop_start_[s];
             if (len == 0) continue;
             uint32_t pos = sounding_decoded_[s] + whole;
-            while (pos >= sounding_loop_end_[s]) pos -= len;
+            while (pos >= sounding_loop_end_[s]) {
+                pos -= len;
+            }
             sounding_decoded_[s] = pos;
         }
     }
     int32_t gain_l_[SOUNDSINTH_MAX_SLOTS] = {};
     int32_t gain_r_[SOUNDSINTH_MAX_SLOTS] = {};
     // Цена голоса: шаг и кодек резидентного сэмпла.
-    uint32_t step_[SOUNDSINTH_MAX_SLOTS] = {};
+    uint32_t step_[SOUNDSINTH_MAX_SLOTS]                           = {};
     soundsinth::model::ResidentEncoding enc_[SOUNDSINTH_MAX_SLOTS] = {};
     // Кэш входов питча: по ним посчитан шаг.
-    int32_t pitch_memo_[SOUNDSINTH_MAX_SLOTS] = {};
+    int32_t pitch_memo_[SOUNDSINTH_MAX_SLOTS]     = {};
     uint32_t pitch_memo_c5_[SOUNDSINTH_MAX_SLOTS] = {};
 
     // Последний посланный маршрут слота: посыл и признак discard в старшем бите.
-    uint8_t route_[SOUNDSINTH_MAX_SLOTS] = {};
+    uint8_t route_[SOUNDSINTH_MAX_SLOTS]    = {};
     bool route_known_[SOUNDSINTH_MAX_SLOTS] = {};
 
     uint8_t list_[SOUNDSINTH_MAX_SLOTS] = {};
-    uint8_t list_count_ = 0;
+    uint8_t list_count_                 = 0;
     // Недописанная пачка номеров для кольца.
     uint8_t pending_list_[kListPerCommand] = {};
-    uint8_t pending_list_count_ = 0;
+    uint8_t pending_list_count_            = 0;
 };
 
 } // namespace soundsinth::engine

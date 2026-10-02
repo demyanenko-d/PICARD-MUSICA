@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 #pragma once
 
 // Z-Controller, которым плата притворяется для хоста.
@@ -14,6 +15,15 @@
 
 namespace devices::zcontroller {
 
+constexpr uint8_t kPortData = 0x57;
+constexpr uint8_t kPortCtrl = 0x77;
+
+// Чтение порта управления. Значащий разряд - первый: драйвер WC делает
+// IN A,(0x77) : AND 2 : RET NZ. Незанятые разряды читаются единицами, как
+// у рабочего контроллера на этой плате.
+constexpr uint8_t kCtrlCardPresent = 0xfc;
+constexpr uint8_t kCtrlNoCard      = 0xfe;
+
 // Зарегистрировать порты. Звать после того, как шина готова принимать
 // обработчики, и после storage_init().
 //
@@ -21,5 +31,14 @@ namespace devices::zcontroller {
 // повторный подъём сбросил бы чужое состояние.
 
 void zcontroller_init(bool emulator_up);
+
+// Сверить признак носителя с действительностью. Звать из витка ядра шины:
+// носитель появляется и исчезает на ходу (флешка встаёт позже подъёма
+// эмулятора, карту вынимают), а драйвер хоста, увидевший "карты нет",
+// команд больше не шлёт.
+//
+// Стоит два чтения готовых признаков; к носителю не обращается, шину не
+// задерживает.
+void zcontroller_tick();
 
 } // namespace devices::zcontroller

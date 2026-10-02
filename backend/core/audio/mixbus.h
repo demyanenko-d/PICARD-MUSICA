@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 #pragma once
 
 #include <cstdint>
@@ -31,19 +32,22 @@ public:
     // накопленным за всю работу против одного трека.
     void start_track() {
         rendered_frames_ = 0;
-        end_frame_ = 0;
-        fade_pos_ = kFadeOff;
-        clipped_ = 0;
-        longest_run_ = 0;
-        run_ = 0;
-        jumps_ = 0;
-        max_jump_ = 0;
-        prev_l_ = 0;
-        prev_r_ = 0;
-        soft_clipped_ = 0;
-        gain_ = kUnityGain;
+        end_frame_       = 0;
+        fade_pos_        = kFadeOff;
+        // И пауза: иначе источник, заведённый мимо загрузки трека, уходит
+        // на короткий путь нулей и молчит целиком.
+        paused_         = false;
+        clipped_        = 0;
+        longest_run_    = 0;
+        run_            = 0;
+        jumps_          = 0;
+        max_jump_       = 0;
+        prev_l_         = 0;
+        prev_r_         = 0;
+        soft_clipped_   = 0;
+        gain_           = kUnityGain;
         limited_frames_ = 0;
-        min_gain_ = kUnityGain;
+        min_gain_       = kUnityGain;
     }
 
     // Кадр конца трека (0 - нет): за буфер до него выход гаснет, дальше -
@@ -92,7 +96,12 @@ public:
     // Одного изменения довольно: рендер один, проходы идут по очереди, и
     // пока пауза стоит, следующий уйдёт туда же.
     uint32_t silent_renders() const { return silent_renders_; }
-    static constexpr uint32_t kFadeFrames = SOUNDSINTH_AUDIO_BUFFER_FRAMES;
+    // Длина затухания - время, а не длина буфера вывода: буфер укорачивают
+    // ради задержки живого MIDI, а гашение от неё не зависит. 224 кадра -
+    // 5.1 мс при 44100, тот же доезд, что у громкости .mid. Число такое,
+    // потому что 224 = 2^5 * 7: куб делится на 2^15 нацело, и кривая
+    // остаётся точной целочисленной.
+    static constexpr uint32_t kFadeFrames = 224;
 
     // Сколько кадров трека упёрлись в шкалу хотя бы одним каналом (до
     // мягкого насыщения), и самая длинная полка подряд. Отличает перегруз от
@@ -113,7 +122,7 @@ public:
     // Состояние лимитера не сбрасывает.
     void set_compressor(int32_t threshold, int32_t amount) {
         comp_threshold_ = threshold;
-        comp_amount_ = amount;
+        comp_amount_    = amount;
     }
 
     // Лимитер. Звать рядом с add_source() при смене трека, после
@@ -135,8 +144,8 @@ public:
     uint32_t min_gain_q15() const { return min_gain_; }
 
 private:
-    static constexpr int32_t kUnityGain = 32768;   // Q15
-    static constexpr uint32_t kFadeOff = 0xFFFFFFFFu;
+    static constexpr int32_t kUnityGain = 32768; // Q15
+    static constexpr uint32_t kFadeOff  = 0xFFFFFFFFu;
 
     void apply_limiter(uint32_t n_frames);
     void apply_fade(int16_t* dst_interleaved, uint32_t n_frames);
@@ -148,33 +157,33 @@ private:
     void count_jump(int32_t dl, int32_t dr);
     void soft_clip_frame(int32_t l, int32_t r, int32_t& out_l, int32_t& out_r);
 
-    SoundSource* sources_[kMaxSources] = {};
-    uint32_t source_count_ = 0;
-    uint32_t rendered_frames_ = 0;
-    uint32_t end_frame_ = 0;
-    uint32_t fade_pos_ = kFadeOff; // кадр затухания; kFadeFrames и больше - нули
-    int8_t fade_dir_ = +1;         // +1 гасим, -1 возвращаем из паузы
-    bool paused_ = false;
-    uint32_t silent_renders_ = 0;
+    SoundSource* sources_[kMaxSources]             = {};
+    uint32_t source_count_                         = 0;
+    uint32_t rendered_frames_                      = 0;
+    uint32_t end_frame_                            = 0;
+    uint32_t fade_pos_                             = kFadeOff; // кадр затухания; kFadeFrames и больше - нули
+    int8_t fade_dir_                               = +1;       // +1 гасим, -1 возвращаем из паузы
+    bool paused_                                   = false;
+    uint32_t silent_renders_                       = 0;
     int32_t mix_l_[SOUNDSINTH_AUDIO_BUFFER_FRAMES] = {};
     int32_t mix_r_[SOUNDSINTH_AUDIO_BUFFER_FRAMES] = {};
-    uint32_t clipped_ = 0;
-    uint32_t longest_run_ = 0;
-    uint32_t run_ = 0;
-    uint32_t jumps_ = 0;
-    uint32_t max_jump_ = 0;
-    int32_t prev_l_ = 0;
-    int32_t prev_r_ = 0;
-    bool limiter_ = false;
-    bool soft_clip_ = false;
-    uint32_t soft_clipped_ = 0;
-    int32_t soft_knee_ = kSoftKneeDefault;
-    uint32_t soft_span_sq_ = static_cast<uint32_t>(32767 - kSoftKneeDefault) * (32767 - kSoftKneeDefault);
-    int32_t comp_threshold_ = SOUNDSINTH_MIDI_COMPRESSOR_THRESHOLD;
-    int32_t comp_amount_ = SOUNDSINTH_MIDI_COMPRESSOR_AMOUNT;
-    int32_t gain_ = kUnityGain;
-    uint32_t limited_frames_ = 0;
-    uint32_t min_gain_ = kUnityGain;
+    uint32_t clipped_                              = 0;
+    uint32_t longest_run_                          = 0;
+    uint32_t run_                                  = 0;
+    uint32_t jumps_                                = 0;
+    uint32_t max_jump_                             = 0;
+    int32_t prev_l_                                = 0;
+    int32_t prev_r_                                = 0;
+    bool limiter_                                  = false;
+    bool soft_clip_                                = false;
+    uint32_t soft_clipped_                         = 0;
+    int32_t soft_knee_                             = kSoftKneeDefault;
+    uint32_t soft_span_sq_                         = static_cast<uint32_t>(32767 - kSoftKneeDefault) * (32767 - kSoftKneeDefault);
+    int32_t comp_threshold_                        = SOUNDSINTH_MIDI_COMPRESSOR_THRESHOLD;
+    int32_t comp_amount_                           = SOUNDSINTH_MIDI_COMPRESSOR_AMOUNT;
+    int32_t gain_                                  = kUnityGain;
+    uint32_t limited_frames_                       = 0;
+    uint32_t min_gain_                             = kUnityGain;
 };
 
 } // namespace soundsinth::mixbus

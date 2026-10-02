@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 #include "core/memory/psram_store.h"
 
 #include <cstring>
@@ -8,29 +9,18 @@
 namespace soundsinth::memory {
 
 namespace {
-void rebuild_free_list(PsramStore& store) {
-    // По фактическому числу страниц: граница зон подвижная.
-    store.free_page_count = static_cast<uint16_t>(store.sample_page_count);
-    store.free_list_broken = false;
-    if (store.sample_page_count == 0) {
-        store.free_list_head = kPageChainEnd;
-        return;
-    }
-    for (uint32_t i = 0; i + 1 < store.sample_page_count; ++i) {
-        store.page_next[i] = static_cast<uint16_t>(i + 1);
-    }
-    store.page_next[store.sample_page_count - 1] = kPageChainEnd;
-    store.free_list_head = 0;
-}
-
-void reset_zones(PsramStore& store) {
+// Отдать все страницы и взять блок трека заново - на весь чип, доставшийся
+// треку. Данные растут снизу блока, временное загрузчика - сверху вниз.
+void take_track_block(PsramStore& store) {
+    const uint16_t pages = static_cast<uint16_t>(store.track_bytes / kPsramPageBytes);
+    // Отмеченные блоки остаются на своих страницах и при смене трека, и при
+    // ужатии хранилища под таблицы банка: кэш носителей взят при подъёме и
+    // лежит с краю, трек его не касается.
+    psram_alloc_release_track(store.alloc, pages);
+    store.track               = psram_alloc(store.alloc, psram_alloc_largest_run(store.alloc));
     store.pattern_bump_offset = 0;
-    store.temp_floor = store.track_bytes;
-    store.sample_zone_base = kPatternZoneBytes;
-    // Хранилище меньше зоны паттернов (pc_player --psram-kb) - сэмплам места нет.
-    store.sample_page_count =
-        store.track_bytes > kPatternZoneBytes ? (store.track_bytes - kPatternZoneBytes) / kPsramPageBytes : 0;
-    rebuild_free_list(store);
+    store.temp_floor          = store.track.bytes();
+    store.free_list_broken    = false;
 }
 } // namespace
 
@@ -39,13 +29,13 @@ void psram_create(PsramStore& store) {
     // Берётся весь чип: указатель один, границу хранилища держит
     // track_bytes.
     store.base = platform::psram_base_acquire(kPsramChipBytes);
-    reset_zones(store);
+    take_track_block(store);
 }
 
 void psram_set_track_bytes(PsramStore& store, uint32_t bytes) {
     // Потолок - весь чип: база отображена на весь чип с самого начала.
     store.track_bytes = bytes > kPsramChipBytes ? kPsramChipBytes : bytes;
-    reset_zones(store);
+    take_track_block(store);
 }
 
 void psram_destroy(PsramStore& store) {
@@ -55,52 +45,75 @@ void psram_destroy(PsramStore& store) {
 
 void poison_words(uint8_t* base, size_t bytes) {
     constexpr uint32_t kPoison = 0xdeadbeefu;
-    for (size_t i = 0; i + 4 <= bytes; i += 4) std::memcpy(base + i, &kPoison, 4);
-}
-
-void psram_poison_track(PsramStore& store) {
-    // Зона паттернов - только занятая часть, остальное и так не читалось;
-    // зона сэмплов - целиком, по фактической границе прошлого трека.
-    poison_words(store.base, store.pattern_bump_offset);
-    if (store.sample_page_count > 0) {
-        std::memset(store.base + store.sample_zone_base, 0xefu, store.sample_page_count * kPsramPageBytes);
+    for (size_t i = 0; i + 4 <= bytes; i += 4) {
+        std::memcpy(base + i, &kPoison, 4);
     }
 }
 
+void psram_poison_track(PsramStore& store) {
+    // Данные трека - только занятая часть, остальное и так не читалось;
+    // страницы сэмплов - до высшей точки, выше неё трек ничего не брал.
+    poison_words(store.base + psram_track_byte_base(store), store.pattern_bump_offset);
+    const uint32_t high = static_cast<uint32_t>(store.alloc.high_water) * kPsramPageBytes;
+    const uint32_t from = psram_track_byte_base(store) + store.pattern_bump_offset;
+    if (high > from) std::memset(store.base + from, 0xefu, high - from);
+}
+
 void psram_reset_track(PsramStore& store) {
-    reset_zones(store);
+    take_track_block(store);
 }
 
 uint32_t psram_free_list_length(const PsramStore& store) {
     uint32_t n = 0;
-    uint16_t p = store.free_list_head;
-    // Потолок - от зацикленного списка. По sample_page_count, а не по
-    // константе: после заморозки зоны страниц больше.
-    while (p != kPageChainEnd && n <= store.sample_page_count) {
-        ++n;
-        p = store.page_next[p];
+    for (uint16_t p = 0; p < store.alloc.page_count; ++p) {
+        if ((store.alloc.busy[p >> 5] & (1u << (p & 31u))) == 0u) ++n;
     }
     return n;
 }
 
 uint32_t psram_freeze_pattern_zone(PsramStore& store) {
-    // Вверх до страницы: зона сэмплов адресуется страницами.
-    const uint32_t base = align_up(store.pattern_bump_offset, kPsramPageBytes);
-    store.sample_zone_base = base;
-    store.sample_page_count = (store.track_bytes - base) / kPsramPageBytes;
-    store.temp_floor = store.track_bytes;   // временное загрузчика - сэмплам
-    rebuild_free_list(store);
-    return store.sample_page_count;
+    // Вверх до страницы: хвост блока раздаётся страницами.
+    const uint32_t kept = align_up(store.pattern_bump_offset, kPsramPageBytes) / kPsramPageBytes;
+    psram_alloc_shrink(store.alloc, store.track, static_cast<uint16_t>(kept));
+    store.temp_floor = store.track.bytes(); // временное загрузчика - сэмплам
+    return psram_alloc_free_pages(store.alloc);
+}
+
+uint8_t* psram_take_permanent(PsramStore& store, uint32_t bytes) {
+    if (bytes == 0) return nullptr;
+    const uint16_t pages = static_cast<uint16_t>(align_up(bytes, kPsramPageBytes) / kPsramPageBytes);
+    // Блок трека отпускается на время просьбы: иначе он занимает всё, и
+    // постоянному места нет. Взятое ляжет с краю - распределитель отдаёт
+    // первый подходящий прогон, - и середину чипа не разрежет.
+    psram_alloc_free(store.alloc, store.track);
+    PsramBlock b = psram_alloc(store.alloc, pages);
+    uint8_t* p   = nullptr;
+    if (b.valid()) {
+        if (psram_alloc_keep(store.alloc, b)) {
+            p = store.base + static_cast<uint32_t>(b.first) * kPsramPageBytes;
+        } else {
+            psram_alloc_free(store.alloc, b); // список отметок полон - не держать втихую
+        }
+    }
+    take_track_block(store);
+    return p;
+}
+
+void psram_reserve_track_bytes(PsramStore& store, uint32_t bytes) {
+    const uint32_t pages = align_up(bytes, kPsramPageBytes) / kPsramPageBytes;
+    if (pages >= store.track.pages) return;
+    psram_alloc_shrink(store.alloc, store.track, static_cast<uint16_t>(pages));
+    store.temp_floor = store.track.bytes();
 }
 
 uint32_t psram_pattern_alloc(PsramStore& store, uint32_t size) {
     // На 4: структуры с uint32_t компилятор копирует через LDRD, а LDRD по
     // невыровненному адресу на Cortex-M33 - HardFault (на x86 проходит молча).
-    // Зона и смещение кратны 4: size влезает - влезает и округлённый.
-    const uint32_t limit = store.temp_floor < kPatternZoneBytes ? store.temp_floor : kPatternZoneBytes;
+    // Блок и смещение кратны 4: size влезает - влезает и округлённый.
+    const uint32_t limit = store.temp_floor;
     if (store.pattern_bump_offset > limit || size > limit - store.pattern_bump_offset) return kPatternAllocFailed;
-    const uint32_t aligned = align_up(size, 4u);
-    const uint32_t offset = store.pattern_bump_offset;
+    const uint32_t aligned     = align_up(size, 4u);
+    const uint32_t offset      = store.pattern_bump_offset;
     store.pattern_bump_offset += aligned;
     return offset;
 }
@@ -116,37 +129,30 @@ uint32_t psram_temp_alloc(PsramStore& store, uint32_t size) {
 }
 
 uint16_t psram_alloc_page(PsramStore& store) {
-    const uint16_t page = store.free_list_head;
-    if (page == kPageChainEnd) {
-        return kPageChainEnd;
+    PsramBlock page = psram_alloc(store.alloc, 1);
+    if (!page.valid() && store.temp_floor == store.track.bytes()) {
+        // Свободных страниц нет, потому что блок трека ещё не усечён.
+        // Временного в нём не осталось, значит усечь можно прямо сейчас -
+        // это ровно то, что делает заморозка. Загрузчику она по-прежнему
+        // нужна явно: у него временное живо до самого конца разбора.
+        (void)psram_freeze_pattern_zone(store);
+        page = psram_alloc(store.alloc, 1);
     }
-    // До заморозки сверху может лежать временное загрузчика - страницы на нём
-    // не выдаются.
-    if (store.sample_zone_base + (static_cast<uint32_t>(page) + 1u) * kPsramPageBytes > store.temp_floor) {
-        return kPageChainEnd;
-    }
-    store.free_list_head = store.page_next[page];
-    --store.free_page_count;
-    return page;
+    return page.valid() ? page.first : kPageChainEnd;
 }
 
 void psram_free_chain(PsramStore& store, uint16_t first_page) {
-    if (first_page == kPageChainEnd) {
-        return;
+    uint16_t page = first_page;
+    // По одной: страницы цепочки лежат вразнобой. Длина ограничена числом
+    // страниц чипа - испорченная цепочка не зациклит.
+    for (uint32_t guard = 0; page != kPageChainEnd && guard <= kMaxSamplePageCount; ++guard) {
+        const uint16_t next = store.page_next[page];
+        PsramBlock one{page, 1};
+        psram_alloc_free(store.alloc, one);
+        store.page_next[page] = kPageChainEnd;
+        page                  = next;
     }
-    // Найти хвост цепочки и подшить её целиком перед free_list_head:
-    // O(длина цепочки). O(1) потребовало бы хранить хвост в каталоге
-    // сэмплов.
-    uint16_t tail = first_page;
-    uint16_t length = 1;
-    while (store.page_next[tail] != kPageChainEnd) {
-        tail = store.page_next[tail];
-        ++length;
-    }
-    store.page_next[tail] = store.free_list_head;
-    store.free_list_head = first_page;
-    store.free_page_count = static_cast<uint16_t>(store.free_page_count + length);
-    if (store.free_page_count > store.sample_page_count) store.free_list_broken = true;
+    if (store.alloc.double_free != 0) store.free_list_broken = true;
 }
 
 } // namespace soundsinth::memory

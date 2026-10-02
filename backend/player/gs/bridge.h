@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 #pragma once
 
 // Мост между автоматом General Sound (devices::gs::GsDevice) и шиной
@@ -9,10 +10,10 @@
 //
 // Порты GS:
 //
-//   0xBB  запись  GSCOM   команда
-//   0xBB  чтение  GSSTAT  биты состояния
-//   0xB3  запись  GSDAT   данные ZX -> GS
-//   0xB3  чтение  GSDAT   данные GS -> ZX
+//   0xbb  запись  GSCOM   команда
+//   0xbb  чтение  GSSTAT  биты состояния
+//   0xb3  запись  GSDAT   данные ZX -> GS
+//   0xb3  чтение  GSDAT   данные GS -> ZX
 //
 // Протокол платы использует 0x63/0x67 (SOUNDSINTH_BUS_PORT_CMD/DAT),
 // порты GS свободны.
@@ -23,27 +24,27 @@ namespace player::gs {
 
 // Подключить эмуляцию к шине. Звать после hostlink::init(): ответ
 // публикуется через z80_bus_pio_set_rd, file_info модуля - через hostlink.
-void init();
+void bridge_init();
 
 // Работа, которую нельзя делать в прерывании: разобрать накопленный
 // модуль и отдать загрузчику. Звать из основного потока с прочей
 // периодикой.
-void poll();
+void bridge_poll();
 
 // Плеер GS попросил память под модуль (#30): память трека теперь его, до
 // release_buffer.
-bool wants_track_memory();
+bool bridge_wants_track_memory();
 
 // Вернуть приёмный буфер хранилищу трека: трек запускают через протокол
 // платы, плеер GS больше не говорит. Звать, когда движок снят
 // (track_load_begin): хранилище пересобирает список свободных страниц.
 // Следующая команда загрузки модуля отрежет буфер заново.
-void release_buffer();
+void bridge_release_buffer();
 
 // Печать состояния эмуляции, если с ней говорили: счётчики (unknown -
 // какой команды не хватило), четыре частые команды (порты GS в диапазоне
 // ATA у divIDE: стучаться может и ПЗУ esxDOS), до шести раз начало
 // разговора. Звать из задачи логгера.
-void log_stats();
+void bridge_log_stats();
 
 } // namespace player::gs

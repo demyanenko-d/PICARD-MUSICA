@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 // Порт ITDecompression (ITCompression.cpp OpenMPT) и BitReader.h;
 // копирайт и потоковый API - в it_decompress.h.
 
@@ -19,9 +20,9 @@ uint32_t read_bits(DecompressState& s, const uint8_t* data, uint32_t size, int32
         s.bit_buf |= (static_cast<uint32_t>(data[s.byte_pos++]) << s.bit_num);
         s.bit_num += 8;
     }
-    const uint32_t v = s.bit_buf & ((1u << num_bits) - 1u);
-    s.bit_buf >>= num_bits;
-    s.bit_num -= num_bits;
+    const uint32_t v   = s.bit_buf & ((1u << num_bits) - 1u);
+    s.bit_buf        >>= num_bits;
+    s.bit_num         -= num_bits;
     return v;
 }
 
@@ -34,20 +35,19 @@ int32_t change_width(int32_t cur_width, int32_t width) {
 
 } // namespace
 
-uint32_t decompress_step(DecompressState& state, const uint8_t* bitstream, uint32_t bitstream_bytes,
-                         uint32_t max_samples, int16_t* out) {
-    const bool is16bit = state.is16bit;
-    const bool is215 = state.is215;
-    const int32_t fetch_a = is16bit ? 4 : 3;
-    const int32_t lower_b = is16bit ? -8 : -4;
-    const int32_t upper_b = is16bit ? 7 : 3;
+uint32_t decompress_step(DecompressState& state, const uint8_t* bitstream, uint32_t bitstream_bytes, uint32_t max_samples, int16_t* out) {
+    const bool is16bit      = state.is16bit;
+    const bool is215        = state.is215;
+    const int32_t fetch_a   = is16bit ? 4 : 3;
+    const int32_t lower_b   = is16bit ? -8 : -4;
+    const int32_t upper_b   = is16bit ? 7 : 3;
     const int32_t def_width = is16bit ? 17 : 9;
 
     if (state.width == 0) {
         // Свежий блок, как в ITDecompression::ITDecompression: mem1 = mem2 = 0
         // и стартовая ширина перед первым отсчётом блока.
-        state.mem1 = 0;
-        state.mem2 = 0;
+        state.mem1  = 0;
+        state.mem2  = 0;
         state.width = def_width;
     }
 
@@ -55,9 +55,9 @@ uint32_t decompress_step(DecompressState& state, const uint8_t* bitstream, uint3
 
     auto write_sample = [&](int32_t v, int32_t top_bit) {
         if (v & top_bit) v -= (top_bit << 1); // знаковое расширение N-битного значения
-        state.mem1 += v;
-        state.mem2 += state.mem1;
-        const int32_t result = is215 ? state.mem2 : state.mem1;
+        state.mem1           += v;
+        state.mem2           += state.mem1;
+        const int32_t result  = is215 ? state.mem2 : state.mem1;
         if (is16bit) {
             out[written] = static_cast<int16_t>(static_cast<uint32_t>(result) & 0xFFFFu);
         } else {

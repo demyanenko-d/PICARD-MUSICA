@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 #include "testing.h"
 
 #include "core/engine/song_duration.h"
@@ -56,7 +57,7 @@ void test_setvolume_volumeslide_matches_libxmp() {
     const char* path = "SD/test_music/mod/00_00_00.mod"; // SetVolume(Cxx) и VolumeSlide(Axy) встречаются в первых паттернах, проверено
     std::ifstream in(path, std::ios::binary);
     if (!in) {
-        std::printf("  файл не найден (%s) — пропуск\n", path);
+        std::printf("  file not found (%s) - skipped\n", path);
         return;
     }
     std::vector<uint8_t> file_bytes((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
@@ -104,29 +105,26 @@ void test_setvolume_volumeslide_matches_libxmp() {
     // нескольких найденных по пути багов: невалидная ссылка на пустой сэмпл
     // игнорируется ProTracker'ом, молчащий канал должен сбрасывать volume в 0.
     constexpr int kTicks = 50;
-    int mismatches = 0;
+    int mismatches       = 0;
     for (int t = 0; t < kTicks; ++t) {
         for (uint8_t ch = 0; ch < song.channel_count && ch < XMP_MAX_CHANNELS; ++ch) {
             if (channels[ch].volume != static_cast<uint8_t>(info.channel_info[ch].volume)) {
                 ++mismatches;
                 if (mismatches <= 20) {
                     const auto& our_cell = ch < last_row.size() ? last_row[ch] : soundsinth::model::PatternCell{};
-                    std::printf(
-                        "  расхождение тик=%d канал=%u наш_volume=%u(active=%d) libxmp_volume=%u (наш row=%u libxmp "
-                        "row=%d) наш: note=%u ins=%u fx=%d fxparam=%u | libxmp: note=%u ins=%u fxt=%u fxp=%u "
-                        "sample=%u position=%u\n",
-                        t, ch, channels[ch].volume, channels[ch].voice_active, info.channel_info[ch].volume, ps.row,
-                        info.row, our_cell.note, our_cell.instrument, static_cast<int>(our_cell.effect.type),
-                        our_cell.effect.param, info.channel_info[ch].event.note, info.channel_info[ch].event.ins,
-                        info.channel_info[ch].event.fxt, info.channel_info[ch].event.fxp, info.channel_info[ch].sample,
-                        info.channel_info[ch].position);
+                    std::printf("  difference tick=%d channel=%u our_volume=%u(active=%d) libxmp_volume=%u (our row=%u libxmp "
+                                "row=%d) ours: note=%u ins=%u fx=%d fxparam=%u | libxmp: note=%u ins=%u fxt=%u fxp=%u "
+                                "sample=%u position=%u\n",
+                                t, ch, channels[ch].volume, channels[ch].voice_active, info.channel_info[ch].volume, ps.row, info.row, our_cell.note,
+                                our_cell.instrument, static_cast<int>(our_cell.effect.type), our_cell.effect.param, info.channel_info[ch].event.note,
+                                info.channel_info[ch].event.ins, info.channel_info[ch].event.fxt, info.channel_info[ch].event.fxp, info.channel_info[ch].sample,
+                                info.channel_info[ch].position);
                 }
             }
         }
 
         const bool our_ok = engine::sequencer_tick(song, mem.psram, ps, diag_row_callback, &ctx);
-        engine::apply_continuous_effects(ps, channels.data(), song.channel_count, song.quirks, song.frequency_model,
-                                         engine::kQ8One, ps.tick_in_row != 0);
+        engine::apply_continuous_effects(ps, channels.data(), song.channel_count, song.quirks, song.frequency_model, engine::kQ8One, ps.tick_in_row != 0);
         const int xmp_rc = xmp_play_frame(xmp);
         xmp_get_frame_info(xmp, &info);
 
@@ -147,11 +145,14 @@ void test_setvolume_volumeslide_matches_libxmp() {
 // сверяются: у части прочих каналов расхождения есть.
 void test_period_matches_libxmp() {
     std::printf("test_period_matches_libxmp\n");
-    static const char* kFiles[] = {"SD/test_music/mod/megaman.mod", "SD/test_music/mod/1pattern.mod",
-                                   "music/src/mod/sunburn_at_night.mod", "music/src/mod/dope.mod"};
+    static const char* kFiles[] = {"SD/test_music/mod/megaman.mod", "SD/test_music/mod/1pattern.mod", "music/src/mod/sunburn_at_night.mod",
+                                   "music/src/mod/dope.mod"};
     for (const char* path : kFiles) {
         const std::vector<uint8_t> bytes = read_file(path);
-        if (bytes.empty()) { std::printf("  ПРОПУСК (нет файла): %s\n", path); continue; }
+        if (bytes.empty()) {
+            std::printf("  SKIP (no file): %s\n", path);
+            continue;
+        }
         formats::MemoryByteSource mbs(bytes.data(), static_cast<uint32_t>(bytes.size()));
         memory::TrackMemory mem;
         memory::track_memory_create(mem);
@@ -177,29 +178,27 @@ void test_period_matches_libxmp() {
         for (int t = 0; t < 6000; ++t) {
             for (uint8_t ch = 0; ch < song.channel_count && ch < XMP_MAX_CHANNELS; ++ch) {
                 const engine::ChannelState& cs = channels[ch];
-                const auto& ci = info.channel_info[ch];
+                const auto& ci                 = info.channel_info[ch];
                 if (!cs.voice_active || ci.period == 0 || (ci.volume == 0 && cs.volume == 0)) continue;
                 if (ch >= last_row.size()) continue;
                 const soundsinth::model::Effect fx = last_row[ch].effect.type;
-                const bool porta = fx == soundsinth::model::Effect::PortaUp || fx == soundsinth::model::Effect::PortaDown;
-                const bool vibrato = fx == soundsinth::model::Effect::Vibrato && ps.tick_in_row != 0;
+                const bool porta                   = fx == soundsinth::model::Effect::PortaUp || fx == soundsinth::model::Effect::PortaDown;
+                const bool vibrato                 = fx == soundsinth::model::Effect::Vibrato && ps.tick_in_row != 0;
                 if (!porta && !vibrato) continue;
                 ++(porta ? porta_ticks : vibrato_ticks);
-                const double ours = double(int32_t(cs.period) + cs.pitch_offset);
+                const double ours   = double(int32_t(cs.period) + cs.pitch_offset);
                 const double theirs = double(ci.period) / 4096.0;
                 if (ours - theirs > 2.5 || theirs - ours > 2.5) {
-                    if (++mismatches <= 5) std::printf("  тик %d канал %u: наш %.0f libxmp %.2f\n", t, ch, ours, theirs);
+                    if (++mismatches <= 5) std::printf("  tick %d channel %u: ours %.0f libxmp %.2f\n", t, ch, ours, theirs);
                 }
             }
             if (!engine::sequencer_tick(song, mem.psram, ps, diag_row_callback, &ctx)) break;
-            engine::apply_continuous_effects(ps, channels.data(), song.channel_count, song.quirks, song.frequency_model,
-                                             engine::kQ8One, ps.tick_in_row != 0);
+            engine::apply_continuous_effects(ps, channels.data(), song.channel_count, song.quirks, song.frequency_model, engine::kQ8One, ps.tick_in_row != 0);
             if (xmp_play_frame(xmp) != 0) break;
             xmp_get_frame_info(xmp, &info);
             if (info.loop_count > 0) break;
         }
-        std::printf("  %s: канало-тиков с порто %u, с вибрато %u, расхождений больше 2.5: %u\n", path, porta_ticks,
-                    vibrato_ticks, mismatches);
+        std::printf("  %s: channel ticks with portamento %u, with vibrato %u, differences above 2.5: %u\n", path, porta_ticks, vibrato_ticks, mismatches);
         CHECK(porta_ticks > 0);
         CHECK_EQ(mismatches, 0u);
         xmp_end_player(xmp);
@@ -223,16 +222,20 @@ void test_period_matches_libxmp() {
 void test_song_duration_matches_libxmp() {
     std::printf("test_song_duration_matches_libxmp\n");
     static const char* kFiles[] = {
-        "SD/test_music/mod/star_wars.mod", "SD/test_music/mod/legend_of_zelda.mod", "SD/test_music/mod/megaman.mod",
-        "SD/test_music/xm/final_fantasy.xm", "SD/test_music/xm/001.xm",
-        "SD/test_music/s3m/2nd_reality.s3m", "SD/test_music/s3m/starwars.s3m",
-        "SD/test_music/it/00009.it", "SD/test_music/it/ivi-lite__v61.it", "SD/test_music/it/life_d__v40.it",
-        "music/src/s3m/mario1_1.s3m", "music/src/mod/00_00_00.mod", "music/src/it/dg_pcorn__v50.it",
-        "music/src/s3m/41096877.s3m",
+        "SD/test_music/mod/star_wars.mod",   "SD/test_music/mod/legend_of_zelda.mod",
+        "SD/test_music/mod/megaman.mod",     "SD/test_music/xm/final_fantasy.xm",
+        "SD/test_music/xm/001.xm",           "SD/test_music/s3m/2nd_reality.s3m",
+        "SD/test_music/s3m/starwars.s3m",    "SD/test_music/it/00009.it",
+        "SD/test_music/it/ivi-lite__v61.it", "SD/test_music/it/life_d__v40.it",
+        "music/src/s3m/mario1_1.s3m",        "music/src/mod/00_00_00.mod",
+        "music/src/it/dg_pcorn__v50.it",     "music/src/s3m/41096877.s3m",
     };
     for (const char* path : kFiles) {
         const std::vector<uint8_t> bytes = read_file(path);
-        if (bytes.empty()) { std::printf("  ПРОПУСК (нет файла): %s\n", path); continue; }
+        if (bytes.empty()) {
+            std::printf("  SKIP (no file): %s\n", path);
+            continue;
+        }
 
         memory::TrackMemory mem;
         memory::track_memory_create(mem);
@@ -240,19 +243,20 @@ void test_song_duration_matches_libxmp() {
         formats::MemoryByteSource mbs(bytes.data(), static_cast<uint32_t>(bytes.size()));
         player::load::SessionLoadResult load;
         if (!player::load::run_session_load(mbs.as_byte_source(), mem, song, load)) {
-            std::printf("  ПРОПУСК (не загрузился): %s\n", path);
+            std::printf("  SKIP (did not load): %s\n", path);
             memory::track_memory_destroy(mem);
             continue;
         }
-        const uint32_t our_ms =
-            static_cast<uint32_t>((static_cast<uint64_t>(engine::compute_song_total_frames(song, mem.psram, memory::scratch_take(mem.scratch, memory::Scratch::DurationPass, memory::kDurationPassBytes), memory::kDurationPassBytes)) * 1000u) /
-                                   engine::kSampleRateHz);
+        const uint32_t our_ms = static_cast<uint32_t>(
+            (static_cast<uint64_t>(engine::compute_song_total_frames(
+                 song, mem.psram, memory::scratch_take(mem.scratch, memory::Scratch::DurationPass, memory::kDurationPassBytes), memory::kDurationPassBytes)) *
+             1000u) /
+            engine::kSampleRateHz);
         memory::scratch_leave(mem.scratch, memory::Scratch::DurationPass);
 
         xmp_context xmp = xmp_create_context();
-        int their_ms = -1;
-        if (xmp != nullptr &&
-            xmp_load_module_from_memory(xmp, bytes.data(), static_cast<long>(bytes.size())) == 0) {
+        int their_ms    = -1;
+        if (xmp != nullptr && xmp_load_module_from_memory(xmp, bytes.data(), static_cast<long>(bytes.size())) == 0) {
             if (xmp_start_player(xmp, static_cast<int>(engine::kSampleRateHz), 0) == 0) {
                 struct xmp_frame_info info {};
                 xmp_get_frame_info(xmp, &info);
@@ -264,13 +268,12 @@ void test_song_duration_matches_libxmp() {
         if (xmp != nullptr) xmp_free_context(xmp);
 
         if (their_ms <= 0) {
-            std::printf("  %s: наши %u.%03u c, libxmp не сказал\n", path, our_ms / 1000u, our_ms % 1000u);
+            std::printf("  %s: ours %u.%03u s, libxmp did not say\n", path, our_ms / 1000u, our_ms % 1000u);
         } else {
-            const uint32_t t = static_cast<uint32_t>(their_ms);
+            const uint32_t t  = static_cast<uint32_t>(their_ms);
             const uint32_t lo = t < our_ms ? t : our_ms;
             const uint32_t hi = t < our_ms ? our_ms : t;
-            std::printf("  %s: наши %u.%03u c | libxmp %u.%03u c\n", path, our_ms / 1000u, our_ms % 1000u,
-                        t / 1000u, t % 1000u);
+            std::printf("  %s: ours %u.%03u s | libxmp %u.%03u s\n", path, our_ms / 1000u, our_ms % 1000u, t / 1000u, t % 1000u);
             CHECK(static_cast<uint64_t>(hi - lo) * 1000u <= static_cast<uint64_t>(hi));
         }
         memory::track_memory_destroy(mem);
@@ -283,13 +286,15 @@ void test_song_duration_matches_libxmp() {
 void test_position_row_by_tick_matches_libxmp() {
     std::printf("test_sequencer_libxmp_position_row_by_tick\n");
     static const char* kFiles[] = {
-        "SD/test_music/mod/star_wars.mod", "SD/test_music/xm/final_fantasy.xm", "SD/test_music/s3m/2nd_reality.s3m",
-        "SD/test_music/it/00009.it", "music/src/s3m/mario1_1.s3m", "music/src/mod/00_00_00.mod",
-        "music/src/it/dg_pcorn__v50.it",
+        "SD/test_music/mod/star_wars.mod", "SD/test_music/xm/final_fantasy.xm", "SD/test_music/s3m/2nd_reality.s3m", "SD/test_music/it/00009.it",
+        "music/src/s3m/mario1_1.s3m",      "music/src/mod/00_00_00.mod",        "music/src/it/dg_pcorn__v50.it",
     };
     for (const char* path : kFiles) {
         const std::vector<uint8_t> bytes = read_file(path);
-        if (bytes.empty()) { std::printf("  ПРОПУСК (нет файла): %s\n", path); continue; }
+        if (bytes.empty()) {
+            std::printf("  SKIP (no file): %s\n", path);
+            continue;
+        }
         memory::TrackMemory mem;
         memory::track_memory_create(mem);
         soundsinth::model::Song song;
@@ -308,8 +313,7 @@ void test_position_row_by_tick_matches_libxmp() {
         for (; ticks < 60000; ++ticks) {
             if (info.pos != ps.order_pos || info.row != ps.row) {
                 if (mismatches == 0) {
-                    std::printf("  %s: тик %u наш (%u,%u) libxmp (%d,%d)\n", path, ticks, ps.order_pos, ps.row, info.pos,
-                                info.row);
+                    std::printf("  %s: tick %u ours (%u,%u) libxmp (%d,%d)\n", path, ticks, ps.order_pos, ps.row, info.pos, info.row);
                 }
                 ++mismatches;
             }
@@ -318,7 +322,7 @@ void test_position_row_by_tick_matches_libxmp() {
             xmp_get_frame_info(xmp, &info);
             if (info.loop_count > 0) break;
         }
-        std::printf("  %s: тиков %u, расхождений %u\n", path, ticks, mismatches);
+        std::printf("  %s: ticks %u, differences %u\n", path, ticks, mismatches);
         CHECK(ticks > 100u);
         CHECK_EQ(mismatches, 0u);
         xmp_end_player(xmp);

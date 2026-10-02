@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 #pragma once
 
 // Голос: рендерит один канал, читая резидентные страницы сэмпла в PSRAM
@@ -40,8 +41,8 @@ struct Voice {
 
     // --- Позиция в резидентной странице PSRAM ---
     soundsinth::model::ResidentEncoding resident_encoding = soundsinth::model::ResidentEncoding::Raw8;
-    uint16_t first_page = memory::kPageChainEnd; // начало цепочки, нужно для перезапуска на петле
-    uint16_t page = memory::kPageChainEnd;
+    uint16_t first_page  = memory::kPageChainEnd; // начало цепочки, нужно для перезапуска на петле
+    uint16_t page        = memory::kPageChainEnd;
     uint16_t byte_offset = 0;
     dpcm8::Dpcm8State dpcm_state; // только при resident_encoding == Dpcm8
 
@@ -56,14 +57,14 @@ struct Voice {
     int32_t pitch_memo = 0;
 
     // --- Петля (SampleDescriptor::loop_*, только прямая) ---
-    bool loop_enabled = false;
-    bool hermite = false; // эрмитова интерполяция; здесь - в дырке выравнивания
+    bool loop_enabled   = false;
+    bool hermite        = false; // эрмитова интерполяция; здесь - в дырке выравнивания
     uint32_t loop_start = 0;
-    uint32_t loop_end = 0; // decoded_count >= loop_end -> перемотка на loop_start (не на конец сэмпла)
+    uint32_t loop_end   = 0; // decoded_count >= loop_end -> перемотка на loop_start (не на конец сэмпла)
     // Позиция декодера на отсчёте loop_start, ставится один раз на голос.
     bool loop_checkpoint_captured = false;
     dpcm8::Dpcm8State loop_checkpoint_dpcm_state; // только при resident_encoding == Dpcm8
-    uint16_t loop_checkpoint_page = memory::kPageChainEnd;
+    uint16_t loop_checkpoint_page        = memory::kPageChainEnd;
     uint16_t loop_checkpoint_byte_offset = 0;
 
     // --- Интерполяция между соседними исходными отсчётами ---
@@ -74,16 +75,16 @@ struct Voice {
     // один родной отсчёт. Упреждения нет: декодер, петли и конец сэмпла те
     // же, что у линейной, окно само проходит через стык петли. Только Raw8
     // и Dpcm8.
-    int16_t prev_sample = 0;
-    int16_t next_sample = 0;
-    int16_t older_sample = 0; // только hermite: отсчёт до prev_sample
-    int16_t oldest_sample = 0; // только hermite: отсчёт до older_sample
+    int16_t prev_sample    = 0;
+    int16_t next_sample    = 0;
+    int16_t older_sample   = 0; // только hermite: отсчёт до prev_sample
+    int16_t oldest_sample  = 0; // только hermite: отсчёт до older_sample
     uint32_t pitch_memo_c5 = 0; // c5_speed кэша питча, 0 - кэша нет
-    uint32_t frac_pos = 0; // Q16.16, всегда в [0, 0x10000)
-    uint32_t step = 0; // Q16.16, прирост frac_pos за выходной отсчёт (питч)
+    uint32_t frac_pos      = 0; // Q16.16, всегда в [0, 0x10000)
+    uint32_t step          = 0; // Q16.16, прирост frac_pos за выходной отсчёт (питч)
 };
 // 96 слотов: каждые 4 байта Voice - 384 байта SRAM.
-static_assert(sizeof(Voice) == 60, "Voice: поля переставлены или добавлены - пересчитать раскладку");
+static_assert(sizeof(Voice) == 60, "Voice: fields were reordered or added - recompute the layout");
 
 // Запускает голос с нуля: позиция start_offset, первые один-два отсчёта,
 // step. Amiga: step = 428 * c5_speed / output_hz / period (программный
@@ -100,28 +101,25 @@ static_assert(sizeof(Voice) == 60, "Voice: поля переставлены и�
 // всем звучащим голосам выставляет синхронизация того же тика, до рендера.
 // Эрмитова интерполяция этого сэмпла: у Raw16 её нет, он играет линейно.
 inline bool voice_hermite(const soundsinth::model::SampleDescriptor& sample, soundsinth::model::QuirkFlags quirks) {
-    return (quirks & soundsinth::model::kQuirkHermiteInterpolation) != 0 &&
-           sample.resident_encoding != soundsinth::model::ResidentEncoding::Raw16;
+    return (quirks & soundsinth::model::kQuirkHermiteInterpolation) != 0 && sample.resident_encoding != soundsinth::model::ResidentEncoding::Raw16;
 }
 
 struct TriggerStart {
-    bool sounds = false;
-    bool loop_ok = false;
+    bool sounds     = false;
+    bool loop_ok    = false;
     uint32_t offset = 0; // отсчёт начала, уже с правилами формата
 };
-TriggerStart voice_trigger_start(const soundsinth::model::SampleDescriptor& sample, uint16_t first_page,
-                                 uint32_t start_offset, soundsinth::model::QuirkFlags quirks);
+TriggerStart voice_trigger_start(const soundsinth::model::SampleDescriptor& sample, uint16_t first_page, uint32_t start_offset,
+                                 soundsinth::model::QuirkFlags quirks);
 
 // Запуск голоса по уже разобранному началу ноты: отсчёт, годность петли и
 // интерполяция посчитаны вызывающим (voice_trigger_start, voice_hermite).
 // Шаг не считается - его ставит высота того же тика.
-void voice_trigger_prepared(Voice& voice, memory::PsramStore& psram, const soundsinth::model::SampleDescriptor& sample,
-                            uint16_t first_page, uint16_t checkpoint_first_page, const TriggerStart& start,
-                            bool hermite);
+void voice_trigger_prepared(Voice& voice, memory::PsramStore& psram, const soundsinth::model::SampleDescriptor& sample, uint16_t first_page,
+                            uint16_t checkpoint_first_page, const TriggerStart& start, bool hermite);
 
-void voice_trigger(Voice& voice, memory::PsramStore& psram, const soundsinth::model::SampleDescriptor& sample,
-                   uint16_t first_page, uint8_t note, soundsinth::model::FrequencyModel frequency_model,
-                   uint32_t start_offset = 0, soundsinth::model::QuirkFlags quirks = 0,
+void voice_trigger(Voice& voice, memory::PsramStore& psram, const soundsinth::model::SampleDescriptor& sample, uint16_t first_page, uint8_t note,
+                   soundsinth::model::FrequencyModel frequency_model, uint32_t start_offset = 0, soundsinth::model::QuirkFlags quirks = 0,
                    uint16_t checkpoint_first_page = memory::kPageChainEnd, bool set_step = true);
 
 // Пересчёт step по кэшу питча. Не встраиваются, лежат во флеше: зовутся,

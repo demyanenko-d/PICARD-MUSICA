@@ -87,7 +87,7 @@ void ui_init(void)
 
     fw_scr_cls(UI_ATTR_PLAIN);
 
-    ui_field(0, UI_ROW_TITLE, 16, "ugly player", UI_ATTR_TITLE);
+    ui_field(0, UI_ROW_TITLE, 16, "ugly player 0.3", UI_ATTR_TITLE);
     ui_field(16, UI_ROW_TITLE, 16, "no board", UI_ATTR_ALARM);
     ui_field(0, UI_ROW_FILE, 32, "file:", UI_ATTR_PLAIN);
     ui_field(0, UI_ROW_STATE, 16, "State:", UI_ATTR_PLAIN);
@@ -119,10 +119,16 @@ void ui_draw_path(const char *path)
     ui_field(0, UI_ROW_PATH, 32, path, UI_ATTR_TITLE);
 }
 
-void ui_draw_entry(u8 i, const char *name, u8 is_dir, u8 selected)
+void ui_draw_entry(u8 i, const char *name, u8 is_dir, u8 selected, u8 playing)
 {
-    u8 attr = selected ? UI_ATTR_CURSOR : UI_ATTR_LIST;
+    u8 attr;
     u8 n = 0;
+
+    if (selected) {
+        attr = playing ? UI_ATTR_CURSOR_PLAY : UI_ATTR_CURSOR;
+    } else {
+        attr = playing ? UI_ATTR_LIST_PLAY : UI_ATTR_LIST;
+    }
 
     fw_scr_attr = attr;
     fw_scr_at(0, (u8)(UI_ROW_LIST + i));

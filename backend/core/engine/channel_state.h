@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 #pragma once
 
 // Состояние канала диспетчера эффектов: пишут channels_init,
@@ -17,10 +18,10 @@ struct ChannelState {
     // на Note-Trigger посчитан period. Нужна Amiga-арпеджио: apply_continuous_effects
     // каждый тик пересчитывает период для note+смещение через amiga_note_to_period,
     // а Song не видит.
-    uint8_t effective_note = 0;
+    uint8_t effective_note   = 0;
     uint16_t last_instrument = 0; // 1-based индекс в Song::instruments, 0 = нет
 
-    uint8_t volume = 0; // текущая громкость канала 0..64, значима только пока voice_active
+    uint8_t volume = 0;              // текущая громкость канала 0..64, значима только пока voice_active
     uint8_t volume_slide_memory = 0; // память VolumeSlide и комбинаций: 00 повторяет последний ненулевой параметр
     bool volume_slide_active = false; // слайд активен на этой строке, сбрасывается на каждой новой строке
 
@@ -28,9 +29,9 @@ struct ChannelState {
     // громкости канала поверх cs.volume, применяется в render_add. Начальное
     // значение ставит channels_init из Song::channel_volume. Note-Trigger его
     // не трогает, держится до явной установки.
-    uint8_t channel_volume = kVolumeMax;
+    uint8_t channel_volume              = kVolumeMax;
     uint8_t channel_volume_slide_memory = 0;
-    bool channel_volume_slide_active = false;
+    bool channel_volume_slide_active    = false;
 
     // Instrument::global_volume (IT, 0..128): статический множитель
     // инструмента поверх cs.volume и огибающей, кэш на Note-Trigger. 128
@@ -62,21 +63,20 @@ struct ChannelState {
     // ненулевой; uint16_t, потому что Linear хранит param*4. Раздельная память
     // FT2 (kQuirkXmFt2SeparatePortaMemory) не реализована.
     uint16_t porta_memory = 0;
-    int32_t linear_pitch = 0; // аналог period в модели Linear: 1/64 полутона от опорной ноты
+    int32_t linear_pitch  = 0; // аналог period в модели Linear: 1/64 полутона от опорной ноты
     // S3M/IT: сырой байт последнего PortaUp/PortaDown. Тонкий (xF?) и
     // сверхтонкий (xE?) вариант спрятан в параметре, и решается это уже после
     // памяти: E00 после EF3 - снова тонкий слайд.
     uint8_t porta_raw_memory = 0;
     bool porta_active = false; // портаменто активно на этой строке, сбрасывается на каждой новой строке
-    int16_t porta_delta =
-        0; // дельта period/linear_pitch за тик. Amiga: минус - PortaUp, плюс - PortaDown; Linear - наоборот
+    int16_t porta_delta = 0; // дельта period/linear_pitch за тик. Amiga: минус - PortaUp, плюс - PortaDown; Linear - наоборот
     // Цель TonePorta (Amiga); построчно не сбрасывается, держится до новой ноты
     // на строке с TonePorta.
     uint16_t tone_porta_target = 0;
     bool tone_porta_active = false; // TonePorta активно на этой строке, сбрасывается на каждой новой строке
     // GlissandoControl (MOD E3x, S3M/IT S1x): режим, построчно не
     // сбрасывается. С ним TonePorta звучит ступенями по полутонам.
-    bool glissando_enabled = false;
+    bool glissando_enabled           = false;
     int32_t linear_tone_porta_target = 0; // цель TonePorta (Linear), держится так же
     // На этой ноте было тон-портаменто: с ним и glissando_enabled движок
     // прижимает звучащую высоту к полутонам,
@@ -87,7 +87,7 @@ struct ChannelState {
     // сэмпла (128 единиц на полутон). Сбрасывается на каждом реальном
     // Note-Trigger, S2x той же строки действует после сброса. На Note-Trigger
     // - непрерывная поправка к period/linear_pitch, не таблица Paula.
-    int8_t finetune_override = 0;
+    int8_t finetune_override      = 0;
     bool finetune_override_active = false;
 
     // Vibrato и Arpeggio: временное отклонение pitch_offset, period и
@@ -104,8 +104,7 @@ struct ChannelState {
     // Note-Trigger.
     uint8_t vibrato_waveform = 0;
     bool vibrato_active = false; // Vibrato/FineVibrato активно на этой строке, сбрасывается на каждой новой строке
-    int32_t pitch_offset =
-        0; // смещение period (Amiga) или linear_pitch (Linear) от Vibrato/Arpeggio; TrackerEngine прибавляет при расчёте Voice::step
+    int32_t pitch_offset = 0; // смещение period (Amiga) или linear_pitch (Linear) от Vibrato/Arpeggio; TrackerEngine прибавляет при расчёте Voice::step
 
     // Питч-бенд MIDI (SetPitchOffset): смещение linear_pitch, отдельное от
     // pitch_offset. pitch_offset обнуляется на строке без вибрато и арпеджио,
@@ -118,11 +117,11 @@ struct ChannelState {
     // тика прижима сумма в int16 влезает.
     int16_t bend_offset = 0;
     int16_t bend_target = 0;
-    int16_t bend_step = 0;
+    int16_t bend_step   = 0;
     // XM: память E1x/E2x и X1x/X2x, своя у каждой пары, старший нибл - вверх,
     // младший - вниз; с 1xx/2xx/3xx не общая. Здесь - на месте, освобождённом
     // bend_step.
-    uint8_t xm_fine_porta_memory = 0;
+    uint8_t xm_fine_porta_memory       = 0;
     uint8_t xm_extra_fine_porta_memory = 0;
 
     // Arpeggio: нота по кругу из трёх тиков: база, +arpeggio_x, +arpeggio_y
@@ -132,25 +131,25 @@ struct ChannelState {
     // Amiga: периоды нот +x и +y с finetune канала, считаются на строке.
     uint16_t arpeggio_period_x = 0;
     uint16_t arpeggio_period_y = 0;
-    bool arpeggio_active = false; // сбрасывается на каждой новой строке
+    bool arpeggio_active       = false; // сбрасывается на каждой новой строке
 
     // Tremolo и Tremor: временное отклонение громкости, как Vibrato у питча.
     // От frequency_model не зависят.
-    uint8_t tremolo_speed = 0;
-    uint8_t tremolo_depth = 0; // без множителя 4, в отличие от vibrato_depth
-    uint8_t tremolo_phase = 0;
-    uint8_t tremolo_waveform = 0; // значения как у vibrato_waveform, память отдельная
-    bool tremolo_active = false; // сбрасывается на каждой новой строке
+    uint8_t tremolo_speed    = 0;
+    uint8_t tremolo_depth    = 0; // без множителя 4, в отличие от vibrato_depth
+    uint8_t tremolo_phase    = 0;
+    uint8_t tremolo_waveform = 0;     // значения как у vibrato_waveform, память отдельная
+    bool tremolo_active      = false; // сбрасывается на каждой новой строке
     // Tremor: память - целый байт (не по нибблам, в отличие от Vibrato и
     // Tremolo); чередование звучит/молчит по счётчику тиков.
-    uint8_t tremor_memory = 0;
-    uint8_t tremor_on_ticks = 1;
+    uint8_t tremor_memory    = 0;
+    uint8_t tremor_on_ticks  = 1;
     uint8_t tremor_off_ticks = 1;
-    uint8_t tremor_counter = 0; // 0 в начале: первый тик переключает в фазу "звучит"
-    bool tremor_on_phase = false;
-    bool tremor_active = false; // сбрасывается на каждой новой строке; счётчик и фаза текут дальше
-    int16_t volume_offset = 0; // отклонение громкости от Tremolo; TrackerEngine прибавляет к volume при рендере
-    bool tremor_muted = false; // Tremor глушит канал на этом тике
+    uint8_t tremor_counter   = 0; // 0 в начале: первый тик переключает в фазу "звучит"
+    bool tremor_on_phase     = false;
+    bool tremor_active       = false; // сбрасывается на каждой новой строке; счётчик и фаза текут дальше
+    int16_t volume_offset    = 0; // отклонение громкости от Tremolo; TrackerEngine прибавляет к volume при рендере
+    bool tremor_muted        = false; // Tremor глушит канал на этом тике
 
     // Панорама 0..64, 32 - центр (шкала SampleDescriptor::default_panning).
     // Стартовое значение ставит channels_init: Song::channel_pan или
@@ -159,18 +158,18 @@ struct ChannelState {
     // S91 (Set Surround): правый канал с обратным знаком, в моно канал гасит
     // сам себя. Снимается любой установкой панорамы (S90, S8x, Xxx, панорама
     // сэмпла или инструмента).
-    bool surround = false;
-    uint8_t pan_slide_memory = 0; // память PanningSlide, 00 повторяет последний ненулевой
-    bool pan_slide_active = false; // слайд активен на этой строке, сбрасывается на каждой новой строке
-    uint8_t pan_slide_step = 0;    // слайд строки: старший нибл - вправо, младший - влево
+    bool surround            = false;
+    uint8_t pan_slide_memory = 0;   // память PanningSlide, 00 повторяет последний ненулевой
+    bool pan_slide_active  = false; // слайд активен на этой строке, сбрасывается на каждой новой строке
+    uint8_t pan_slide_step = 0;     // слайд строки: старший нибл - вправо, младший - влево
 
     // Panbrello (S3M/IT Yxy): depth = нибл << 4 (у Vibrato << 2), делитель
     // 2048 - под шкалу панорамы 0..64.
-    uint8_t panbrello_speed = 0;
-    uint8_t panbrello_depth = 0;
-    uint8_t panbrello_phase = 0;
-    uint8_t panbrello_waveform = 0; // значения как у vibrato_waveform, память отдельная
-    bool panbrello_active = false; // сбрасывается на каждой новой строке
+    uint8_t panbrello_speed    = 0;
+    uint8_t panbrello_depth    = 0;
+    uint8_t panbrello_phase    = 0;
+    uint8_t panbrello_waveform = 0;     // значения как у vibrato_waveform, память отдельная
+    bool panbrello_active      = false; // сбрасывается на каждой новой строке
     uint8_t retrig_memory = 0; // IT/S3M: последний ненулевой Qxy, его повторяет Q00; здесь - в дырке выравнивания
     int16_t pan_offset = 0; // смещение панорамы от Panbrello; TrackerEngine прибавляет к pan при рендере
 
@@ -183,7 +182,7 @@ struct ChannelState {
     // в единицах параметра, по 256 отсчётов. trigger_sample_offset - уже в
     // отсчётах, сбрасывается каждую строку, читается TrackerEngine при
     // triggered_this_row.
-    uint8_t sample_offset_memory = 0;
+    uint8_t sample_offset_memory   = 0;
     uint32_t trigger_sample_offset = 0;
     // HighOffset (S3M/IT SAx): старший нибл смещения,
     // trigger_sample_offset = (high << 16) | (param << 8). Построчно не
@@ -196,11 +195,11 @@ struct ChannelState {
     // проверяет и гасит каждый тик; true - заново вызвать voice_trigger
     // (offset 0, та же нота).
     // retrig_type == kNoteCutRetrigType - NoteCut (ECx/SCx) на том же счётчике.
-    uint8_t retrig_type = 0;
+    uint8_t retrig_type     = 0;
     uint8_t retrig_interval = 1;
-    uint8_t retrig_counter = 0;
-    bool retrig_active = false; // сбрасывается на каждой новой строке
-    bool retrig_pending = false; // взводит apply_continuous_effects, гасит TrackerEngine
+    uint8_t retrig_counter  = 0;
+    bool retrig_active      = false; // сбрасывается на каждой новой строке
+    bool retrig_pending     = false; // взводит apply_continuous_effects, гасит TrackerEngine
 
     // Отпускание и затухание ноты (release_note, fade_note). key_released -
     // огибающие идут за точку удержания. note_fading - fadeout_level (Q16.16,
@@ -208,9 +207,9 @@ struct ChannelState {
     // Instrument::fadeout_rate) за тик, на нуле взводится stop_voice_pending.
     // stop_voice_pending TrackerEngine гасит голос сразу после
     // dispatch_row_effects/apply_continuous_effects.
-    bool stop_voice_pending = false;
-    bool key_released = false;
-    uint32_t fadeout_level = kQ16One;
+    bool stop_voice_pending          = false;
+    bool key_released                = false;
+    uint32_t fadeout_level           = kQ16One;
     uint32_t instrument_fadeout_rate = 0;
 
     // Огибающая громкости: указатель из Song::instruments, ставится на
@@ -220,8 +219,8 @@ struct ChannelState {
     // множитель (не слагаемое, как volume_offset), TrackerEngine умножает на
     // него cs.volume.
     const soundsinth::model::Envelope* volume_envelope = nullptr;
-    uint16_t envelope_tick = 0;
-    uint8_t envelope_volume = kEnvelopeNeutral;
+    uint16_t envelope_tick                             = 0;
+    uint8_t envelope_volume                            = kEnvelopeNeutral;
     // Дробная часть тика огибающих (Song::envelopes_in_real_time), Q0.8: сколько
     // тиков огибающих набежало сверх целых. Байт ложится в дырку выравнивания
     // перед указателем - ChannelState не растёт.
@@ -231,16 +230,16 @@ struct ChannelState {
     // сырое значение точки (0..64, 32 - нейтраль); TrackerEngine применяет его
     // в render_add как смещение cs.pan с глубиной, убывающей к краям панорамы.
     const soundsinth::model::Envelope* panning_envelope = nullptr;
-    uint16_t pan_envelope_tick = 0;
-    uint8_t pan_envelope_value = kEnvelopeCenter;
+    uint16_t pan_envelope_tick                          = 0;
+    uint8_t pan_envelope_value                          = kEnvelopeCenter;
     bool note_fading = false; // затухание включено (release_note, fade_note); здесь - в дырке выравнивания
 
     // Огибающая питча (только IT). Хранение 0..64, 32 - нейтраль, смещение
     // linear_pitch = clamp((raw - 32) * 8, -255, 255) * 4, до +-16 полутонов.
     // Только модель Linear: в Amiga IT тоже гнёт питч линейно, это не сделано.
     const soundsinth::model::Envelope* pitch_envelope = nullptr;
-    uint16_t pitch_envelope_tick = 0;
-    int16_t pitch_envelope_offset = 0;
+    uint16_t pitch_envelope_tick                      = 0;
+    int16_t pitch_envelope_offset                     = 0;
 
     // --- Резонансный фильтр (только IT) ---
     //
@@ -258,10 +257,10 @@ struct ChannelState {
     // "нет огибающей" и "огибающая на максимуме" дают одно и то же - срез
     // канала без изменения.
     const soundsinth::model::Envelope* filter_envelope = nullptr;
-    uint16_t filter_envelope_tick = 0;
-    uint8_t filter_cutoff = kFilterCutoffOpen;
-    uint8_t filter_resonance = 0;
-    int16_t filter_env_modifier = kFilterEnvNeutral;
+    uint16_t filter_envelope_tick                      = 0;
+    uint8_t filter_cutoff                              = kFilterCutoffOpen;
+    uint8_t filter_resonance                           = 0;
+    int16_t filter_env_modifier                        = kFilterEnvNeutral;
 
     // NoteDelay (MOD/XM EDx, S3M/IT SDx): вся ячейка (нота, инструмент,
     // громкость, эффект) откладывается до заданного тика строки, на тике 0
@@ -273,14 +272,14 @@ struct ChannelState {
 // 96 слотов (SOUNDSINTH_MAX_SLOTS) в SRAM: рост ловит компилятор, а не
 // замер. Поля внутри групп стоят так, чтобы дырок выравнивания было меньше
 // (сейчас 2 байта). Только при 4-байтовом указателе - на ПК x64 размер свой.
-static_assert(sizeof(void*) != 4 || sizeof(ChannelState) == 156, "ChannelState вырос: 96 слотов в SRAM");
+static_assert(sizeof(void*) != 4 || sizeof(ChannelState) == 156, "ChannelState has grown: 96 slots in SRAM");
 
 // Отпускание ноты: Note-Off, NNA Off, DCA Off. У IT (it_rules) снимает
 // удержание огибающих, а затухание включает сразу только без огибающей
 // громкости или при её петле - иначе его включит конец огибающей. У
 // остальных форматов отпускание и затухание вместе.
 inline void release_note(ChannelState& cs, bool it_rules) {
-    cs.key_released = true;
+    cs.key_released                        = true;
     const soundsinth::model::Envelope* env = cs.volume_envelope;
     if (!it_rules || env == nullptr || !env->enabled || env->loop_enabled) cs.note_fading = true;
 }
@@ -295,7 +294,7 @@ inline void fade_note(ChannelState& cs, bool it_rules) {
 // Мгновенная остановка: Voice гасит TrackerEngine на этом тике
 // (stop_voice_pending), cs.voice_active Voice не трогает.
 inline void stop_voice(ChannelState& cs) {
-    cs.voice_active = false;
+    cs.voice_active       = false;
     cs.stop_voice_pending = true;
 }
 

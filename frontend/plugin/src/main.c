@@ -73,7 +73,7 @@ static void add_num(const char *label, u16 value)
 // Строки, которые за сессию не меняются.
 static void draw_static(void)
 {
-    draw_line(ROW_TITLE, "ugly media player", 0, WC_COLOR(WC_BLACK, WC_BRIGHT_WHITE));
+    draw_line(ROW_TITLE, "ugly media player 0.3", 0, WC_COLOR(WC_BLACK, WC_BRIGHT_WHITE));
     draw_line(ROW_BOARD, "Board: ", bus_board_found ? bus_board_name : (char*)"not found",
               WC_COLOR(WC_BLACK, bus_board_found ? WC_BRIGHT_GREEN : WC_BRIGHT_RED));
     draw_line(ROW_FILE, "File: ", wc_file_name, WC_COLOR(WC_BLACK, WC_WHITE));

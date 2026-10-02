@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 #include "testing.h"
 
 #include <cstdio>
@@ -87,17 +88,17 @@ void test_raw16_and_exact_size_boundaries() {
     std::printf("test_resident_encoding_policy_raw16_and_exact_size_boundaries\n");
     for (uint32_t free_pages : {23u, 22u}) {
         SampleDescriptor samples[3];
-        samples[0].encoding = SampleEncoding::Pcm16;
+        samples[0].encoding       = SampleEncoding::Pcm16;
         samples[0].length_samples = samples[0].source_length_samples = 10240;
-        samples[1].encoding = SampleEncoding::Pcm8;
+        samples[1].encoding                                          = SampleEncoding::Pcm8;
         samples[1].length_samples = samples[1].source_length_samples = 3072;
-        samples[2].encoding = SampleEncoding::Pcm16;
+        samples[2].encoding                                          = SampleEncoding::Pcm16;
         samples[2].length_samples = samples[2].source_length_samples = 100000;
-        samples[2].unsupported_codec = true;
+        samples[2].unsupported_codec                                 = true;
         Song song;
-        song.samples = samples;
+        song.samples      = samples;
         song.sample_count = 3;
-        const bool raw16 = choose_resident_encoding(song, free_pages);
+        const bool raw16  = choose_resident_encoding(song, free_pages);
         CHECK_EQ(raw16, free_pages == 23u);
         CHECK(samples[0].resident_encoding == (raw16 ? ResidentEncoding::Raw16 : ResidentEncoding::Dpcm8));
         CHECK(samples[1].resident_encoding == ResidentEncoding::Raw8);
@@ -119,22 +120,22 @@ void test_resolve_sample_index() {
     std::printf("test_resolve_sample_index\n");
     SampleDescriptor samples[2];
     samples[0].length_samples = samples[1].length_samples = 100;
-    const KeymapRange map_a[4] = {{0, 0, 0}, {40, 1, 12}, {80, kNoSample, 0}, {100, 5, 0}};
-    const KeymapRange map_b[2] = {{0, 0, 0}, {0, 1, 12}}; // одинаковый start_note
+    const KeymapRange map_a[4]                            = {{0, 0, 0}, {40, 1, 12}, {80, kNoSample, 0}, {100, 5, 0}};
+    const KeymapRange map_b[2]                            = {{0, 0, 0}, {0, 1, 12}}; // одинаковый start_note
     Instrument ins[3];
-    ins[0].note_to_sample_ranges = map_a;
+    ins[0].note_to_sample_ranges      = map_a;
     ins[0].note_to_sample_range_count = 4;
-    ins[1].note_to_sample_ranges = map_b;
+    ins[1].note_to_sample_ranges      = map_b;
     ins[1].note_to_sample_range_count = 2;
-    ins[2].default_sample_index = 1; // без диапазонов
+    ins[2].default_sample_index       = 1; // без диапазонов
     Song song;
-    song.samples = samples;
-    song.sample_count = 2;
-    song.instruments = ins;
+    song.samples          = samples;
+    song.sample_count     = 2;
+    song.instruments      = ins;
     song.instrument_count = 3;
-    uint16_t idx = 0xFFFF;
-    uint8_t note = 0;
-    bool unmapped = false;
+    uint16_t idx          = 0xFFFF;
+    uint8_t note          = 0;
+    bool unmapped         = false;
     CHECK(resolve_sample_index(song, 1, 39, &idx, &note, &unmapped));
     CHECK_EQ(idx, static_cast<uint16_t>(0));
     CHECK_EQ(note, static_cast<uint8_t>(39));

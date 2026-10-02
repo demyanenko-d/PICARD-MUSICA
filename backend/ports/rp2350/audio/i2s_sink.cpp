@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 #include "i2s_sink.h"
 
 #include "hardware/clocks.h"
@@ -25,20 +26,20 @@ using player::audio::BufferPool;
 constexpr uint32_t kBlockWords = BufferPool::kFramesPerBuffer;
 
 struct I2sSinkState {
-    BufferPool* pool = nullptr;
+    BufferPool* pool        = nullptr;
     uint32_t sample_rate_hz = 0;
 
-    PIO pio = nullptr;
-    uint sm = 0;
-    uint pio_offset = 0;
+    PIO pio                 = nullptr;
+    uint sm                 = 0;
+    uint pio_offset         = 0;
     volatile void* dma_dest = nullptr;
-    uint dma_dreq = 0;
+    uint dma_dreq           = 0;
 
     // Каналы берёт dma_init, до неё ISR не работает.
     int dma_ping = 0;
     int dma_pong = 0;
 
-    // Буферы в каналах DMA; nullptr - канал играет s_silence.
+    // Буферы в каналах DMA; nullptr - канал играет тишину.
     const int16_t* volatile ping_data = nullptr;
     const int16_t* volatile pong_data = nullptr;
 
@@ -67,9 +68,17 @@ struct I2sSinkState {
 // нулевые - объект в .bss.
 I2sSinkState s_state;
 
-// Тишина для DMA. Статическая, в SRAM, не const: const легла бы во флеш, а
-// DMA с флеша - лишняя нагрузка на QMI, общий с PSRAM.
-uint32_t s_silence[kBlockWords] = {};
+// Тишина для DMA - одно слово, которое канал читает без приращения адреса.
+// В SRAM и не const: const легла бы во флеш, а DMA с флеша - лишняя
+// нагрузка на QMI, общий с PSRAM. Буфер из тысячи нулей для этого не нужен:
+// переносов столько же, адрес один.
+uint32_t s_silence_word = 0;
+
+// Настройка канала в двух вариантах на сторону: с приращением адреса для
+// музыки и без - для тишины. Заполняются в dma_init, различаются одним
+// битом; chain_to у сторон разный, потому по паре на каждую.
+dma_channel_config_t s_cfg_data[2];
+dma_channel_config_t s_cfg_silence[2];
 
 #ifndef SOUNDSINTH_RP2350_I2S_PHASE_TEST
 #define SOUNDSINTH_RP2350_I2S_PHASE_TEST 0
@@ -85,13 +94,13 @@ uint32_t s_silence[kBlockWords] = {};
 // инверсия дают одно и то же полпериода.
 constexpr int16_t kPhaseTestAmp = 0x6000;
 uint32_t s_phase_test[kBlockWords];
-static_assert(kBlockWords % 4 == 0, "узор продолжается через границу блока");
+static_assert(kBlockWords % 4 == 0, "the pattern continues across the block boundary");
 
 void fill_phase_test() {
     for (uint32_t i = 0; i < kBlockWords; ++i) {
-        const int16_t v = (i & 2u) ? static_cast<int16_t>(-kPhaseTestAmp) : kPhaseTestAmp;
+        const int16_t v     = (i & 2u) ? static_cast<int16_t>(-kPhaseTestAmp) : kPhaseTestAmp;
         const uint32_t half = static_cast<uint16_t>(v);
-        s_phase_test[i] = half | (half << 16); // оба канала одинаковые
+        s_phase_test[i]     = half | (half << 16); // оба канала одинаковые
     }
 }
 #endif
@@ -104,7 +113,7 @@ void fill_phase_test() {
 //
 // inline не для связи: без него GCC зовёт функцию из dma_irq_handler
 // вызовом, а не встраивает (образ на 56 байт меньше, код ISR другой).
-inline void __not_in_flash_func(refill_channel)(I2sSinkState& s, uint chan, const int16_t* volatile& held) {
+inline void __not_in_flash_func(refill_channel)(I2sSinkState& s, uint chan, const int16_t* volatile& held, uint32_t side) {
     const void* addr;
     if (!s.silent && held) {
         const uint32_t k = s.pool->rendered_count_from_isr();
@@ -126,7 +135,7 @@ inline void __not_in_flash_func(refill_channel)(I2sSinkState& s, uint chan, cons
             s.pool->end_read_from_isr(held);
             held = nullptr;
         }
-        addr = s_silence;
+        addr = &s_silence_word;
     } else if (const int16_t* next = s.pool->try_begin_read_from_isr()) {
         if (held) s.pool->end_read_from_isr(held);
         held = next;
@@ -134,18 +143,23 @@ inline void __not_in_flash_func(refill_channel)(I2sSinkState& s, uint chan, cons
     } else if (!held) {
         // Трек ещё не начался (тишина снимается до первого готового буфера):
         // тишина, это не заминка.
-        addr = s_silence;
+        addr = &s_silence_word;
     } else {
         // Настоящая заминка: рендер не успел. Канал снова играет свой прежний
         // буфер, сыгранный до играющего сейчас (порядок A B A C), - для
         // одиночной заминки мягче щелчка в ноль.
         ++s.underrun;
         if (shared::g_background_loading.load(std::memory_order_relaxed)) ++s.underrun_bg;
-        addr = held ? static_cast<const void*>(held) : static_cast<const void*>(s_silence);
+        addr = held ? static_cast<const void*>(held) : static_cast<const void*>(&s_silence_word);
     }
 #if SOUNDSINTH_RP2350_I2S_PHASE_TEST
     addr = s_phase_test; // ключ замера: круговорот буферов выше сохранён
 #endif
+    // Вариант настройки по тому, что играем: у тишины адрес один и тот же,
+    // приращение выключено. Канал в этот момент завершён (проверено
+    // dma_channel_is_busy у вызывающего), запись в CTRL безопасна.
+    const bool silence = addr == static_cast<const void*>(&s_silence_word);
+    dma_channel_set_config(chan, silence ? &s_cfg_silence[side] : &s_cfg_data[side], false);
     dma_channel_set_read_addr(chan, addr, false);
     dma_channel_set_trans_count(chan, kBlockWords * 2u, false); // по полуслову на канал
 }
@@ -160,7 +174,7 @@ void __not_in_flash_func(dma_irq_handler)() {
     if (ping_done) {
         dma_irqn_acknowledge_channel(bus::DMA_IRQ_INDEX_AUDIO, s.dma_ping);
         if (!dma_channel_is_busy(s.dma_ping)) {
-            refill_channel(s, s.dma_ping, s.ping_data);
+            refill_channel(s, s.dma_ping, s.ping_data, 0);
         } else {
             ++s.late;
         }
@@ -168,7 +182,7 @@ void __not_in_flash_func(dma_irq_handler)() {
     if (pong_done) {
         dma_irqn_acknowledge_channel(bus::DMA_IRQ_INDEX_AUDIO, s.dma_pong);
         if (!dma_channel_is_busy(s.dma_pong)) {
-            refill_channel(s, s.dma_pong, s.pong_data);
+            refill_channel(s, s.dma_pong, s.pong_data, 1);
         } else {
             ++s.late;
         }
@@ -182,7 +196,7 @@ void hw_init_i2s(I2sSinkState& s) {
     s.pio = bus::PIO_AUDIO;
 
     s.pio_offset = pio_add_program(s.pio, &i2s_out_program);
-    s.sm = pio_claim_unused_sm(s.pio, true);
+    s.sm         = pio_claim_unused_sm(s.pio, true);
 
     pio_sm_config cfg = i2s_out_program_get_default_config(s.pio_offset);
     sm_config_set_out_pins(&cfg, kI2sData, 1);
@@ -199,7 +213,9 @@ void hw_init_i2s(I2sSinkState& s) {
     sm_config_set_clkdiv(&cfg, sys_clk / freq_sm);
 
     static constexpr uint kI2sPins[3] = {kI2sData, kI2sBck, kI2sWs};
-    for (uint pin : kI2sPins) pio_gpio_init(s.pio, pin);
+    for (uint pin : kI2sPins) {
+        pio_gpio_init(s.pio, pin);
+    }
 
     // Ток и фронт заданы явно, а не по умолчанию (4 мА, медленный фронт).
     //
@@ -250,7 +266,7 @@ void dma_init(I2sSinkState& s) {
     s.dma_pong = dma_claim_unused_channel(true);
 
     for (uint i = 0; i < 2; ++i) {
-        const uint ch = (i == 0) ? s.dma_ping : s.dma_pong;
+        const uint ch   = (i == 0) ? s.dma_ping : s.dma_pong;
         const uint next = (i == 0) ? s.dma_pong : s.dma_ping;
 
         dma_channel_config_t dc = dma_channel_get_default_config(ch);
@@ -270,7 +286,15 @@ void dma_init(I2sSinkState& s) {
         channel_config_set_dreq(&dc, s.dma_dreq);
         channel_config_set_chain_to(&dc, next); // аппаратный автозапуск, без паузы
 
-        dma_channel_configure(ch, &dc, s.dma_dest, s_silence, kBlockWords * 2u, false);
+        // Оба варианта запоминаются здесь: в обработчике остаётся выбор из
+        // двух готовых, без сборки настройки по полям.
+        s_cfg_data[i]    = dc;
+        s_cfg_silence[i] = dc;
+        channel_config_set_read_increment(&s_cfg_silence[i], false);
+
+        // Заряжены тишиной - значит и настройкой без приращения.
+        dc = s_cfg_silence[i];
+        dma_channel_configure(ch, &dc, s.dma_dest, &s_silence_word, kBlockWords * 2u, false);
         dma_irqn_acknowledge_channel(bus::DMA_IRQ_INDEX_AUDIO, ch);
         dma_irqn_set_channel_enabled(bus::DMA_IRQ_INDEX_AUDIO, ch, true);
     }
@@ -279,24 +303,33 @@ void dma_init(I2sSinkState& s) {
     // Наивысший приоритет, совместимый с *FromISR: SysTick/PendSV FreeRTOS
     // (0xF0) этот IRQ не вытесняют. Значение из общей карты ресурсов, рядом с
     // шинными: звук самый низкий.
-    static_assert(bus::IRQ_PRIO_RELAXED == configMAX_SYSCALL_INTERRUPT_PRIORITY,
-                  "IRQ_PRIO_RELAXED обязан совпадать с порогом BASEPRI планировщика");
+    static_assert(bus::IRQ_PRIO_RELAXED == configMAX_SYSCALL_INTERRUPT_PRIORITY, "IRQ_PRIO_RELAXED must match the scheduler BASEPRI threshold");
     irq_set_priority(DMA_IRQ_NUM(bus::DMA_IRQ_INDEX_AUDIO), bus::IRQ_PRIO_RELAXED);
 }
 
 } // namespace
 
-uint32_t i2s_sink_underrun_count() { return s_state.underrun; }
-uint32_t i2s_sink_underrun_bg_count() { return s_state.underrun_bg; }
-uint32_t i2s_sink_late_count() { return s_state.late; }
+uint32_t i2s_sink_underrun_count() {
+    return s_state.underrun;
+}
+uint32_t i2s_sink_underrun_bg_count() {
+    return s_state.underrun_bg;
+}
+uint32_t i2s_sink_late_count() {
+    return s_state.late;
+}
 
 ReadyStats i2s_sink_ready_stats() {
     ReadyStats r{};
-    for (uint32_t k = 0; k < kReadyBins; ++k) r.ready[k] = s_state.ready[k];
+    for (uint32_t k = 0; k < kReadyBins; ++k) {
+        r.ready[k] = s_state.ready[k];
+    }
     return r;
 }
 
-void i2s_sink_set_silent(bool silent) { s_state.silent = silent; }
+void i2s_sink_set_silent(bool silent) {
+    s_state.silent = silent;
+}
 
 void i2s_sink_set_block_base() {
     // RP2350B: GPIO 44-46 > 31, нужна база GPIO 16.
@@ -307,8 +340,8 @@ void i2s_sink_start(BufferPool& pool, uint32_t sample_rate_hz) {
 #if SOUNDSINTH_RP2350_I2S_PHASE_TEST
     fill_phase_test();
 #endif
-    I2sSinkState& s = s_state;
-    s.pool = &pool;
+    I2sSinkState& s  = s_state;
+    s.pool           = &pool;
     s.sample_rate_hz = sample_rate_hz;
 
     hw_init_i2s(s);
@@ -317,10 +350,9 @@ void i2s_sink_start(BufferPool& pool, uint32_t sample_rate_hz) {
     irq_set_enabled(DMA_IRQ_NUM(bus::DMA_IRQ_INDEX_AUDIO), true);
     // Буферы подхватит DMA IRQ на первом завершении блока тишины.
     dma_channel_start(s.dma_ping);
-    // 2 мс после старта DMA: BCK тактирует тишиной из s_silence. Выдержка
-    // взята по наблюдению - тон, поданный сразу, хрипел; чем именно она
-    // лечится, не установлено: у TDA1387T нет ФАПЧ, которой нужно было бы
-    // время. За 2 мс DMA первый блок не заканчивает, IRQ не срабатывает.
+    // 2 мс после старта DMA: BCK тактирует тишиной. Без неё тон, поданный
+    // сразу после старта DMA, хрипит. За 2 мс DMA первый блок не
+    // заканчивает, IRQ не срабатывает.
     busy_wait_us_32(2000);
 }
 

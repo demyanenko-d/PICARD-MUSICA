@@ -1,4 +1,5 @@
-// Шина SPI под карту (devices/hal/spi.h): выводы платы и блок SPI1.
+// SPDX-License-Identifier: MIT
+// Шина SPI под карту: выводы платы и блок SPI1.
 
 #include "devices/hal/spi.h"
 
@@ -15,8 +16,8 @@ namespace {
 //   GPIO42 SPI1_SCLK - вывод 5, CLK
 //   GPIO43 SPI1_TX   - вывод 3, CMD (MOSI)
 constexpr uint kPinMiso = 40;
-constexpr uint kPinCs = 41;
-constexpr uint kPinSck = 42;
+constexpr uint kPinCs   = 41;
+constexpr uint kPinSck  = 42;
 constexpr uint kPinMosi = 43;
 
 spi_inst_t* const kSpi = spi1;
@@ -36,10 +37,14 @@ uint32_t devices::hal::spi_open(uint32_t hz) {
     return spi_get_baudrate(kSpi);
 }
 
-uint32_t devices::hal::spi_set_hz(uint32_t hz) { return spi_set_baudrate(kSpi, hz); }
+uint32_t devices::hal::spi_set_hz(uint32_t hz) {
+    return spi_set_baudrate(kSpi, hz);
+}
 
 SOUNDSINTH_HOT_PATH_ATTR("spi_select")
-void devices::hal::spi_select(bool on) { gpio_put(kPinCs, on ? 0 : 1); }
+void devices::hal::spi_select(bool on) {
+    gpio_put(kPinCs, on ? 0 : 1);
+}
 
 SOUNDSINTH_HOT_PATH_ATTR("spi_xfer")
 uint8_t devices::hal::spi_xfer(uint8_t out) {

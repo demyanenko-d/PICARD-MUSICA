@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 #pragma once
 
 // ByteSource поверх FatFs, образ диска через platform_pc::mount_disk_image.
@@ -17,7 +18,7 @@ public:
     FatFsByteSource();
     ~FatFsByteSource();
 
-    FatFsByteSource(const FatFsByteSource&) = delete;
+    FatFsByteSource(const FatFsByteSource&)            = delete;
     FatFsByteSource& operator=(const FatFsByteSource&) = delete;
 
     // Открывает файл на уже смонтированном томе (монтирование -

@@ -1,13 +1,18 @@
+// SPDX-License-Identifier: MIT
 // Разборщик дескрипторов HID из LUFA: проверка, что перенос в проект не
 // сломал его. Дескриптор здесь канонический - загрузочная мышь из
 // приложения B спецификации HID, - и разложиться он обязан ровно так, как
 // написано в нём самом.
 //
-// Отбор полей пока живёт тут же: LUFA спрашивает приложение, какие
-// предметы оставлять. Когда появится слой опознания устройств, отбор
-// переедет к нему, а этот тест станет им пользоваться.
+// Смотреть в таблицу предметов разборщика тест не может и не должен:
+// отбор (CALLBACK_HIDParser_FilterHIDReportItem в devices/hid) разбирает
+// поле на месте и всегда отвечает "не класть", так что таблица пуста
+// всегда. Проверяется то, что из дескриптора вышло - ReportMap, - и то,
+// что разборщик считает мимо таблицы: размер отчёта.
 
 #include "testing.h"
+
+#include "devices/hid/report_map.h"
 
 extern "C" {
 #include "HIDParser.h"
@@ -48,12 +53,6 @@ const uint8_t kBootMouse[] = {
 
 HID_ReportInfo_t g_info;
 
-// Сколько байт занимает поле в отчёте с этим номером.
-constexpr uint16_t kUsagePageDesktop = 0x01;
-constexpr uint16_t kUsagePageButton = 0x09;
-constexpr uint16_t kUsageX = 0x30;
-constexpr uint16_t kUsageY = 0x31;
-
 // Расширение знака по ширине поля: разборщик кладёт границы сырыми
 // разрядами, а поле бывает знаковым.
 int32_t sign_extend(uint32_t value, uint8_t bits) {
@@ -62,89 +61,63 @@ int32_t sign_extend(uint32_t value, uint8_t bits) {
     return static_cast<int32_t>((value ^ sign) - sign);
 }
 
-const HID_ReportItem_t* find(uint16_t page, uint16_t usage) {
-    for (uint8_t i = 0; i < g_info.TotalReportItems; ++i) {
-        const HID_ReportItem_t& it = g_info.ReportItems[i];
-        if (it.Attributes.Usage.Page == page && it.Attributes.Usage.Usage == usage) return &it;
-    }
-    return nullptr;
-}
-
 } // namespace
 
-// Отбор полей живёт в devices/hid/report_map.cpp - один на всю
-// программу. Значит тест проверяет и его: мимо фильтра проходят оси,
-// шляпка, кнопки и клавиши, постоянные поля LUFA отбрасывает сам.
-
 void run_hid_parser_tests() {
-    std::printf("hid_parser: разбор дескриптора загрузочной мыши\n");
+    using namespace devices::hid;
+    std::printf("hid_parser: parsing a boot mouse descriptor\n");
 
+    ReportMap map;
+    CHECK(report_map_build(kBootMouse, sizeof(kBootMouse), map));
+
+    // Три кнопки по биту, подряд с нулевого. Номеров отчётов у этой мыши
+    // нет.
+    CHECK_EQ(static_cast<int>(map.button_count), 3);
+    CHECK(!map.uses_report_ids);
+    for (uint8_t b = 0; b < 3 && b < map.button_count; ++b) {
+        CHECK_EQ(static_cast<int>(map.button[b].bit_offset), b);
+        CHECK_EQ(static_cast<int>(map.button[b].report_id), 0);
+    }
+
+    // Оси идут за тремя битами кнопок и пятью битами добивки. Добивку
+    // разборщик как поле выбрасывает, но место в отчёте она занимает, и
+    // смещения это обязаны показывать.
+    const Field& x = map.axis[static_cast<uint8_t>(Axis::X)];
+    const Field& y = map.axis[static_cast<uint8_t>(Axis::Y)];
+    CHECK(x.present());
+    CHECK(y.present());
+    CHECK_EQ(static_cast<int>(x.bit_offset), 8);
+    CHECK_EQ(static_cast<int>(y.bit_offset), 16);
+    CHECK_EQ(static_cast<int>(x.bit_size), 8);
+    CHECK_EQ(static_cast<int>(y.bit_size), 8);
+
+    // ВАЖНО: знак у границ разборщик не расширяет, кладёт разряды как
+    // пришли - в дескрипторе минимум записан одним байтом 0x81, то есть
+    // 129 как беззнаковое. Правило "минимум больше максимума - поле
+    // знаковое, расширить обе границы по ширине поля" живёт в
+    // report_map.cpp, и вот его итог. На нём держится нормировка осей у
+    // геймпада.
+    CHECK_EQ(static_cast<int>(x.logical_min), -127);
+    CHECK_EQ(static_cast<int>(x.logical_max), 127);
+    CHECK_EQ(static_cast<int>(sign_extend(0x81, 8)), -127);
+
+    // Прямой вызов разборщика: таблица предметов обязана остаться пустой -
+    // отбор всё разобрал на месте и ничего не принял, - а размер отчёта он
+    // считает мимо неё и потому верен: три бита кнопок, пять добивки, два
+    // байта осей.
     const uint8_t rc = USB_ProcessHIDReport(kBootMouse, sizeof(kBootMouse), &g_info);
-    CHECK_EQ(static_cast<int>(rc), static_cast<int>(HID_PARSE_Successful));
-
-    // Три кнопки по биту и две оси по байту. Добивка в пять бит выброшена
-    // как постоянное поле, но место в отчёте занимает.
-    CHECK_EQ(static_cast<int>(g_info.TotalReportItems), 5);
-
-    for (uint8_t b = 1; b <= 3; ++b) {
-        const HID_ReportItem_t* it = find(kUsagePageButton, b);
-        CHECK(it != nullptr);
-        if (it == nullptr) continue;
-        CHECK_EQ(static_cast<int>(it->Attributes.BitSize), 1);
-        CHECK_EQ(static_cast<int>(it->BitOffset), b - 1);
-        CHECK_EQ(static_cast<int>(it->Attributes.Logical.Maximum), 1);
-        CHECK_EQ(static_cast<int>(it->ItemType), static_cast<int>(HID_REPORT_ITEM_In));
-        CHECK_EQ(static_cast<int>(it->ReportID), 0); // номеров отчётов у этой мыши нет
-    }
-
-    const HID_ReportItem_t* x = find(kUsagePageDesktop, kUsageX);
-    const HID_ReportItem_t* y = find(kUsagePageDesktop, kUsageY);
-    CHECK(x != nullptr);
-    CHECK(y != nullptr);
-    if (x != nullptr && y != nullptr) {
-        // Оси идут за тремя битами кнопок и пятью битами добивки.
-        CHECK_EQ(static_cast<int>(x->BitOffset), 8);
-        CHECK_EQ(static_cast<int>(y->BitOffset), 16);
-        CHECK_EQ(static_cast<int>(x->Attributes.BitSize), 8);
-        CHECK_EQ(static_cast<int>(y->Attributes.BitSize), 8);
-        // ВАЖНО: знак у границ разборщик не расширяет, кладёт разряды как
-        // пришли - `Logical.Minimum = ReportItemData`. В дескрипторе
-        // минимум записан одним байтом 0x81, и здесь он и лежит как 129, а
-        // не как -127.
-        CHECK_EQ(static_cast<int>(x->Attributes.Logical.Minimum), 0x81);
-        CHECK_EQ(static_cast<int>(x->Attributes.Logical.Maximum), 127);
-
-        // Отсюда правило для слоя выше: если минимум больше максимума как
-        // беззнаковые, то поле знаковое, и обе границы надо расширить по
-        // ширине самого поля. На этом держится нормировка осей у геймпада.
-        CHECK(x->Attributes.Logical.Minimum > x->Attributes.Logical.Maximum);
-        const int32_t lo = sign_extend(x->Attributes.Logical.Minimum, x->Attributes.BitSize);
-        const int32_t hi = sign_extend(x->Attributes.Logical.Maximum, x->Attributes.BitSize);
-        CHECK_EQ(static_cast<int>(lo), -127);
-        CHECK_EQ(static_cast<int>(hi), 127);
-    }
-
-    // Размер отчёта целиком: три бита кнопок, пять добивки, два байта осей.
+    CHECK_EQ(static_cast<int>(rc), static_cast<int>(HID_PARSE_NoUnfilteredReportItems));
+    CHECK_EQ(static_cast<int>(g_info.TotalReportItems), 0);
     CHECK_EQ(static_cast<int>(USB_GetHIDReportSize(&g_info, 0, HID_REPORT_ITEM_In)), 3);
 
     // Извлечение значения из сырого отчёта: нажата вторая кнопка,
     // X = +5, Y = -3.
     const uint8_t report[3] = {0x02, 0x05, 0xFD};
-    const HID_ReportItem_t* b2 = find(kUsagePageButton, 2);
-    CHECK(b2 != nullptr);
-    if (b2 != nullptr) {
-        HID_ReportItem_t item = *b2;
-        CHECK(USB_GetHIDReportItemInfo(report, &item));
-        CHECK_EQ(static_cast<int>(item.Value), 1);
-    }
-    if (x != nullptr && y != nullptr) {
-        HID_ReportItem_t ix = *x;
-        HID_ReportItem_t iy = *y;
-        CHECK(USB_GetHIDReportItemInfo(report, &ix));
-        CHECK(USB_GetHIDReportItemInfo(report, &iy));
-        CHECK_EQ(static_cast<int>(ix.Value), 5);
-        // Значение приходит без знакового расширения: восемь бит как есть.
-        CHECK_EQ(static_cast<int>(iy.Value), 0xFD);
-        CHECK_EQ(static_cast<int>(HID_ALIGN_DATA((&iy), int8_t)), -3);
-    }
+    CHECK(report_button_read(map.button[1], report, sizeof(report)));
+    CHECK(!report_button_read(map.button[0], report, sizeof(report)));
+    int32_t vx = 0, vy = 0;
+    CHECK(report_field_read(x, report, sizeof(report), vx));
+    CHECK(report_field_read(y, report, sizeof(report), vy));
+    CHECK_EQ(static_cast<int>(vx), 5);
+    CHECK_EQ(static_cast<int>(vy), -3);
 }

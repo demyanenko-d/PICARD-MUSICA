@@ -1,6 +1,7 @@
+// SPDX-License-Identifier: MIT
 #pragma once
 
-// Задача логгера на Core0 (log_task.cpp): расписание периодических строк.
+// Задача логгера на Core0: расписание периодических строк.
 
 #include "FreeRTOS.h"
 #include "task.h"

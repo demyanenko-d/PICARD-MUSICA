@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 #pragma once
 
 // SPI платы в тестах ПК: обмены реализует тест (на том конце - эмулятор
@@ -17,9 +18,15 @@ enum spi_cpol_t { SPI_CPOL_0 = 0 };
 enum spi_cpha_t { SPI_CPHA_0 = 0 };
 enum spi_order_t { SPI_MSB_FIRST = 1 };
 
-inline uint spi_set_baudrate(spi_inst_t* spi, uint baud) { return spi->baud = baud; }
-inline uint spi_get_baudrate(const spi_inst_t* spi) { return spi->baud; }
-inline uint spi_init(spi_inst_t* spi, uint baud) { return spi_set_baudrate(spi, baud); }
+inline uint spi_set_baudrate(spi_inst_t* spi, uint baud) {
+    return spi->baud = baud;
+}
+inline uint spi_get_baudrate(const spi_inst_t* spi) {
+    return spi->baud;
+}
+inline uint spi_init(spi_inst_t* spi, uint baud) {
+    return spi_set_baudrate(spi, baud);
+}
 inline void spi_set_format(spi_inst_t*, uint, spi_cpol_t, spi_cpha_t, spi_order_t) {}
 
 int spi_write_read_blocking(spi_inst_t* spi, const uint8_t* src, uint8_t* dst, size_t len);

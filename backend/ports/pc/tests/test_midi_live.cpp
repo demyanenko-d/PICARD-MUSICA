@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 // Живой вход MIDI (formats/midi_live) против загрузчика .mid: те же события
 // тем же конвертером обязаны давать те же строки ячеек и те же инструменты.
 // Загрузчик отдаёт трассу (set_convert_trace): события каждой строки и
@@ -30,7 +31,7 @@ using namespace soundsinth;
 namespace {
 
 constexpr const char* kBankPath = "release/banks/GeneralUser-GS.ssb";
-constexpr uint32_t kChannels = formats::midi::kMaxChannels;
+constexpr uint32_t kChannels    = formats::midi::kMaxChannels;
 
 struct TraceEvent {
     uint8_t status, d1, d2, delay;
@@ -53,17 +54,16 @@ struct Trace {
 };
 
 bool same_cell(const soundsinth::model::PatternCell& a, const soundsinth::model::PatternCell& b) {
-    return a.note == b.note && a.instrument == b.instrument && a.volume.type == b.volume.type &&
-           a.volume.param == b.volume.param && a.effect.type == b.effect.type && a.effect.param == b.effect.param &&
-           a.effect.rate == b.effect.rate;
+    return a.note == b.note && a.instrument == b.instrument && a.volume.type == b.volume.type && a.volume.param == b.volume.param &&
+           a.effect.type == b.effect.type && a.effect.param == b.effect.param && a.effect.rate == b.effect.rate;
 }
 
 // По полям: байты выравнивания у двух арен разные.
 bool same_envelope(const soundsinth::model::Envelope* a, const soundsinth::model::Envelope* b) {
     if (!a || !b) return a == b;
-    if (a->enabled != b->enabled || a->sustain_enabled != b->sustain_enabled || a->loop_enabled != b->loop_enabled ||
-        a->carry != b->carry || a->point_count != b->point_count || a->sustain_point != b->sustain_point ||
-        a->sustain_end != b->sustain_end || a->loop_start != b->loop_start || a->loop_end != b->loop_end) {
+    if (a->enabled != b->enabled || a->sustain_enabled != b->sustain_enabled || a->loop_enabled != b->loop_enabled || a->carry != b->carry ||
+        a->point_count != b->point_count || a->sustain_point != b->sustain_point || a->sustain_end != b->sustain_end || a->loop_start != b->loop_start ||
+        a->loop_end != b->loop_end) {
         return false;
     }
     for (uint8_t k = 0; k < a->point_count; ++k) {
@@ -76,13 +76,11 @@ bool same_envelope(const soundsinth::model::Envelope* a, const soundsinth::model
 // (file_offset): номера записей песни у путей разные, у живого keymap полный.
 // lazy - у живого зона без записи допустима: записи заводятся по первой ноте,
 // у файла - на все сыгранные за трек.
-bool same_instrument(const soundsinth::model::Song& fs, uint16_t fi, const soundsinth::model::Song& ls, uint16_t li,
-                     bool lazy = false) {
+bool same_instrument(const soundsinth::model::Song& fs, uint16_t fi, const soundsinth::model::Song& ls, uint16_t li, bool lazy = false) {
     const auto& a = fs.instruments[fi];
     const auto& b = ls.instruments[li];
-    if (a.fadeout_rate != b.fadeout_rate || a.global_volume != b.global_volume ||
-        a.velocity_to_cutoff != b.velocity_to_cutoff || a.filter_cutoff != b.filter_cutoff ||
-        a.filter_resonance != b.filter_resonance || a.nna != b.nna || a.dct != b.dct || a.dca != b.dca ||
+    if (a.fadeout_rate != b.fadeout_rate || a.global_volume != b.global_volume || a.velocity_to_cutoff != b.velocity_to_cutoff ||
+        a.filter_cutoff != b.filter_cutoff || a.filter_resonance != b.filter_resonance || a.nna != b.nna || a.dct != b.dct || a.dca != b.dca ||
         a.instrument_panning != b.instrument_panning || a.note_to_sample_range_count != b.note_to_sample_range_count) {
         return false;
     }
@@ -112,11 +110,9 @@ std::vector<uint8_t> read_file(const std::string& path) {
 // загрузчик на другом ядре уже выбросил PCM.
 struct Requests {
     formats::midi::LiveMidi* live = nullptr;
-    uint32_t count = 0;
-    uint16_t max_index = 0;
-    static void on_retire(void* user, uint16_t song_sample) {
-        static_cast<Requests*>(user)->live->record_retired(song_sample);
-    }
+    uint32_t count                = 0;
+    uint16_t max_index            = 0;
+    static void on_retire(void* user, uint16_t song_sample) { static_cast<Requests*>(user)->live->record_retired(song_sample); }
     static void on_request(void* user, uint16_t song_sample) {
         auto* r = static_cast<Requests*>(user);
         ++r->count;
@@ -131,7 +127,7 @@ void test_midi_live_matches_file_loader() {
     std::vector<uint8_t> blob = read_file(kBankPath);
     bank::Bank bnk;
     if (blob.empty() || !bank::bank_open(blob.data(), static_cast<uint32_t>(blob.size()), bnk, nullptr)) {
-        std::printf("  ПРОПУСК: банка нет\n");
+        std::printf("  SKIP: no bank\n");
         return;
     }
     std::vector<std::string> files;
@@ -147,7 +143,7 @@ void test_midi_live_matches_file_loader() {
         }
     }
     if (files.empty()) {
-        std::printf("  ПРОПУСК: .mid нет\n");
+        std::printf("  SKIP: no .mid\n");
         return;
     }
     std::sort(files.begin(), files.end());
@@ -158,23 +154,20 @@ void test_midi_live_matches_file_loader() {
     memory::track_memory_create(*live_mem);
     auto file_song = std::make_unique<soundsinth::model::Song>();
     auto live_song = std::make_unique<soundsinth::model::Song>();
-    auto live = std::make_unique<formats::midi::LiveMidi>();
+    auto live      = std::make_unique<formats::midi::LiveMidi>();
 
-    uint32_t checked = 0, skipped_effects = 0, skipped_caps = 0, bad_files = 0, rows = 0, bad_rows = 0,
-             bad_instruments = 0, requests = 0;
-    uint32_t caps_arena = 0, caps_samples = 0, caps_instruments = 0, max_arena = 0, max_samples = 0,
-             max_instruments = 0, evicted = 0, with_eviction = 0;
+    uint32_t checked = 0, skipped_effects = 0, skipped_caps = 0, bad_files = 0, rows = 0, bad_rows = 0, bad_instruments = 0, requests = 0;
+    uint32_t caps_arena = 0, caps_samples = 0, caps_instruments = 0, max_arena = 0, max_samples = 0, max_instruments = 0, evicted = 0, with_eviction = 0;
     for (const std::string& path : files) {
         const std::vector<uint8_t> file = read_file(path);
         Trace trace;
-        trace.hook.event = &Trace::on_event;
+        trace.hook.event    = &Trace::on_event;
         trace.hook.row_done = &Trace::on_row;
-        trace.hook.user = &trace;
+        trace.hook.user     = &trace;
         memory::track_memory_reset_for_new_track(*file_mem);
         formats::MemoryByteSource src(file.data(), static_cast<uint32_t>(file.size()));
         formats::midi::set_convert_trace(&trace.hook);
-        const bool ok = formats::midi::load(src.as_byte_source(), static_cast<uint32_t>(file.size()), *file_mem, bnk,
-                                            *file_song, nullptr, true);
+        const bool ok = formats::midi::load(src.as_byte_source(), static_cast<uint32_t>(file.size()), *file_mem, bnk, *file_song, nullptr, true);
         formats::midi::set_convert_trace(nullptr);
         if (!ok) continue;
         if (trace.hook.row_effects != 0) {
@@ -184,18 +177,19 @@ void test_midi_live_matches_file_loader() {
 
         memory::track_memory_reset_for_new_track(*live_mem);
         Requests req;
-        req.live = live.get();
-        const char* why =
-            live->begin(*live_song, *live_mem, bnk, file_song->default_speed,
-                        static_cast<uint8_t>(file_song->default_tempo), &Requests::on_request, &Requests::on_retire, &req);
+        req.live        = live.get();
+        const char* why = live->begin(*live_song, *live_mem, bnk, file_song->default_speed, static_cast<uint8_t>(file_song->default_tempo),
+                                      &Requests::on_request, &Requests::on_retire, &req);
         CHECK(why == nullptr);
         if (why) return;
-        for (uint8_t ch = 0; ch < 16; ++ch) live->set_drum_channel(ch, (trace.hook.drum_mask >> ch) & 1u);
+        for (uint8_t ch = 0; ch < 16; ++ch)
+            live->set_drum_channel(ch, (trace.hook.drum_mask >> ch) & 1u);
         const uint32_t row_count = static_cast<uint32_t>(trace.cells.size() / kChannels);
-        uint32_t file_bad_rows = 0;
+        uint32_t file_bad_rows   = 0;
         for (uint32_t r = 0; r < row_count; ++r) {
             live->begin_row();
-            for (const TraceEvent& e : trace.events[r]) live->event(e.status, e.d1, e.d2, e.delay);
+            for (const TraceEvent& e : trace.events[r])
+                live->event(e.status, e.d1, e.d2, e.delay);
             live->finish_row();
             const soundsinth::model::PatternCell* want = &trace.cells[static_cast<size_t>(r) * kChannels];
             for (uint32_t c = 0; c < kChannels; ++c) {
@@ -204,10 +198,9 @@ void test_midi_live_matches_file_loader() {
                 // После вытеснения номера у путей разные: тот же инструмент
                 // по содержимому - та же ячейка.
                 soundsinth::model::PatternCell renumbered = got;
-                renumbered.instrument = want[c].instrument;
+                renumbered.instrument                     = want[c].instrument;
                 if (got.instrument != 0 && want[c].instrument != 0 && same_cell(renumbered, want[c]) &&
-                    same_instrument(*file_song, static_cast<uint16_t>(want[c].instrument - 1), *live_song,
-                                    static_cast<uint16_t>(got.instrument - 1), true)) {
+                    same_instrument(*file_song, static_cast<uint16_t>(want[c].instrument - 1), *live_song, static_cast<uint16_t>(got.instrument - 1), true)) {
                     continue;
                 }
                 ++file_bad_rows;
@@ -220,8 +213,7 @@ void test_midi_live_matches_file_loader() {
         if (arena > max_arena) max_arena = arena;
         if (live_song->sample_count > max_samples) max_samples = live_song->sample_count;
         if (live_song->instrument_count > max_instruments) max_instruments = live_song->instrument_count;
-        if (live->stats().notes_over_cap != formats::midi::last_load_stats().notes_over_cap ||
-            live->instruments_failed() != 0 || live->samples_capped() != 0) {
+        if (live->stats().notes_over_cap != formats::midi::last_load_stats().notes_over_cap || live->instruments_failed() != 0 || live->samples_capped() != 0) {
             if (live->instruments_failed() != 0) ++caps_arena;
             if (live->samples_capped() != 0) ++caps_samples;
             if (live->stats().notes_over_cap != 0) ++caps_instruments;
@@ -229,9 +221,9 @@ void test_midi_live_matches_file_loader() {
             continue;
         }
         ++checked;
-        rows += row_count;
+        rows     += row_count;
         bad_rows += file_bad_rows;
-        evicted += live->instruments_evicted();
+        evicted  += live->instruments_evicted();
         if (live->instruments_evicted() != 0) ++with_eviction;
         // Без вытеснения номера у путей одни - сверка всех инструментов.
         uint32_t file_bad_instruments = 0;
@@ -242,23 +234,21 @@ void test_midi_live_matches_file_loader() {
             }
         }
         bad_instruments += file_bad_instruments;
-        requests += req.count;
+        requests        += req.count;
         CHECK(req.max_index < live_song->sample_count || req.count == 0);
         if (file_bad_rows || file_bad_instruments) {
             ++bad_files;
             if (bad_files <= 5) {
-                std::printf("  расхождение: %s строк %u, инструментов %u\n", path.c_str(), file_bad_rows,
-                            file_bad_instruments);
+                std::printf("  difference: %s rows %u, instruments %u\n", path.c_str(), file_bad_rows, file_bad_instruments);
             }
         }
     }
-    std::printf("  файлов сверено %u (строк %u), пропущено: темп/громкость %u, потолки %u; "
-                "расходится строк %u, инструментов %u; запросов PCM %u\n",
+    std::printf("  files checked %u (rows %u), skipped: tempo/volume %u, caps %u; "
+                "rows that differ %u, instruments %u; PCM requests %u\n",
                 checked, rows, skipped_effects, skipped_caps, bad_rows, bad_instruments, requests);
-    std::printf("  потолки: арена %u, записи сэмплов %u, ноты без инструмента %u; пик арены %u Б, записей %u, "
-                "инструментов %u; с вытеснением файлов %u, вытеснено %u\n",
-                caps_arena, caps_samples, caps_instruments, max_arena, max_samples, max_instruments, with_eviction,
-                evicted);
+    std::printf("  caps: arena %u, sample entries %u, notes without an instrument %u; arena peak %u B, entries %u, "
+                "instruments %u; files with eviction %u, evicted %u\n",
+                caps_arena, caps_samples, caps_instruments, max_arena, max_samples, max_instruments, with_eviction, evicted);
     CHECK(checked > 0);
     CHECK_EQ(bad_rows, 0u);
     CHECK_EQ(bad_instruments, 0u);
@@ -274,7 +264,7 @@ void test_midi_live_eviction_long_session() {
     std::vector<uint8_t> blob = read_file(kBankPath);
     bank::Bank bnk;
     if (blob.empty() || !bank::bank_open(blob.data(), static_cast<uint32_t>(blob.size()), bnk, nullptr)) {
-        std::printf("  ПРОПУСК: банка нет\n");
+        std::printf("  SKIP: no bank\n");
         return;
     }
     auto mem = std::make_unique<memory::TrackMemory>();
@@ -291,9 +281,12 @@ void test_midi_live_eviction_long_session() {
     };
     std::vector<Hit> hits;
     for (uint32_t pass = 0; pass < 3; ++pass) {
-        for (uint8_t p = 0; p < 128; ++p) hits.push_back(Hit{0, 0, p, 60});
-        for (uint8_t p = 0; p < 128; ++p) hits.push_back(Hit{1, 8, p, 48});
-        for (uint8_t n = 35; n <= 81; ++n) hits.push_back(Hit{9, 0, 0, n});
+        for (uint8_t p = 0; p < 128; ++p)
+            hits.push_back(Hit{0, 0, p, 60});
+        for (uint8_t p = 0; p < 128; ++p)
+            hits.push_back(Hit{1, 8, p, 48});
+        for (uint8_t n = 35; n <= 81; ++n)
+            hits.push_back(Hit{9, 0, 0, n});
     }
     // Нота на строке, снятие строкой позже, следующая - через 40 строк: релиз
     // прошлой успевает отзвучать.
@@ -311,15 +304,15 @@ void test_midi_live_eviction_long_session() {
         // Инструменты пресета этой ноты - по банку, как выбирает конвертер.
         const bank::BankPreset& preset = bank::bank_preset(bnk, h.ch == 9 ? 128 : h.bank_no, h.program);
         bank::NoteLayer layers[bank::kMaxNoteLayers];
-        const uint32_t n = bank::select_note_layers(
-            bnk, preset, h.note, 100, [](uint16_t, uint16_t) { return true; }, layers);
-        uint32_t found = 0;
+        const uint32_t n = bank::select_note_layers(bnk, preset, h.note, 100, [](uint16_t, uint16_t) { return true; }, layers);
+        uint32_t found   = 0;
         for (uint32_t c = 0; c < kChannels; ++c) {
             const soundsinth::model::PatternCell& cell = live->row()[c];
             if (cell.note != h.note || cell.instrument == 0) continue;
             const uint16_t bi = live->bank_instrument(static_cast<uint16_t>(cell.instrument - 1));
-            bool ok = false;
-            for (uint32_t k = 0; k < n; ++k) ok = ok || bnk.layers[layers[k].layer].instrument == bi;
+            bool ok           = false;
+            for (uint32_t k = 0; k < n; ++k)
+                ok = ok || bnk.layers[layers[k].layer].instrument == bi;
             if (!ok) ++wrong;
             ++found;
         }
@@ -332,15 +325,14 @@ void test_midi_live_eviction_long_session() {
             live->finish_row();
         }
     }
-    std::printf("  нот %u, потеряно %u, чужой инструмент %u; вытеснено %u, инструментов %u, не встало %u; "
-                "записей отдано %u, без записи %u\n",
-                notes, lost, wrong, live->instruments_evicted(), song->instrument_count, live->instruments_failed(),
-                live->records_retired(), live->samples_capped());
+    std::printf("  notes %u, lost %u, wrong instrument %u; evicted %u, instruments %u, did not fit %u; "
+                "records retired %u, without a record %u\n",
+                notes, lost, wrong, live->instruments_evicted(), song->instrument_count, live->instruments_failed(), live->records_retired(),
+                live->samples_capped());
     // Работа, которая растёт с числом живых инструментов и делается в тике
     // рендера: на плате она и разгоняет худший тик.
-    std::printf("  проходы: keymap %u, отдача записей %u раз (keymap %u, записей %u); на ноту keymap %u\n",
-                live->keymap_visits(), live->retire_calls(), live->retire_keymap_visits(),
-                live->retire_record_visits(), notes ? live->keymap_visits() / notes : 0u);
+    std::printf("  passes: keymap %u, records retired %u times (keymap %u, records %u); keymap per note %u\n", live->keymap_visits(), live->retire_calls(),
+                live->retire_keymap_visits(), live->retire_record_visits(), notes ? live->keymap_visits() / notes : 0u);
     CHECK_EQ(live->samples_capped(), 0u);
     CHECK_EQ(lost, 0u);
     CHECK_EQ(wrong, 0u);
@@ -357,11 +349,11 @@ void test_midi_live_prefetch_matches() {
     std::vector<uint8_t> blob = read_file(kBankPath);
     bank::Bank bnk;
     if (blob.empty() || !bank::bank_open(blob.data(), static_cast<uint32_t>(blob.size()), bnk, nullptr)) {
-        std::printf("  ПРОПУСК: банка нет\n");
+        std::printf("  SKIP: no bank\n");
         return;
     }
     struct Side {
-        std::unique_ptr<memory::TrackMemory> mem = std::make_unique<memory::TrackMemory>();
+        std::unique_ptr<memory::TrackMemory> mem      = std::make_unique<memory::TrackMemory>();
         std::unique_ptr<soundsinth::model::Song> song = std::make_unique<soundsinth::model::Song>();
         std::unique_ptr<formats::midi::LiveMidi> live = std::make_unique<formats::midi::LiveMidi>();
         Requests req;
@@ -371,15 +363,13 @@ void test_midi_live_prefetch_matches() {
         memory::track_memory_create(*s->mem);
         memory::track_memory_reset_for_new_track(*s->mem);
         s->req.live = s->live.get();
-        CHECK(s->live->begin(*s->song, *s->mem, bnk, 6, 125, &Requests::on_request, &Requests::on_retire, &s->req) ==
-              nullptr);
+        CHECK(s->live->begin(*s->song, *s->mem, bnk, 6, 125, &Requests::on_request, &Requests::on_retire, &s->req) == nullptr);
     }
 
     struct Hit {
         uint8_t ch, program, note, velocity;
     };
-    const Hit hits[] = {{0, 0, 60, 100},  {0, 0, 64, 100}, {0, 48, 55, 90}, {1, 30, 40, 127},
-                        {9, 0, 38, 110},  {9, 0, 42, 64},  {2, 73, 72, 80}, {0, 0, 60, 30}};
+    const Hit hits[] = {{0, 0, 60, 100}, {0, 0, 64, 100}, {0, 48, 55, 90}, {1, 30, 40, 127}, {9, 0, 38, 110}, {9, 0, 42, 64}, {2, 73, 72, 80}, {0, 0, 60, 30}};
 
     uint32_t requested_before_note = 0, cells_differ = 0;
     for (const Hit& h : hits) {
@@ -405,9 +395,8 @@ void test_midi_live_prefetch_matches() {
         }
     }
 
-    std::printf("  нот %u, с упреждающим заказом PCM %u; расхождений ячеек %u; инструментов %u против %u\n",
-                (unsigned)(sizeof(hits) / sizeof(hits[0])), requested_before_note, cells_differ,
-                with.song->instrument_count, without.song->instrument_count);
+    std::printf("  notes %u, with an early PCM request %u; cell differences %u; instruments %u against %u\n", (unsigned)(sizeof(hits) / sizeof(hits[0])),
+                requested_before_note, cells_differ, with.song->instrument_count, without.song->instrument_count);
     // Каждая новая нота обязана заказать PCM заранее; повтор той же - нет.
     CHECK(requested_before_note >= 6);
     CHECK_EQ(cells_differ, 0u);
@@ -416,7 +405,8 @@ void test_midi_live_prefetch_matches() {
         CHECK(same_instrument(*without.song, i, *with.song, i, /*lazy=*/false));
         CHECK_EQ(with.live->bank_instrument(i), without.live->bank_instrument(i));
     }
-    for (Side* s : {&with, &without}) memory::track_memory_destroy(*s->mem);
+    for (Side* s : {&with, &without})
+        memory::track_memory_destroy(*s->mem);
 }
 
 void run_midi_live_tests() {

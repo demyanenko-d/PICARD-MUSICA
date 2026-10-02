@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 #pragma once
 
 // Перепаковка распакованного PCM исходного формата в резидентные
@@ -42,16 +43,16 @@ namespace soundsinth::sample_pack {
 using soundsinth::model::ResidentEncoding;
 
 struct PackResult {
-    uint16_t first_page = memory::kPageChainEnd;
+    uint16_t first_page       = memory::kPageChainEnd;
     uint32_t checkpoint_count = 0; // всегда 0, кроме Dpcm8
-    uint32_t total_samples = 0;
-    bool ok = true;
+    uint32_t total_samples    = 0;
+    bool ok                   = true;
     // kPageChainEnd - контрольных точек нет: Raw8/Raw16 или Dpcm8 без
     // единой точки (пустой сэмпл, синтетика в тестах). locate_block с
     // таким значением верен только для блока 0; к другим позициям
     // вызывающий (voice_trigger) идёт линейным проходом с выбросом.
     uint16_t checkpoint_first_page = memory::kPageChainEnd;
-    const char* error = nullptr; // причина, если ok == false
+    const char* error              = nullptr; // причина, если ok == false
 };
 
 class SamplePacker {
@@ -100,25 +101,25 @@ private:
     memory::PsramStore& psram_;
     ResidentEncoding mode_;
     bool decimate_;
-    bool has_pending_ = false;
-    int16_t pending_ = 0;
+    bool has_pending_          = false;
+    int16_t pending_           = 0;
     uint32_t checkpoint_count_ = 0;
-    uint16_t cp_first_page_ = memory::kPageChainEnd;
-    uint16_t cp_page_ = memory::kPageChainEnd;
-    uint32_t cp_pos_ = 0;
+    uint16_t cp_first_page_    = memory::kPageChainEnd;
+    uint16_t cp_page_          = memory::kPageChainEnd;
+    uint32_t cp_pos_           = 0;
 
     soundsinth::model::LoopUnroll unroll_ = soundsinth::model::LoopUnroll::None; // None - разворота нет или он записан
-    uint32_t unroll_start_ = 0;
-    uint32_t unroll_end_ = 0;
+    uint32_t unroll_start_                = 0;
+    uint32_t unroll_end_                  = 0;
 
     dpcm8::Dpcm8State state_; // только в Dpcm8
     uint32_t total_samples_ = 0;
 
-    uint16_t first_page_ = memory::kPageChainEnd;
+    uint16_t first_page_   = memory::kPageChainEnd;
     uint16_t current_page_ = memory::kPageChainEnd;
-    uint32_t page_pos_ = 0;
+    uint32_t page_pos_     = 0;
 
-    bool ok_ = true;
+    bool ok_           = true;
     const char* error_ = nullptr;
 };
 
@@ -129,7 +130,7 @@ private:
 // прошла, reason_out (может быть nullptr) получает причину, иначе причину
 // уже назвал вызывающий. Путь .mid с общими цепочками банка
 // (load_sample_from_bank) сюда не ходит.
-bool finish_and_publish(SamplePacker& packer, bool data_ok, memory::PsramStore& psram,
-                        memory::SampleCacheCatalog& catalog, uint16_t sample_index, const char** reason_out);
+bool finish_and_publish(SamplePacker& packer, bool data_ok, memory::PsramStore& psram, memory::SampleCacheCatalog& catalog, uint16_t sample_index,
+                        const char** reason_out);
 
 } // namespace soundsinth::sample_pack

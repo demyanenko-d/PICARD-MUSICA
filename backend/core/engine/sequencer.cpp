@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 #include "core/engine/sequencer.h"
 
 #include "platform/hot_path.h"
@@ -13,7 +14,7 @@ using soundsinth::model::Song;
 namespace {
 
 struct ResolveResult {
-    bool found = false;
+    bool found         = false;
     uint16_t order_pos = 0;
 };
 
@@ -51,8 +52,7 @@ ResolveResult resolve_next_order_pos(const Song& song, uint16_t start_pos) {
 // (читает sequencer_tick) и tempo (compute_tick_samples этого же тика, у MOD
 // - со второго). Вызывается на каждой смене строки из sequencer_tick, на
 // горячем пути тика: в SRAM, не делит QMI с кодом из флеша.
-void SOUNDSINTH_HOT_PATH(read_row_and_scan)(const Song& song, memory::PsramStore& psram, PlayState& ps,
-                                            RowCallback on_new_row, void* user) {
+void SOUNDSINTH_HOT_PATH(read_row_and_scan)(const Song& song, memory::PsramStore& psram, PlayState& ps, RowCallback on_new_row, void* user) {
     const Pattern& pat = song.patterns[ps.pattern_idx];
     PatternCell cells[soundsinth::model::kMaxPatternChannels];
 
@@ -64,8 +64,7 @@ void SOUNDSINTH_HOT_PATH(read_row_and_scan)(const Song& song, memory::PsramStore
         }
         song.row_fetch(song.row_fetch_user, ps.pattern_idx, ps.row, cells, pat.channel_count);
     } else if (pat.psram_offset != Pattern::kInvalidOffset && pat.channel_count > 0) {
-        patterns::PatternReader reader(memory::psram_pattern_ptr(psram, pat.psram_offset), pat.row_count,
-                                       pat.channel_count);
+        patterns::PatternReader reader(memory::psram_pattern_ptr(psram, pat.psram_offset), pat.row_count, pat.channel_count);
         reader.read_row(ps.row, cells);
     } else {
         for (uint8_t ch = 0; ch < pat.channel_count; ++ch) {
@@ -86,15 +85,15 @@ void SOUNDSINTH_HOT_PATH(read_row_and_scan)(const Song& song, memory::PsramStore
         switch (effect.type) {
             case Effect::PositionJump:
                 ps.pending_position_jump = true;
-                ps.position_jump_target = effect.param;
+                ps.position_jump_target  = effect.param;
                 break;
             case Effect::PatternBreak:
                 ps.pending_pattern_break = true;
-                ps.pattern_break_row = effect.param; // BCD S3M уже развёрнут загрузчиком
+                ps.pattern_break_row     = effect.param; // BCD S3M уже развёрнут загрузчиком
                 break;
             case Effect::PatternLoop: {
                 const uint8_t loop_ch = global_loop_target ? 0 : ch;
-                uint8_t& counter = ps.loop_counter[loop_ch];
+                uint8_t& counter      = ps.loop_counter[loop_ch];
                 if (effect.param == 0) {
                     ps.loop_start_row[loop_ch] = ps.row; // точка возврата, не прыгать
                     break;
@@ -134,7 +133,7 @@ void SOUNDSINTH_HOT_PATH(read_row_and_scan)(const Song& song, memory::PsramStore
 void clear_pending_flow(PlayState& ps) {
     ps.pending_position_jump = false;
     ps.pending_pattern_break = false;
-    ps.pending_pattern_loop = false;
+    ps.pending_pattern_loop  = false;
 }
 
 // Строка row в паттерне из row_count строк; за концом - последняя.
@@ -152,35 +151,31 @@ bool SOUNDSINTH_HOT_PATH(advance_row_or_pattern)(const Song& song, PlayState& ps
     // kFlowLoopDelaysSameRowBreak: Position Jump на строке сработавшего
     // Pattern Loop побеждает его (петля в этот раз не срабатывает). Pattern
     // Break без Position Jump на исход не влияет.
-    const bool jump_overrides_loop =
-        (song.flow_mode & soundsinth::model::kFlowLoopDelaysSameRowBreak) != 0 && ps.pending_position_jump;
-    const bool loop = ps.pending_pattern_loop && !jump_overrides_loop;
+    const bool jump_overrides_loop = (song.flow_mode & soundsinth::model::kFlowLoopDelaysSameRowBreak) != 0 && ps.pending_position_jump;
+    const bool loop                = ps.pending_pattern_loop && !jump_overrides_loop;
     if (loop) {
         next_row = ps.loop_start_row[ps.pattern_loop_channel];
     } else {
-        const uint16_t row_count = song.patterns[ps.pattern_idx].row_count;
+        const uint16_t row_count       = song.patterns[ps.pattern_idx].row_count;
         const bool natural_pattern_end = static_cast<uint32_t>(ps.row) + 1 >= row_count;
         if (ps.pending_pattern_break || natural_pattern_end) {
-            const uint16_t target_start =
-                ps.pending_position_jump ? ps.position_jump_target : static_cast<uint16_t>(ps.order_pos + 1);
+            const uint16_t target_start  = ps.pending_position_jump ? ps.position_jump_target : static_cast<uint16_t>(ps.order_pos + 1);
             const ResolveResult resolved = resolve_next_order_pos(song, target_start);
             if (!resolved.found) {
                 ps.song_ended = true;
                 clear_pending_flow(ps);
                 return false;
             }
-            ps.order_pos = resolved.order_pos;
+            ps.order_pos     = resolved.order_pos;
             next_pattern_idx = song.order[ps.order_pos];
-            next_row = ps.pending_pattern_break
-                           ? clamp_row(ps.pattern_break_row, song.patterns[next_pattern_idx].row_count)
-                           : 0;
+            next_row         = ps.pending_pattern_break ? clamp_row(ps.pattern_break_row, song.patterns[next_pattern_idx].row_count) : 0;
         } else {
             next_row = static_cast<uint16_t>(ps.row + 1);
         }
     }
 
-    ps.pattern_idx = next_pattern_idx;
-    ps.row = next_row;
+    ps.pattern_idx           = next_pattern_idx;
+    ps.row                   = next_row;
     ps.last_advance_was_loop = loop;
     clear_pending_flow(ps);
     return true;
@@ -203,9 +198,8 @@ void sequencer_live_tick(PlayState& ps) {
 }
 
 bool sequencer_init(const Song& song, memory::PsramStore& psram, PlayState& ps, RowCallback on_new_row, void* user) {
-    ps = PlayState{};
-    ps.speed = (song.default_speed == 0 || song.default_speed > UINT8_MAX) ? soundsinth::model::kDefaultSpeed
-                                                                           : static_cast<uint8_t>(song.default_speed);
+    ps       = PlayState{};
+    ps.speed = (song.default_speed == 0 || song.default_speed > UINT8_MAX) ? soundsinth::model::kDefaultSpeed : static_cast<uint8_t>(song.default_speed);
     ps.tempo = song.default_tempo >= soundsinth::model::kMinTempo ? song.default_tempo : soundsinth::model::kDefaultTempo;
     ps.global_volume = song.default_global_volume;
 
@@ -214,9 +208,9 @@ bool sequencer_init(const Song& song, memory::PsramStore& psram, PlayState& ps, 
         ps.song_ended = true;
         return false;
     }
-    ps.order_pos = resolved.order_pos;
+    ps.order_pos   = resolved.order_pos;
     ps.pattern_idx = song.order[ps.order_pos];
-    ps.row = 0;
+    ps.row         = 0;
     // Тик 0 строки 0 - такой же тик, как прочие: его длительность считается
     // здесь, чтобы движок его отыграл, а не проскочил (иначе строка 0 на тик
     // короче, и весь трек уезжает на 20 мс вперёд относительно трекеров).
@@ -229,8 +223,7 @@ bool sequencer_init(const Song& song, memory::PsramStore& psram, PlayState& ps, 
 
 // Каждый тик воспроизведения (13-102 в секунду): в SRAM, не делит QMI с
 // кодом из флеша.
-bool SOUNDSINTH_HOT_PATH(sequencer_tick)(const Song& song, memory::PsramStore& psram, PlayState& ps,
-                                         RowCallback on_new_row, void* user) {
+bool SOUNDSINTH_HOT_PATH(sequencer_tick)(const Song& song, memory::PsramStore& psram, PlayState& ps, RowCallback on_new_row, void* user) {
     if (ps.song_ended) return false;
 
     ++ps.tick_in_row;

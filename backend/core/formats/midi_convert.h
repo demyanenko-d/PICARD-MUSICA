@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 #pragma once
 
 // Конвертер MIDI -> ячейки строки трекера: правила MIDI и состояние каналов.
@@ -32,7 +33,7 @@ using soundsinth::model::Song;
 using soundsinth::model::VolumeColumnType;
 
 constexpr uint8_t kMaxChannels = 64; // столько же голосов у движка
-static_assert(kMaxChannels <= soundsinth::model::kMaxPatternChannels, "маска строки упаковщика - 64 канала");
+static_assert(kMaxChannels <= soundsinth::model::kMaxPatternChannels, "the packer row mask is 64 channels");
 // Потолок слоёв на ноту - общий с выбором слоёв банка.
 constexpr uint8_t kMaxLayers = bank::kMaxNoteLayers;
 // Бенд канала трекера "не выписан": таких значений бенд не принимает
@@ -109,13 +110,13 @@ struct MidiChannel {
     // CC7, CC10, CC91, портаменто, программа и банк не сбрасываются; педаль
     // снимает вызывающий - удержанные ноты уходят, как при её отпускании.
     void reset_controllers() {
-        cc11 = 127;
-        cc1 = 0;
-        pressure = 0;
-        bend = 0;
+        cc11       = 127;
+        cc1        = 0;
+        pressure   = 0;
+        bend       = 0;
         bend_range = 2;
-        rpn_msb = kRpnNone;
-        rpn_lsb = kRpnNone;
+        rpn_msb    = kRpnNone;
+        rpn_lsb    = kRpnNone;
     }
 };
 
@@ -131,18 +132,18 @@ struct TrackerChannel {
     uint8_t rel_note = 0xff;
     // Громкость (CC7/CC11) ждёт свободной колонки громкости - как pend_pan.
     bool pend_vol = false;
-    int16_t bend = 0;
+    int16_t bend  = 0;
     // Скорость вибрато зависит только от частоты тиков - выписывается один раз
     // на канал, дальше только глубина; после смены темпа - заново.
     bool vib_speed_set = false;
-    uint8_t rev = 0xff;
-    uint16_t inst = 0xffff; // инструмент канала: скользить можно только к тому же тембру
+    uint8_t rev        = 0xff;
+    uint16_t inst      = 0xffff; // инструмент канала: скользить можно только к тому же тембру
     // Сколько строк ещё дописывать TonePorta. Команда действует одну строку
     // (tone_porta_active сбрасывается построчно), поэтому скольжение
     // ведётся явно до конца - как Gxx на каждой строке перехода в модуле.
     uint16_t glide = 0;
-    uint16_t bs = bank::kNoSample; // сэмпл банка на канале - условие скольжения
-    uint32_t age = 0;
+    uint16_t bs    = bank::kNoSample; // сэмпл банка на канале - условие скольжения
+    uint32_t age   = 0;
     // Модульный тик, когда отзвучит релиз снятой ноты: снятие плюс fadeout_ms
     // инструмента (затухание до -48 дБ, после него голос гаснет). 32 бит
     // хватает: тик модуля меньше 4096 x 128 x 255 (паттерны, строки, тики на
@@ -187,21 +188,17 @@ void sample_from_bank(const bank::Bank& bank, uint16_t bs, SampleDescriptor& d);
 // 0..i-1 уже построены - огибающие с ними общие. Сэмпл keymap без номера в
 // bank_to_song_sample (0xffff) - kNoSample. nullptr - готово, иначе причина
 // отказа; env_copies растёт на число новых огибающих в арене.
-const char* build_instrument(Song& out, memory::TrackMemory& mem, const bank::Bank& bank,
-                             const uint16_t* used_instruments, uint16_t i, const uint16_t* bank_to_song_sample,
-                             uint32_t ticks_per_second_rounded, uint32_t& env_copies);
+const char* build_instrument(Song& out, memory::TrackMemory& mem, const bank::Bank& bank, const uint16_t* used_instruments, uint16_t i,
+                             const uint16_t* bank_to_song_sample, uint32_t ticks_per_second_rounded, uint32_t& env_copies);
 
 // Keymap инструмента банка в km (bi.keymap_count мест): сэмпл банка -
 // запись песни по bank_to_song_sample, без записи (0xffff) - kNoSample.
-void fill_keymap(const bank::Bank& bank, const bank::BankInstrument& bi, const uint16_t* bank_to_song_sample,
-                 KeymapRange* km);
+void fill_keymap(const bank::Bank& bank, const bank::BankInstrument& bi, const uint16_t* bank_to_song_sample, KeymapRange* km);
 
 // Инструменты и сэмплы песни из банка, все разом; nullptr - готово, иначе
 // причина отказа; env_copies - огибающих в арене.
-const char* build_instruments(Song& out, memory::TrackMemory& mem, const bank::Bank& bank,
-                              const uint16_t* used_instruments, uint16_t used_instrument_count,
-                              uint16_t used_sample_count, const uint16_t* bank_to_song_sample,
-                              uint32_t ticks_per_second_rounded, uint32_t& env_copies);
+const char* build_instruments(Song& out, memory::TrackMemory& mem, const bank::Bank& bank, const uint16_t* used_instruments, uint16_t used_instrument_count,
+                              uint16_t used_sample_count, const uint16_t* bank_to_song_sample, uint32_t ticks_per_second_rounded, uint32_t& env_copies);
 
 // Правила MIDI и состояние каналов - в одном объекте, запись в ячейки -
 // его же методами. Живому входу нужны те же правила, но вместо ячеек
@@ -221,34 +218,34 @@ struct Converter {
     LoadStats* stats = nullptr;
     Grid grid;
     bool drum_channel[16];
-    uint8_t* held = nullptr;              // [канал MIDI][нота][слой] -> канал трекера
-    uint8_t* pending = nullptr;           // клавиша отпущена, держит педаль
-    LayerCacheEntry* layer_cache = nullptr;
-    uint16_t* song_inst_of = nullptr;
-    uint16_t* bank_to_song_sample = nullptr;
+    uint8_t* held                  = nullptr; // [канал MIDI][нота][слой] -> канал трекера
+    uint8_t* pending               = nullptr; // клавиша отпущена, держит педаль
+    LayerCacheEntry* layer_cache   = nullptr;
+    uint16_t* song_inst_of         = nullptr;
+    uint16_t* bank_to_song_sample  = nullptr;
     uint16_t used_instrument_count = 0;
-    uint16_t used_sample_count = 0;
-    uint32_t age = 0;
-    uint32_t mt = 0;                      // тик модуля разбираемого события
-    uint8_t cur_tempo = 0;
-    uint8_t vibrato_speed = 0;
+    uint16_t used_sample_count     = 0;
+    uint32_t age                   = 0;
+    uint32_t mt                    = 0; // тик модуля разбираемого события
+    uint8_t cur_tempo              = 0;
+    uint8_t vibrato_speed          = 0;
     // Общая громкость, запрошенная SysEx: выписывает её проход строки.
     uint8_t want_global = 0;
-    bool reverb_used = false;
+    bool reverb_used    = false;
     // Живой вход: потолки песни и крюки. У загрузчика файла потолок
     // инструментов - номер в ячейке, сэмплов - без потолка, крюков нет.
     // alloc_instrument - номер новому инструменту (0xffff - нет, нота без
     // этого слоя); on_new_instrument - номер дан, строить сразу (false - не
     // построился, слой отпадает); on_sample - нота взяла сэмпл банка
     // инструментом песни song_inst (подгрузить PCM, отметить звучание).
-    uint16_t max_instruments = kMaxInstruments;
-    uint16_t max_samples = 0xffff;
+    uint16_t max_instruments                 = kMaxInstruments;
+    uint16_t max_samples                     = 0xffff;
     uint16_t (*alloc_instrument)(void* user) = nullptr;
     // Запись песни сэмплу банка без записи (0xffff - нет, слой отпадает).
-    uint16_t (*alloc_sample)(void* user, uint16_t bank_sample) = nullptr;
-    bool (*on_new_instrument)(void* user, uint16_t song_inst) = nullptr;
+    uint16_t (*alloc_sample)(void* user, uint16_t bank_sample)              = nullptr;
+    bool (*on_new_instrument)(void* user, uint16_t song_inst)               = nullptr;
     void (*on_sample)(void* user, uint16_t song_inst, uint16_t bank_sample) = nullptr;
-    void* hook_user = nullptr;
+    void* hook_user                                                         = nullptr;
 
     // Заново с начала трека, сохранив нумерацию. Номера инструментов и
     // записей сэмплов песни раздаются по ходу разбора и уже запечены в неё -
@@ -258,14 +255,20 @@ struct Converter {
     //
     // held/pending - чужие буферы, их размеры знает вызывающий.
     void reset_for_replay(uint32_t held_bytes, uint32_t pending_bytes, uint8_t start_tempo, uint8_t global_volume) {
-        for (uint32_t i = 0; i < 16; ++i) mch[i] = MidiChannel{};
-        for (uint32_t i = 0; i < kMaxChannels; ++i) tch[i] = TrackerChannel{};
-        for (uint32_t i = 0; i < kMaxChannels; ++i) cells[i] = PatternCell{};
+        for (uint32_t i = 0; i < 16; ++i) {
+            mch[i] = MidiChannel{};
+        }
+        for (uint32_t i = 0; i < kMaxChannels; ++i) {
+            tch[i] = TrackerChannel{};
+        }
+        for (uint32_t i = 0; i < kMaxChannels; ++i) {
+            cells[i] = PatternCell{};
+        }
         if (held != nullptr) std::memset(held, 0xff, held_bytes);
         if (pending != nullptr) std::memset(pending, 0, pending_bytes);
-        age = 0;
-        mt = 0;
-        cur_tempo = start_tempo;
+        age         = 0;
+        mt          = 0;
+        cur_tempo   = start_tempo;
         want_global = global_volume;
         reverb_used = false;
     }
@@ -277,9 +280,9 @@ struct Converter {
     // с нотой колонка громкости занята velocity - тогда откладываем.
     SOUNDSINTH_NOINLINE void put_pan(uint32_t c, uint8_t pan) {
         if (cells[c].volume.type == VolumeColumnType::None) {
-            cells[c].volume.type = VolumeColumnType::SetPanning;
+            cells[c].volume.type  = VolumeColumnType::SetPanning;
             cells[c].volume.param = pan;
-            tch[c].pend_pan = 0xff;
+            tch[c].pend_pan       = 0xff;
         } else {
             tch[c].pend_pan = pan;
         }
@@ -299,9 +302,9 @@ struct Converter {
             tch[c].pend_vol = true;
             return;
         }
-        cells[c].volume.type = VolumeColumnType::SetVolume;
+        cells[c].volume.type  = VolumeColumnType::SetVolume;
         cells[c].volume.param = cell_volume(tch[c].vel, mch[tch[c].midi].cc7, mch[tch[c].midi].cc11);
-        tch[c].pend_vol = false;
+        tch[c].pend_vol       = false;
     }
     // Бенд абсолютный: пропустить нельзя, только отложить, но откладывать
     // некуда - колонка эффекта одна. Кладём, если свободна; иначе значение
@@ -310,7 +313,7 @@ struct Converter {
         // Панорама строки ноты уступает бенду и доезжает колонкой громкости
         // следующей строкой: промах панорамы на строку тише промаха высоты.
         if (cells[c].effect.type == Effect::SetPanning) {
-            tch[c].pend_pan = static_cast<uint8_t>(cells[c].effect.param >> 2);
+            tch[c].pend_pan      = static_cast<uint8_t>(cells[c].effect.param >> 2);
             cells[c].effect.type = Effect::None;
         }
         // Свой же SetPitchOffset этой строки переписывается: в ячейку идёт
@@ -339,8 +342,8 @@ struct Converter {
         } else if (v > 127) {
             v = 127;
         }
-        cells[c].effect.type = Effect::SetPitchOffset;
-        cells[c].effect.rate = static_cast<SlideRate>(shift);
+        cells[c].effect.type  = Effect::SetPitchOffset;
+        cells[c].effect.rate  = static_cast<SlideRate>(shift);
         cells[c].effect.param = static_cast<uint8_t>(v + 128);
         // Запоминается запрошенное значение, а не округлённое: догон сверяет
         // tch[c].bend с бендом канала MIDI, и при +128 или ненулевых младших битах
@@ -354,12 +357,12 @@ struct Converter {
     // сверка tch[c].bend считала бы его выписанным до следующего изменения.
     SOUNDSINTH_NOINLINE void put_note_effect(uint32_t c, Effect type, uint8_t param) {
         if (cells[c].effect.type == Effect::SetPitchOffset) {
-            tch[c].bend = kBendUnwritten;
+            tch[c].bend          = kBendUnwritten;
             cells[c].effect.rate = SlideRate::PerTick;
         } else if (cells[c].effect.type == Effect::SetPanning) {
             tch[c].pend_pan = static_cast<uint8_t>(cells[c].effect.param >> 2);
         }
-        cells[c].effect.type = type;
+        cells[c].effect.type  = type;
         cells[c].effect.param = param;
     }
 
@@ -376,9 +379,8 @@ struct Converter {
             // Задержка снятия - тайминг ноты: она вытесняет бенд и панораму
             // этой строки, у обоих есть догон (невыписанный бенд и pend_pan).
             // Иначе снятие уходило на тик 0 - раньше файла почти на строку.
-            if (at_delay && (cells[c].effect.type == Effect::None ||
-                             cells[c].effect.type == Effect::SetPitchOffset ||
-                             cells[c].effect.type == Effect::SetPanning)) {
+            if (at_delay &&
+                (cells[c].effect.type == Effect::None || cells[c].effect.type == Effect::SetPitchOffset || cells[c].effect.type == Effect::SetPanning)) {
                 put_note_effect(c, Effect::NoteDelay, at_delay);
             } else if (at_delay) {
                 ++stats->off_delay_lost;
@@ -390,9 +392,9 @@ struct Converter {
             tch[c].pend_off = true;
         }
         tch[c].rel_note = tch[c].note; // чья клавиша доигрывает - для её повтора
-        tch[c].note = 0xff;
+        tch[c].note     = 0xff;
         if (hard) {
-            tch[c].quiet_at = mt + 1u;   // голос снят, релиза нет
+            tch[c].quiet_at = mt + 1u; // голос снят, релиза нет
         } else if (tch[c].inst < used_instrument_count) {
             tch[c].quiet_at = mt + ms_to_engine_ticks(tch[c].rel_ms, cur_tempo) + 1u;
         }
@@ -431,7 +433,7 @@ struct Converter {
             cells[c] = PatternCell{};
             // Снятия, не влезшие в прошлую строку (release_note).
             if (tch[c].pend_off) {
-                cells[c].note = kNoteOff;
+                cells[c].note   = kNoteOff;
                 tch[c].pend_off = false;
             }
             // Отложенная панорама: CC10 на строке, где колонку громкости заняла
@@ -439,9 +441,9 @@ struct Converter {
             // крайнее правое, бенд). Доезжает строкой позже, 30-75 мс по темпу и
             // сетке.
             if (tch[c].pend_pan != 0xff) {
-                cells[c].volume.type = VolumeColumnType::SetPanning;
+                cells[c].volume.type  = VolumeColumnType::SetPanning;
                 cells[c].volume.param = tch[c].pend_pan;
-                tch[c].pend_pan = 0xff;
+                tch[c].pend_pan       = 0xff;
             }
             // Отложенная громкость - в колонку, которую не заняла панорама; значение
             // по текущим CC7/CC11, а не по тем, что были при откладывании.
@@ -459,65 +461,62 @@ struct Converter {
     // Слои ноты: пресет банка, кэш выбора и признание слоя - номер
     // инструмента, запись сэмпла, заказ PCM. Идемпотентно: живой вход зовёт
     // это заранее, по упреждению, а потом ещё раз на самой ноте.
-    uint32_t select_layers(uint8_t bank_no, uint8_t program, uint8_t note, uint8_t velocity,
-                           bank::NoteLayer (&picked)[bank::kMaxNoteLayers], bool& capped) {
+    uint32_t select_layers(uint8_t bank_no, uint8_t program, uint8_t note, uint8_t velocity, bank::NoteLayer (&picked)[bank::kMaxNoteLayers], bool& capped) {
         const bank::BankPreset& preset = bank::bank_preset(bank, bank_no, program);
         // Выбор слоёв повторяется: одна и та же клавиша с той же полосой силы
         // удара звучит в треке сотни раз, а перебор идёт по всем слоям пресета
         // в PSRAM. Ключ - пресет, клавиша и полоса; номера слоёв от порядка нот
         // не зависят, а признание слоя вызывается и на попадании - оно
         // идемпотентно.
-        const uint32_t layer_key = (static_cast<uint32_t>(bank_no) << 24) |
-                                   (static_cast<uint32_t>(program) << 16) |
-                                   (static_cast<uint32_t>(note) << 8) |
+        const uint32_t layer_key = (static_cast<uint32_t>(bank_no) << 24) | (static_cast<uint32_t>(program) << 16) | (static_cast<uint32_t>(note) << 8) |
                                    bank::quantize_velocity(velocity);
         auto accept_layer = [&](uint16_t li, uint16_t bs) {
-                const uint16_t bi_index = bank.layers[li].instrument;
-                if (song_inst_of[bi_index] == 0xffff) {
-                    uint16_t slot;
-                    if (alloc_instrument) {
-                        // Живой вход: номер выдаёт он, при нужде вытесняя молчащий.
-                        slot = alloc_instrument(hook_user);
-                        if (slot == 0xffff) {
-                            capped = true;
-                            return false;
-                        }
-                    } else {
-                        if (used_instrument_count >= max_instruments) {
-                            capped = true;
-                            return false;
-                        }
-                        slot = used_instrument_count++;
-                    }
-                    song_inst_of[bi_index] = slot;
-                    used_instruments[slot] = bi_index;
-                    if (on_new_instrument && !on_new_instrument(hook_user, slot)) {
-                        song_inst_of[bi_index] = 0xffff;
+            const uint16_t bi_index = bank.layers[li].instrument;
+            if (song_inst_of[bi_index] == 0xffff) {
+                uint16_t slot;
+                if (alloc_instrument) {
+                    // Живой вход: номер выдаёт он, при нужде вытесняя молчащий.
+                    slot = alloc_instrument(hook_user);
+                    if (slot == 0xffff) {
                         capped = true;
                         return false;
                     }
-                }
-                if (bank_to_song_sample[bs] == 0xffff) {
-                    uint16_t rec;
-                    if (alloc_sample) {
-                        // Живой вход: запись выдаёт он.
-                        rec = alloc_sample(hook_user, bs);
-                    } else {
-                        rec = used_sample_count < max_samples ? used_sample_count++ : 0xffff;
-                    }
-                    if (rec == 0xffff) {
+                } else {
+                    if (used_instrument_count >= max_instruments) {
                         capped = true;
                         return false;
                     }
-                    bank_to_song_sample[bs] = rec;
+                    slot = used_instrument_count++;
                 }
-                if (on_sample) on_sample(hook_user, song_inst_of[bi_index], bs);
-                return true;
-            };
+                song_inst_of[bi_index] = slot;
+                used_instruments[slot] = bi_index;
+                if (on_new_instrument && !on_new_instrument(hook_user, slot)) {
+                    song_inst_of[bi_index] = 0xffff;
+                    capped                 = true;
+                    return false;
+                }
+            }
+            if (bank_to_song_sample[bs] == 0xffff) {
+                uint16_t rec;
+                if (alloc_sample) {
+                    // Живой вход: запись выдаёт он.
+                    rec = alloc_sample(hook_user, bs);
+                } else {
+                    rec = used_sample_count < max_samples ? used_sample_count++ : 0xffff;
+                }
+                if (rec == 0xffff) {
+                    capped = true;
+                    return false;
+                }
+                bank_to_song_sample[bs] = rec;
+            }
+            if (on_sample) on_sample(hook_user, song_inst_of[bi_index], bs);
+            return true;
+        };
         uint32_t picked_count = 0;
         // Номер строки - перемешанный ключ: остаток от деления клал все ноты
         // одной полосы в одну строку, и кэш не попадал ни разу.
-        const uint32_t cache_slot = (layer_key * 2654435761u) >> 22;
+        const uint32_t cache_slot   = (layer_key * 2654435761u) >> 22;
         LayerCacheEntry& slot_cache = layer_cache[cache_slot & (kLayerCacheSlots - 1u)];
         if (slot_cache.key == layer_key) {
             for (uint8_t k = 0; k < slot_cache.count; ++k) {
@@ -525,16 +524,18 @@ struct Converter {
                 if (accept_layer(nl.layer, nl.bank_sample)) picked[picked_count++] = nl;
             }
         } else {
-            picked_count = bank::select_note_layers(bank, preset, note, velocity, accept_layer, picked);
-            slot_cache.key = layer_key;
+            picked_count     = bank::select_note_layers(bank, preset, note, velocity, accept_layer, picked);
+            slot_cache.key   = layer_key;
             slot_cache.count = static_cast<uint8_t>(picked_count);
-            for (uint32_t k = 0; k < picked_count; ++k) slot_cache.items[k] = picked[k];
+            for (uint32_t k = 0; k < picked_count; ++k) {
+                slot_cache.items[k] = picked[k];
+            }
         }
         return picked_count;
     }
 
     void handle(const Event& e, uint32_t at_mt, uint8_t delay) {
-        mt = at_mt;
+        mt                 = at_mt;
         const uint8_t kind = e.status >> 4, ch = e.status & 0x0fu;
         if (e.status == kMasterVolumeStatus) {
             // Общая громкость 0..127 -> шкала движка 0..128, по квадрату (40 lg),
@@ -542,14 +543,14 @@ struct Converter {
             // вдвое более мелкое затухание, чем у эталона. Выписывает её проход
             // строки, там же, где темп: канала у неё нет.
             const uint32_t mv = e.d1;
-            want_global = static_cast<uint8_t>((mv * mv * 128u + 8064u) / 16129u);
+            want_global       = static_cast<uint8_t>((mv * mv * 128u + 8064u) / 16129u);
         } else if (e.status == kDrumChannelStatus) {
             if (e.d1 < 16) drum_channel[e.d1] = e.d2 != 0;
         } else if (kind == 0xe) {
             // Питч-бенд: 14 бит со смещением 8192 -> 1/64 полутона; величина
             // абсолютная - SetPitchOffset, а не портаменто.
             const int32_t raw = (static_cast<int32_t>(e.d2) << 7 | static_cast<int32_t>(e.d1)) - 8192;
-            mch[ch].bend = static_cast<int16_t>(raw * static_cast<int32_t>(mch[ch].bend_range) * 64 / 8192);
+            mch[ch].bend      = static_cast<int16_t>(raw * static_cast<int32_t>(mch[ch].bend_range) * 64 / 8192);
             // И отпущенным, пока звучит релиз: бенд SF2 гнёт все голоса канала,
             // а канал трекера держит смещение до следующей ноты - иначе новая нота с
             // задержкой (колонка эффекта занята) начинается со старого бенда.
@@ -588,8 +589,7 @@ struct Converter {
             else if (e.d1 == 98 || e.d1 == 99) {
                 mch[ch].rpn_msb = kRpnNone;
                 mch[ch].rpn_lsb = kRpnNone;
-            } else if (e.d1 == 6 && mch[ch].rpn_msb == kRpnPitchBendRange &&
-                       mch[ch].rpn_lsb == kRpnPitchBendRange) {
+            } else if (e.d1 == 6 && mch[ch].rpn_msb == kRpnPitchBendRange && mch[ch].rpn_lsb == kRpnPitchBendRange) {
                 // RPN 0 - диапазон питч-бенда в полутонах. Умолчание GM 2; без чтения
                 // широкий бенд играл бы узким. Ноль означает ноль: канал с ним
                 // бенду не поддаётся, как у эталонного SF2-синтезатора.
@@ -649,8 +649,8 @@ struct Converter {
             // отпускание педали гасит свежую ноту с нажатой клавишей (педаль
             // перехватывают мгновенно: CC64=0 и через миллисекунду 127).
             pending[ch * 128 + e.d1] = 0;
-            const uint8_t bank_no = drum_channel[ch] ? 128 : mch[ch].bank_msb;
-            uint8_t* slot = held + (ch * 128 + e.d1) * kMaxLayers;
+            const uint8_t bank_no    = drum_channel[ch] ? 128 : mch[ch].bank_msb;
+            uint8_t* slot            = held + (ch * 128 + e.d1) * kMaxLayers;
             // Прежние каналы клавиши: повторное нажатие без снятия (две дорожки
             // удваивают партию) берёт новые каналы, а слот перезаписывается.
             uint8_t prev_slot[kMaxLayers];
@@ -664,16 +664,16 @@ struct Converter {
             const uint32_t picked_count = select_layers(bank_no, mch[ch].program, e.d1, e.d2, picked, capped);
             if (picked_count == 0) ++(capped ? stats->notes_over_cap : stats->notes_no_zone);
             for (uint32_t k = 0; k < picked_count; ++k) {
-                const uint16_t li = picked[k].layer;
+                const uint16_t li            = picked[k].layer;
                 const bank::BankLayer& layer = bank.layers[li];
-                const uint16_t inst = song_inst_of[layer.instrument];
-                const uint16_t bs_idx = picked[k].bank_sample;
-                const int8_t sample_pan = bank.samples[bs_idx].default_panning;
+                const uint16_t inst          = song_inst_of[layer.instrument];
+                const uint16_t bs_idx        = picked[k].bank_sample;
+                const int8_t sample_pan      = bank.samples[bs_idx].default_panning;
                 // Портаменто: если оно включено и предыдущая нота канала ещё звучит тем же
                 // инструментом, новая нота не берёт свой канал, а тянет высоту на старом.
                 // Тембр обязан совпадать: TonePorta не меняет сэмпл.
                 uint32_t pick = kMaxChannels;
-                bool glide = false;
+                bool glide    = false;
                 if (mch[ch].porta_on && mch[ch].last_note != 0xff && mch[ch].last_note != e.d1) {
                     for (uint32_t c = 0; c < kMaxChannels; ++c) {
                         if (tch[c].midi != ch || tch[c].note != mch[ch].last_note) continue;
@@ -684,7 +684,7 @@ struct Converter {
                         // доезжает до 405 Гц вместо 523). Переход шире одной зоны keymap играется
                         // обычной нотой.
                         if (tch[c].bs != bs_idx) continue;
-                        pick = c;
+                        pick  = c;
                         glide = true;
                         break;
                     }
@@ -762,8 +762,8 @@ struct Converter {
                             cells[c].effect = soundsinth::model::EffectCommand{};
                         }
                         forget_channel(c);
-                        tch[c].note = 0xff;
-                        tch[c].excl = 0;
+                        tch[c].note     = 0xff;
+                        tch[c].excl     = 0;
                         tch[c].quiet_at = mt; // оборван: тихо сразу
                     }
                 }
@@ -781,18 +781,15 @@ struct Converter {
                     // Тиков в секунду - по текущему темпу, а не стартовому: иначе после
                     // смены темпа скольжение шло бы быстрее или медленнее задуманного.
                     const uint32_t rate = 600u / (static_cast<uint32_t>(mch[ch].porta_time) + 1u);
-                    uint32_t pp = rate * 16u / engine_ticks_per_second(cur_tempo);
+                    uint32_t pp         = rate * 16u / engine_ticks_per_second(cur_tempo);
                     if (pp < 1) pp = 1;
                     if (pp > 255) pp = 255;
                     put_note_effect(pick, Effect::TonePorta, static_cast<uint8_t>(pp));
                     // Скорость pp*4 единиц 1/64 полутона за тик - отсюда число строк, на
                     // которых команду придётся повторять.
-                    const uint32_t dist =
-                        static_cast<uint32_t>((e.d1 > mch[ch].last_note ? e.d1 - mch[ch].last_note
-                                                                        : mch[ch].last_note - e.d1)) *
-                        64u;
+                    const uint32_t dist  = static_cast<uint32_t>((e.d1 > mch[ch].last_note ? e.d1 - mch[ch].last_note : mch[ch].last_note - e.d1)) * 64u;
                     const uint32_t ticks = (dist + pp * 4u - 1u) / (pp * 4u);
-                    uint32_t rows = (ticks + grid.ticks_per_row - 1u) / grid.ticks_per_row;
+                    uint32_t rows        = (ticks + grid.ticks_per_row - 1u) / grid.ticks_per_row;
                     if (rows > 0xffffu) rows = 0xffffu;
                     tch[pick].glide = static_cast<uint16_t>(rows);
                     // Канал переезжает со старой ноты на новую, иначе снятие старой погасило
@@ -802,20 +799,20 @@ struct Converter {
                         if (prev[k] == pick) prev[k] = 0xff;
                     }
                 }
-                cells[pick].volume.type = VolumeColumnType::SetVolume;
+                cells[pick].volume.type  = VolumeColumnType::SetVolume;
                 cells[pick].volume.param = cell_volume(e.d2, mch[ch].cc7, mch[ch].cc11);
-                tch[pick].pend_vol = false; // velocity новой ноты уже по текущим CC7/CC11
+                tch[pick].pend_vol       = false; // velocity новой ноты уже по текущим CC7/CC11
                 // При скольжении колонку уже занял TonePorta - он и есть смысл ноты,
                 // подстройка на долю строки для легатной ноты значит меньше.
                 if (delay && !glide) put_note_effect(pick, Effect::NoteDelay, delay);
-                tch[pick].midi = ch;
-                tch[pick].note = e.d1;
-                tch[pick].excl = excl;
-                tch[pick].vel = e.d2;
-                tch[pick].inst = inst;
+                tch[pick].midi   = ch;
+                tch[pick].note   = e.d1;
+                tch[pick].excl   = excl;
+                tch[pick].vel    = e.d2;
+                tch[pick].inst   = inst;
                 tch[pick].rel_ms = bank.instruments[layer.instrument].fadeout_ms;
-                tch[pick].bs = bs_idx;
-                tch[pick].span = static_cast<uint8_t>(sample_pan < 0 ? 32 : sample_pan);
+                tch[pick].bs     = bs_idx;
+                tch[pick].span   = static_cast<uint8_t>(sample_pan < 0 ? 32 : sample_pan);
                 // Канал трекера мог прийти от другого канала MIDI со своим бендом:
                 // bend_offset движка живёт, пока не переуказан, поэтому сверка всегда.
                 if (tch[pick].bend != mch[ch].bend) put_bend(pick, mch[ch].bend);
@@ -829,15 +826,15 @@ struct Converter {
                 if (mch[ch].cc10 != 64) {
                     const uint8_t pv = channel_pan(pick, mch[ch].cc10);
                     if (!delay && pv < 64 && cells[pick].effect.type == Effect::None) {
-                        cells[pick].effect.type = Effect::SetPanning;
+                        cells[pick].effect.type  = Effect::SetPanning;
                         cells[pick].effect.param = static_cast<uint8_t>(pv * 4);
-                        tch[pick].pend_pan = 0xff;
+                        tch[pick].pend_pan       = 0xff;
                     } else {
                         put_pan(pick, pv);
                     }
                 }
                 tch[pick].age = ++age;
-                slot[used++] = static_cast<uint8_t>(pick);
+                slot[used++]  = static_cast<uint8_t>(pick);
             }
             // Прежние каналы клавиши, не взятые заново, не теряются: иначе они не
             // получили бы note-off и висели до следующего нажатия той же клавиши.
@@ -879,9 +876,9 @@ struct Converter {
             if (sounding) {
                 const uint8_t want = mch[tch[c].midi].cc91;
                 if (tch[c].rev != want && cells[c].effect.type == Effect::None) {
-                    cells[c].effect.type = Effect::SetReverbSend;
+                    cells[c].effect.type  = Effect::SetReverbSend;
                     cells[c].effect.param = want;
-                    tch[c].rev = want;
+                    tch[c].rev            = want;
                     if (want != 0) reverb_used = true;
                 }
             }
@@ -896,7 +893,7 @@ struct Converter {
                     tch[c].glide = 0;
                 } else if (cells[c].effect.type == Effect::None) {
                     --tch[c].glide;
-                    cells[c].effect.type = Effect::TonePorta;
+                    cells[c].effect.type  = Effect::TonePorta;
                     cells[c].effect.param = 0;
                 }
             }
@@ -906,8 +903,7 @@ struct Converter {
             // слышен, промах по высоте на одну строку нет. Занятую колонку закроет
             // следующая строка: бенд абсолютный, пропасть не может. Сверка по
             // последнему выписанному значению.
-            if (tch[c].midi < 16 && (tch[c].note != 0xff || tch[c].quiet_at > row_mt) &&
-                tch[c].bend != mch[tch[c].midi].bend) {
+            if (tch[c].midi < 16 && (tch[c].note != 0xff || tch[c].quiet_at > row_mt) && tch[c].bend != mch[tch[c].midi].bend) {
                 put_bend(c, mch[tch[c].midi].bend);
             }
 
@@ -925,10 +921,9 @@ struct Converter {
             // глубина прыгала бы от строки к строке.
             // CC1 и давление канала качают высоту одинаково и складываются;
             // потолок 3 - нибл FineVibrato держит глубину до 15 (3 * 4).
-            const uint32_t wheel =
-                static_cast<uint32_t>(mch[tch[c].midi].cc1) + mch[tch[c].midi].pressure;
+            const uint32_t wheel = static_cast<uint32_t>(mch[tch[c].midi].cc1) + mch[tch[c].midi].pressure;
             const uint32_t steps = (wheel * 2u + 63u) / 127u;
-            const uint8_t depth = static_cast<uint8_t>(steps > 3u ? 3u : steps);
+            const uint8_t depth  = static_cast<uint8_t>(steps > 3u ? 3u : steps);
             // Ноль не выписываем, скорость тоже: без команды вибрато гаснет к
             // следующей строке.
             if (depth == 0) continue;
@@ -937,31 +932,30 @@ struct Converter {
                     ++stats->vib_lost;
                     continue;
                 }
-                cells[c].volume.type = VolumeColumnType::VibratoSpeed;
+                cells[c].volume.type  = VolumeColumnType::VibratoSpeed;
                 cells[c].volume.param = vibrato_speed;
-                tch[c].vib_speed_set = true;
+                tch[c].vib_speed_set  = true;
                 continue;
             }
-            const bool own_volume = cells[c].note == kNoteNone &&
-                                    cells[c].volume.type == VolumeColumnType::SetVolume;
+            const bool own_volume = cells[c].note == kNoteNone && cells[c].volume.type == VolumeColumnType::SetVolume;
             if (cells[c].volume.type == VolumeColumnType::None) {
-                cells[c].volume.type = VolumeColumnType::VibratoDepth;
+                cells[c].volume.type  = VolumeColumnType::VibratoDepth;
                 cells[c].volume.param = depth;
             } else if (cells[c].effect.type == Effect::None) {
                 // FineVibrato берёт глубину без сдвига: тот же размах даёт нибл depth*4.
-                cells[c].effect.type = Effect::FineVibrato;
+                cells[c].effect.type  = Effect::FineVibrato;
                 cells[c].effect.param = static_cast<uint8_t>((vibrato_speed << 4) | (depth * 4));
             } else if (cells[c].effect.type == Effect::SetPanning) {
                 // Панорама уступает: промах панорамы на строку тише промаха высоты,
                 // и её догоняет pend_pan.
-                tch[c].pend_pan = static_cast<uint8_t>(cells[c].effect.param >> 2);
-                cells[c].effect.type = Effect::FineVibrato;
+                tch[c].pend_pan       = static_cast<uint8_t>(cells[c].effect.param >> 2);
+                cells[c].effect.type  = Effect::FineVibrato;
                 cells[c].effect.param = static_cast<uint8_t>((vibrato_speed << 4) | (depth * 4));
             } else if (own_volume) {
                 // Громкость канала (не velocity этой строки) уезжает на следующую
                 // строку через pend_vol - туда же, куда её кладёт refresh_volume.
-                tch[c].pend_vol = true;
-                cells[c].volume.type = VolumeColumnType::VibratoDepth;
+                tch[c].pend_vol       = true;
+                cells[c].volume.type  = VolumeColumnType::VibratoDepth;
                 cells[c].volume.param = depth;
             } else {
                 ++stats->vib_lost;
@@ -974,7 +968,7 @@ struct Converter {
     bool write_row_effect(Effect type, uint8_t param) {
         for (uint32_t c = 0; c < kMaxChannels; ++c) {
             if (cells[c].effect.type != Effect::None) continue;
-            cells[c].effect.type = type;
+            cells[c].effect.type  = type;
             cells[c].effect.param = param;
             return true;
         }
@@ -985,11 +979,13 @@ struct Converter {
     // темпом скорость выписывается заново, иначе вместо 5 Гц было бы
     // 5 * новый / старый.
     void set_tempo(uint8_t tempo) {
-        cur_tempo = tempo;
+        cur_tempo        = tempo;
         const uint8_t vs = vibrato_speed_at(cur_tempo);
         if (vs == vibrato_speed) return;
         vibrato_speed = vs;
-        for (uint32_t c = 0; c < kMaxChannels; ++c) tch[c].vib_speed_set = false;
+        for (uint32_t c = 0; c < kMaxChannels; ++c) {
+            tch[c].vib_speed_set = false;
+        }
     }
 };
 

@@ -8,6 +8,11 @@ add_executable(mass_load_scan mass_load_scan.cpp)
 target_link_libraries(mass_load_scan PRIVATE platform_pc)
 target_compile_features(mass_load_scan PRIVATE cxx_std_17)
 
+# Образец файла настроек тем же кодом, каким его пишет плата.
+add_executable(config_example config_example.cpp)
+target_link_libraries(config_example PRIVATE soundsinth_core platform_pc)
+target_compile_features(config_example PRIVATE cxx_std_17)
+
 add_executable(sf2bake sf2bake.cpp)
 target_link_libraries(sf2bake PRIVATE soundsinth_core platform_pc)
 target_compile_features(sf2bake PRIVATE cxx_std_17)

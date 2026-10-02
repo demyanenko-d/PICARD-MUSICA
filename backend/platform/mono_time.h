@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 #pragma once
 
 // Монотонные микросекунды для логики: таймауты, сроки, отметки в кольцах
@@ -23,10 +24,14 @@
 namespace platform {
 
 #if PICO_ON_DEVICE
-inline uint32_t mono_us() { return time_us_32(); }
+inline uint32_t mono_us() {
+    return time_us_32();
+}
 // Пауза занятым ожиданием. Не сон планировщика: на плате её зовёт Core1 с
 // шиной, а сон идёт через пул будильников SDK с запретом прерываний.
-inline void busy_wait(uint32_t us) { busy_wait_us(us); }
+inline void busy_wait(uint32_t us) {
+    busy_wait_us(us);
+}
 #else
 uint32_t mono_us();
 void busy_wait(uint32_t us);

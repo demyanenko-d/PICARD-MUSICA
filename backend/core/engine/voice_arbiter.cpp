@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 #include "core/engine/voice_arbiter.h"
 
 #include "platform/hot_path.h"
@@ -12,10 +13,10 @@ namespace {
 // всё: голос хвоста уходит раньше любого живого, каким бы дорогим тот ни
 // был, иначе резалась бы мелодия при гаснущих фоновых голосах.
 enum class CullTier : int32_t {
-    NnaTail, // фоновый голос NNA: нота отпущена, пропажа наименее заметна
+    NnaTail,   // фоновый голос NNA: нота отпущена, пропажа наименее заметна
     QuietLive, // тихий живой голос: подкладка, эхо
-    MainLive, // основной живой голос: мелодия, бас - только когда больше нечего
-    None, // жертвы нет
+    MainLive,  // основной живой голос: мелодия, бас - только когда больше нечего
+    None,      // жертвы нет
 };
 
 } // namespace
@@ -26,7 +27,7 @@ uint8_t VoiceArbiter::pick_slot(int32_t killed) const {
     // волновое гашение. Среди занятых - самый тихий (при равенстве - меньший
     // alloc_seq): volume * огибающая * громкость канала * затухание, при
     // tremor_muted 0.
-    int32_t target = -1;
+    int32_t target    = -1;
     int32_t busy_tail = -1;
     for (uint8_t i = 0; i < kPool; ++i) {
         if (slots_[i].active) continue;
@@ -40,21 +41,19 @@ uint8_t VoiceArbiter::pick_slot(int32_t killed) const {
     if (target < 0) target = busy_tail;
     if (target < 0) {
         float best_loudness = 0.0f;
-        uint32_t best_seq = 0;
+        uint32_t best_seq   = 0;
         for (uint8_t i = 0; i < kPool; ++i) {
             const ChannelState& cand = channels_[channel_count_ + i];
             // У .mid огибающая хранит децибелы: как амплитуду её брать нельзя, -48 дБ
             // выглядело бы половиной громкости. Шкала 0..64, как у трекеров.
             const float env = static_cast<float>(envelope_gain_q16(cand, envelope_db_)) * (64.0f / 65536.0f);
-            const float loudness = cand.tremor_muted ? 0.0f
-                                                     : static_cast<float>(cand.volume) * env *
-                                                           static_cast<float>(cand.channel_volume) *
-                                                           static_cast<float>(cand.fadeout_level);
-            if (target < 0 || loudness < best_loudness ||
-                (loudness == best_loudness && slots_[i].alloc_seq < best_seq)) {
-                target = i;
+            const float loudness =
+                cand.tremor_muted ? 0.0f
+                                  : static_cast<float>(cand.volume) * env * static_cast<float>(cand.channel_volume) * static_cast<float>(cand.fadeout_level);
+            if (target < 0 || loudness < best_loudness || (loudness == best_loudness && slots_[i].alloc_seq < best_seq)) {
+                target        = i;
                 best_loudness = loudness;
-                best_seq = slots_[i].alloc_seq;
+                best_seq      = slots_[i].alloc_seq;
             }
         }
     }
@@ -78,7 +77,7 @@ uint8_t VoiceArbiter::to_background(uint8_t channel) {
     const uint8_t slot = pick_slot(killed);
     if (slots_[slot].active) ++steals_; // пул полон - слот отобран у звучащего
     const uint8_t bg = static_cast<uint8_t>(channel_count_ + slot);
-    channels_[bg] = channels_[channel];
+    channels_[bg]    = channels_[channel];
     link_->move(channel, bg);
     slots_[slot] = SlotInfo{true, channel, ++alloc_seq_counter_};
     return bg;
@@ -92,12 +91,12 @@ SOUNDSINTH_HOT_PATH_ATTR("va_update_budget")
 void VoiceArbiter::update_budget(uint32_t load_q8) {
     if (!cull_enabled_) return;
     constexpr uint32_t kHighQ8 = pct_to_q8(SOUNDSINTH_VOICE_CULL_HIGH_PCT);
-    constexpr uint32_t kLowQ8 = pct_to_q8(SOUNDSINTH_VOICE_CULL_LOW_PCT);
-    constexpr uint8_t kMin = static_cast<uint8_t>(SOUNDSINTH_VOICE_CULL_MIN_VOICES);
+    constexpr uint32_t kLowQ8  = pct_to_q8(SOUNDSINTH_VOICE_CULL_LOW_PCT);
+    constexpr uint8_t kMin     = static_cast<uint8_t>(SOUNDSINTH_VOICE_CULL_MIN_VOICES);
     constexpr uint32_t kStepQ8 = pct_to_q8(SOUNDSINTH_VOICE_CULL_STEP_PCT);
 
     if (load_q8 > kHighQ8) {
-        budget_ = voice_budget_after_overload(budget_, load_q8, kHighQ8, kMin, kStepQ8, SOUNDSINTH_VOICE_CULL_MAX_STEP);
+        budget_            = voice_budget_after_overload(budget_, load_q8, kHighQ8, kMin, kStepQ8, SOUNDSINTH_VOICE_CULL_MAX_STEP);
         budget_rise_ticks_ = 0; // перегрузка обнуляет накопленное разрешение подняться
     } else if (load_q8 < kLowQ8) {
         if (++budget_rise_ticks_ >= SOUNDSINTH_VOICE_CULL_RISE_TICKS) {
@@ -132,9 +131,9 @@ void VoiceArbiter::cull_over_budget() {
         }
         const int64_t quiet_limit = (loudest_live * SOUNDSINTH_VOICE_CULL_QUIET_NUM) / SOUNDSINTH_VOICE_CULL_QUIET_DEN;
 
-        int32_t victim_k = -1;
-        CullTier victim_tier = CullTier::None;
-        uint32_t victim_cost = 0;
+        int32_t victim_k        = -1;
+        CullTier victim_tier    = CullTier::None;
+        uint32_t victim_cost    = 0;
         int64_t victim_loudness = 0;
 
         for (uint8_t k = 0; k < link_->list_size(); ++k) {
@@ -142,10 +141,8 @@ void VoiceArbiter::cull_over_budget() {
             if (!link_->playing(idx)) continue; // уже гаснет
 
             const int64_t loudness = link_->loudness(idx);
-            const CullTier tier = (idx >= channel_count_)     ? CullTier::NnaTail
-                                  : (loudness <= quiet_limit) ? CullTier::QuietLive
-                                                              : CullTier::MainLive;
-            const uint32_t cost = link_->cost_ns(idx);
+            const CullTier tier    = (idx >= channel_count_) ? CullTier::NnaTail : (loudness <= quiet_limit) ? CullTier::QuietLive : CullTier::MainLive;
+            const uint32_t cost    = link_->cost_ns(idx);
 
             bool better = false;
             if (victim_k < 0 || tier < victim_tier) {
@@ -154,13 +151,12 @@ void VoiceArbiter::cull_over_budget() {
                 // Внутри яруса - худшее отношение цены к громкости: cost/loudness больше -
                 // голос дороже или тише. Перекрёстное умножение вместо деления, +1 у
                 // громкости страхует от нуля.
-                better = static_cast<int64_t>(cost) * (victim_loudness + 1) >
-                         static_cast<int64_t>(victim_cost) * (loudness + 1);
+                better = static_cast<int64_t>(cost) * (victim_loudness + 1) > static_cast<int64_t>(victim_cost) * (loudness + 1);
             }
             if (better) {
-                victim_k = k;
-                victim_tier = tier;
-                victim_cost = cost;
+                victim_k        = k;
+                victim_tier     = tier;
+                victim_cost     = cost;
                 victim_loudness = loudness;
             }
         }

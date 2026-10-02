@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 #include "testing.h"
 
 #include <cstdio>
@@ -75,13 +76,16 @@ constexpr CorpusEntry kCorpus[] = {
     {"SD/test_music/s3m/2nd_reality.s3m", Format::S3m},
 };
 
-bool load_by_format(formats::ByteSource src, memory::TrackMemory& mem, soundsinth::model::Song& song, Format fmt,
-                     const char** error_out) {
+bool load_by_format(formats::ByteSource src, memory::TrackMemory& mem, soundsinth::model::Song& song, Format fmt, const char** error_out) {
     switch (fmt) {
-        case Format::Mod: return formats::mod::load(src, mem, song, error_out);
-        case Format::S3m: return formats::s3m::load(src, mem, song, error_out);
-        case Format::Xm: return formats::xm::load(src, mem, song, error_out);
-        case Format::It: return formats::it::load(src, mem, song, error_out);
+        case Format::Mod:
+            return formats::mod::load(src, mem, song, error_out);
+        case Format::S3m:
+            return formats::s3m::load(src, mem, song, error_out);
+        case Format::Xm:
+            return formats::xm::load(src, mem, song, error_out);
+        case Format::It:
+            return formats::it::load(src, mem, song, error_out);
     }
     return false;
 }
@@ -92,8 +96,8 @@ void test_sequential_loads_with_poison_fill() {
     memory::TrackMemory mem;
     memory::track_memory_create(mem);
 
-    bool any_missing = false;
-    int loaded = 0;
+    bool any_missing    = false;
+    int loaded          = 0;
     int repeats_checked = 0;
 
     for (size_t i = 0; i < sizeof(kCorpus) / sizeof(kCorpus[0]); ++i) {
@@ -116,7 +120,7 @@ void test_sequential_loads_with_poison_fill() {
         formats::MemoryByteSource mbs(file.data(), static_cast<uint32_t>(file.size()));
         soundsinth::model::Song song;
         const char* error = nullptr;
-        const bool ok = load_by_format(mbs.as_byte_source(), mem, song, entry.format, &error);
+        const bool ok     = load_by_format(mbs.as_byte_source(), mem, song, entry.format, &error);
         if (!ok) {
             std::printf("  [%zu] %s: load() failed: %s\n", i, entry.path, error ? error : "(no message)");
         }
@@ -125,7 +129,8 @@ void test_sequential_loads_with_poison_fill() {
         // Повтор файла: песня и байты сэмплов - те же, что у загрузки в свежую
         // память, иначе от прошлых треков что-то перешло.
         bool repeat = false;
-        for (size_t j = 0; j < i; ++j) repeat = repeat || std::strcmp(kCorpus[j].path, entry.path) == 0;
+        for (size_t j = 0; j < i; ++j)
+            repeat = repeat || std::strcmp(kCorpus[j].path, entry.path) == 0;
         if (ok && repeat) {
             static memory::TrackMemory fresh;
             memory::track_memory_create(fresh);
@@ -134,8 +139,7 @@ void test_sequential_loads_with_poison_fill() {
             const bool fresh_ok = load_by_format(fresh_src.as_byte_source(), fresh, fresh_song, entry.format, nullptr);
             CHECK(fresh_ok);
             if (fresh_ok) {
-                song_compare::check_songs_equal(song, mem.psram, fresh_song, fresh.psram, &mem.sample_cache,
-                                                &fresh.sample_cache);
+                song_compare::check_songs_equal(song, mem.psram, fresh_song, fresh.psram, &mem.sample_cache, &fresh.sample_cache);
                 ++repeats_checked;
             }
             memory::track_memory_destroy(fresh);
@@ -151,10 +155,9 @@ void test_sequential_loads_with_poison_fill() {
     }
 
     if (any_missing) {
-        std::printf("  часть файлов корпуса не найдена — пропущены (запуск не из корня репозитория?)\n");
+        std::printf("  some corpus files were not found - skipped (not started from the repository root?)\n");
     }
-    std::printf("  успешно загружено %d/%zu файлов подряд в одном TrackMemory, повторов сверено %d\n", loaded,
-                sizeof(kCorpus) / sizeof(kCorpus[0]), repeats_checked);
+    std::printf("  %d/%zu files loaded in a row into one TrackMemory, repeats checked %d\n", loaded, sizeof(kCorpus) / sizeof(kCorpus[0]), repeats_checked);
 
     memory::track_memory_destroy(mem);
 }
@@ -162,8 +165,7 @@ void test_sequential_loads_with_poison_fill() {
 // Путь платы: run_session_load по метаданным, затем сэмплы по одному
 // (load_track_sample), как префетч и фоновая догрузка. Сэмпл, который не
 // лёг, - не провал трека, как на плате.
-bool board_load(formats::ByteSource src, memory::TrackMemory& mem, soundsinth::model::Song& song,
-                player::load::SessionLoadResult& result) {
+bool board_load(formats::ByteSource src, memory::TrackMemory& mem, soundsinth::model::Song& song, player::load::SessionLoadResult& result) {
     if (!player::load::run_session_load(src, mem, song, result, /*metadata_only=*/true)) return false;
     for (uint16_t i = 0; i < song.sample_count; ++i) {
         player::load::load_track_sample(result.format, src, mem, song, i);
@@ -183,9 +185,9 @@ void test_board_path_loads_with_reserve_flip() {
     memory::track_memory_create(mem);
     const uint32_t full = mem.psram.track_bytes;
 
-    int loaded = 0;
+    int loaded          = 0;
     int repeats_checked = 0;
-    int flips = 0;
+    int flips           = 0;
     for (size_t i = 0; i < sizeof(kCorpus) / sizeof(kCorpus[0]); ++i) {
         const CorpusEntry& entry = kCorpus[i];
         std::ifstream in(entry.path, std::ios::binary);
@@ -206,8 +208,7 @@ void test_board_path_loads_with_reserve_flip() {
         player::load::SessionLoadResult result;
         const bool ok = board_load(mbs.as_byte_source(), mem, song, result);
         if (!ok) {
-            std::printf("  [%zu] %s: run_session_load failed: %s\n", i, entry.path,
-                        result.error ? result.error : "(no message)");
+            std::printf("  [%zu] %s: run_session_load failed: %s\n", i, entry.path, result.error ? result.error : "(no message)");
         }
         CHECK(ok);
         CHECK(!mem.psram.free_list_broken);
@@ -215,7 +216,8 @@ void test_board_path_loads_with_reserve_flip() {
         ++loaded;
 
         bool repeat = false;
-        for (size_t j = 0; j < i; ++j) repeat = repeat || std::strcmp(kCorpus[j].path, entry.path) == 0;
+        for (size_t j = 0; j < i; ++j)
+            repeat = repeat || std::strcmp(kCorpus[j].path, entry.path) == 0;
         if (!repeat) continue;
         static memory::TrackMemory fresh;
         memory::track_memory_create(fresh);
@@ -227,14 +229,12 @@ void test_board_path_loads_with_reserve_flip() {
         if (fresh_ok) {
             CHECK(result.format == fresh_result.format);
             CHECK_EQ(result.total_frames, fresh_result.total_frames);
-            song_compare::check_songs_equal(song, mem.psram, fresh_song, fresh.psram, &mem.sample_cache,
-                                            &fresh.sample_cache);
+            song_compare::check_songs_equal(song, mem.psram, fresh_song, fresh.psram, &mem.sample_cache, &fresh.sample_cache);
             ++repeats_checked;
         }
         memory::track_memory_destroy(fresh);
     }
-    std::printf("  путём платы загружено %d, повторов сверено %d, резерв GS туда и обратно %d раз\n", loaded,
-                repeats_checked, flips);
+    std::printf("  loaded the board way %d, repeats checked %d, GS reserve there and back %d times\n", loaded, repeats_checked, flips);
 
     memory::track_memory_destroy(mem);
 }

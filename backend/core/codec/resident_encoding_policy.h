@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 #pragma once
 
 // Выбор резидентного кодека сэмпла, общий для S3M/IT/XM. MOD не нужен:
@@ -12,7 +13,7 @@
 namespace soundsinth::model {
 
 inline constexpr uint32_t kForceDownsampleSizeThresholdBytes = 1u * 1024u * 1024u; // 1 МБ, по размеру после кодирования
-inline constexpr uint32_t kForceDownsampleRateThresholdHz = 20000; // не трогать и так низкочастотные Amiga-сэмплы
+inline constexpr uint32_t kForceDownsampleRateThresholdHz    = 20000; // не трогать и так низкочастотные Amiga-сэмплы
 
 struct ResidentEncodingDecision {
     ResidentEncoding mode;
@@ -27,8 +28,7 @@ struct ResidentEncodingDecision {
 // allow_raw16 - решение на весь трек (choose_resident_encoding), поэтому не
 // зависит от порядка сэмплов: иначе один и тот же сэмпл кодировался бы
 // по-разному в зависимости от того, что грузилось перед ним.
-inline ResidentEncodingDecision decide_resident_encoding(bool is16bit, uint32_t length_samples, uint32_t c5_speed,
-                                                          bool allow_raw16 = false) {
+inline ResidentEncodingDecision decide_resident_encoding(bool is16bit, uint32_t length_samples, uint32_t c5_speed, bool allow_raw16 = false) {
     // 16 бит и место есть: хранить как есть, без потерь и без распаковки на
     // каждый выходной отсчёт. Прореживание не нужно: оно ради размера, а
     // размер проверен.
@@ -41,7 +41,7 @@ inline ResidentEncodingDecision decide_resident_encoding(bool is16bit, uint32_t 
         base_bytes = length_samples;
     } else {
         const uint32_t checkpoints = (length_samples + dpcm8::kCheckpointIntervalSamples - 1) / dpcm8::kCheckpointIntervalSamples;
-        base_bytes = length_samples + checkpoints * static_cast<uint32_t>(sizeof(dpcm8::Dpcm8Checkpoint));
+        base_bytes                 = length_samples + checkpoints * static_cast<uint32_t>(sizeof(dpcm8::Dpcm8Checkpoint));
     }
 
     const bool decimate = base_bytes > kForceDownsampleSizeThresholdBytes && c5_speed > kForceDownsampleRateThresholdHz;

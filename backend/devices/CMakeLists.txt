@@ -13,6 +13,8 @@ add_library(soundsinth_devices STATIC
     hid/joystick.cpp
     hid/usb_map.cpp
     hid/report_map.cpp
+    config/config_service.cpp
+    config/config_apply.cpp
 )
 
 # Корень включений - родительский каталог, как у ядра: пути вида

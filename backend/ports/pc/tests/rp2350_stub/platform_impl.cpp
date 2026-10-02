@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 // Платформа для кода платы, собираемого в тестах: часы и журнал.
 //
 // Часы двигает сам тест - правила по времени (отъём шины у ушедшего
@@ -15,15 +16,30 @@
 extern uint32_t g_test_time_us;
 extern char g_test_log[8192];
 
-uint32_t platform::mono_us() { return g_test_time_us; }
+// Место, где тест вклинивается внутрь чужого вызова. Часы спрашивают и
+// эмулятор карты посреди такта, и это единственный способ изобразить
+// вытеснение обработчика обработчиком, не заводя крюк в самом эмуляторе.
+// Крюк одноразовый: снимается до вызова, иначе он позвал бы сам себя.
+void (*g_mono_hook)() = nullptr;
+
+uint32_t platform::mono_us() {
+    if (g_mono_hook != nullptr) {
+        void (*hook)() = g_mono_hook;
+        g_mono_hook    = nullptr;
+        hook();
+    }
+    return g_test_time_us;
+}
 
 // Ожидание просто двигает часы теста.
-void platform::busy_wait(uint32_t us) { g_test_time_us += us; }
+void platform::busy_wait(uint32_t us) {
+    g_test_time_us += us;
+}
 
 void platform::debug_log(const char* msg) {
     std::fputs(msg, stdout);
     const size_t have = std::strlen(g_test_log);
-    const size_t add = std::strlen(msg);
+    const size_t add  = std::strlen(msg);
     if (have + add < sizeof(g_test_log)) std::memcpy(g_test_log + have, msg, add + 1);
 }
 

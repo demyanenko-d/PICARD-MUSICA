@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 #pragma once
 
 // Клавиатура ZX на порту 0xFE.
@@ -25,13 +26,13 @@
 
 namespace devices::hid {
 
-inline constexpr uint8_t kKeyboardPort = 0xFE;
-inline constexpr uint8_t kKeyboardRows = 8;
+inline constexpr uint8_t kKeyboardPort       = 0xfe;
+inline constexpr uint8_t kKeyboardRows       = 8;
 inline constexpr uint8_t kKeyboardKeysPerRow = 5;
 
 // Разряды 5..7 ответа: 5 не используется, 6 - вход магнитофона, 7 не
 // используется. Магнитофона нет, поэтому все три единицы.
-inline constexpr uint8_t kKeyboardIdleBits = 0xE0;
+inline constexpr uint8_t kKeyboardIdleBits = 0xe0;
 
 // Состояние матрицы: разряды 0..4 каждой строки, ноль - нажата.
 void keyboard_reset();

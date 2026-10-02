@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 #include "testing.h"
 
 #include <cstdio>
@@ -36,53 +37,54 @@ using soundsinth::model::VolumeColumnType;
 // этого PortaUp/PortaDown ничего не делают, см. .h).
 struct Fixture {
     soundsinth::model::Instrument instrument;
-    soundsinth::model::Envelope envelope;     // не подключена (instrument.volume_envelope==nullptr), пока тест явно не привяжет
-    soundsinth::model::Envelope pan_envelope; // то же самое, для instrument.panning_envelope
+    soundsinth::model::Envelope envelope; // не подключена (instrument.volume_envelope==nullptr), пока тест явно не привяжет
+    soundsinth::model::Envelope pan_envelope;   // то же самое, для instrument.panning_envelope
     soundsinth::model::Envelope pitch_envelope; // то же самое, для instrument.pitch_envelope
     soundsinth::model::SampleDescriptor sample;
     soundsinth::model::Song song;
     engine::ChannelState channels[1];
-    engine::PlayState ps; // персистентный: GlobalVolumeSlide (PlayState::global_volume_slide_*) должен пережить несколько tick()/dispatch_row() подряд, как в секвенсоре
+    engine::PlayState
+        ps; // персистентный: GlobalVolumeSlide (PlayState::global_volume_slide_*) должен пережить несколько tick()/dispatch_row() подряд, как в секвенсоре
     engine::DispatchContext ctx;
 
     explicit Fixture(FrequencyModel model) {
-        sample.length_samples = 1000;
-        sample.c5_speed = 8363;
-        sample.default_volume = 64;
+        sample.length_samples           = 1000;
+        sample.c5_speed                 = 8363;
+        sample.default_volume           = 64;
         instrument.default_sample_index = 0;
 
-        song.samples = &sample;
-        song.sample_count = 1;
-        song.instruments = &instrument;
+        song.samples          = &sample;
+        song.sample_count     = 1;
+        song.instruments      = &instrument;
         song.instrument_count = 1;
-        song.frequency_model = model;
+        song.frequency_model  = model;
 
         ctx.channels = channels;
-        ctx.song = &song;
-        ctx.ps = &ps;
+        ctx.song     = &song;
+        ctx.ps       = &ps;
     }
 
     PatternCell note_on(uint8_t note, Effect fx = Effect::None, uint8_t param = 0, SlideRate rate = SlideRate::PerTick) {
         PatternCell cell;
-        cell.note = note;
-        cell.instrument = 1;
-        cell.effect.type = fx;
+        cell.note         = note;
+        cell.instrument   = 1;
+        cell.effect.type  = fx;
         cell.effect.param = param;
-        cell.effect.rate = rate;
+        cell.effect.rate  = rate;
         return cell;
     }
 
     PatternCell empty_with_effect(Effect fx, uint8_t param, SlideRate rate = SlideRate::PerTick) {
         PatternCell cell;
-        cell.effect.type = fx;
+        cell.effect.type  = fx;
         cell.effect.param = param;
-        cell.effect.rate = rate;
+        cell.effect.rate  = rate;
         return cell;
     }
 
     PatternCell empty_with_volcol(soundsinth::model::VolumeColumnType vc_type, uint8_t vc_param) {
         PatternCell cell;
-        cell.volume.type = vc_type;
+        cell.volume.type  = vc_type;
         cell.volume.param = vc_param;
         return cell;
     }
@@ -91,8 +93,7 @@ struct Fixture {
 
     void tick(uint8_t tick_in_row) {
         ps.tick_in_row = tick_in_row;
-        engine::apply_continuous_effects(ps, channels, 1, song.quirks, song.frequency_model, engine::kQ8One,
-                                        ps.tick_in_row != 0);
+        engine::apply_continuous_effects(ps, channels, 1, song.quirks, song.frequency_model, engine::kQ8One, ps.tick_in_row != 0);
     }
 
     // Живой MIDI: строка равна тику, номер тика в строке всегда нулевой, а
@@ -100,7 +101,7 @@ struct Fixture {
     void live_tick() {
         ps.tick_in_row = 0;
         engine::apply_continuous_effects(ps, channels, 1, song.quirks, song.frequency_model, engine::kQ8One,
-                                        /*tick_slides=*/true);
+                                         /*tick_slides=*/true);
     }
 
     // NoteDelay (см. .cpp): доигрывает отложенную ячейку, если она есть и
@@ -147,7 +148,7 @@ void test_porta_fine_applies_once_immediately_not_per_tick() {
     f.dispatch_row(f.note_on(48, Effect::PortaDown, 5, SlideRate::Fine));
 
     CHECK_EQ(f.channels[0].period, static_cast<uint16_t>(428 + 5)); // применилось сразу, внутри dispatch_row_effects
-    CHECK(!f.channels[0].porta_active);                              // Fine не взводит continuous-путь
+    CHECK(!f.channels[0].porta_active);                             // Fine не взводит continuous-путь
 
     f.tick(1); // не должно ничего сдвинуть дальше
     CHECK_EQ(f.channels[0].period, static_cast<uint16_t>(428 + 5));
@@ -180,7 +181,8 @@ void test_porta_clamps_to_amiga_period_table_bounds() {
         Fixture f(FrequencyModel::Amiga);
         f.song.quirks |= soundsinth::model::kQuirkAmigaLimits;
         f.dispatch_row(f.note_on(48, Effect::PortaUp, 250, SlideRate::PerTick));
-        for (int i = 0; i < 10; ++i) f.tick(1); // многократно - заведомо за границу
+        for (int i = 0; i < 10; ++i)
+            f.tick(1); // многократно - заведомо за границу
         CHECK_EQ(f.channels[0].period, soundsinth::model::kAmigaPeriodTable[35]);
     }
     // Вниз (период увеличивается) - клэмп на максимум таблицы (856).
@@ -188,21 +190,24 @@ void test_porta_clamps_to_amiga_period_table_bounds() {
         Fixture f(FrequencyModel::Amiga);
         f.song.quirks |= soundsinth::model::kQuirkAmigaLimits;
         f.dispatch_row(f.note_on(48, Effect::PortaDown, 250, SlideRate::PerTick));
-        for (int i = 0; i < 10; ++i) f.tick(1);
+        for (int i = 0; i < 10; ++i)
+            f.tick(1);
         CHECK_EQ(f.channels[0].period, soundsinth::model::kAmigaPeriodTable[0]);
     }
     // Без квирка - дальше таблицы: 428 + 10 * 250.
     {
         Fixture f(FrequencyModel::Amiga);
         f.dispatch_row(f.note_on(48, Effect::PortaDown, 250, SlideRate::PerTick));
-        for (int i = 0; i < 10; ++i) f.tick(1);
+        for (int i = 0; i < 10; ++i)
+            f.tick(1);
         CHECK_EQ(f.channels[0].period, static_cast<uint16_t>(428 + 10 * 250));
     }
     // Вверх без квирка - до 1.
     {
         Fixture f(FrequencyModel::Amiga);
         f.dispatch_row(f.note_on(48, Effect::PortaUp, 250, SlideRate::PerTick));
-        for (int i = 0; i < 10; ++i) f.tick(1);
+        for (int i = 0; i < 10; ++i)
+            f.tick(1);
         CHECK_EQ(f.channels[0].period, static_cast<uint16_t>(1));
     }
 }
@@ -280,13 +285,14 @@ void test_tone_porta_does_not_retrigger_and_converges_to_target_without_overshoo
     const uint16_t target = soundsinth::model::amiga_note_to_period(60); // на октаву выше - период меньше
     CHECK(target < 428);
 
-    f.dispatch_row(f.note_on(60, Effect::TonePorta, 10)); // ретриггер должен быть подавлен
-    CHECK(!f.channels[0].triggered_this_row);              // не ретриггернуло
+    f.dispatch_row(f.note_on(60, Effect::TonePorta, 10));       // ретриггер должен быть подавлен
+    CHECK(!f.channels[0].triggered_this_row);                   // не ретриггернуло
     CHECK_EQ(f.channels[0].period, static_cast<uint16_t>(428)); // сам тик 0 ещё не сдвинул период
     CHECK_EQ(f.channels[0].tone_porta_target, target);
     CHECK(f.channels[0].tone_porta_active);
 
-    for (int i = 0; i < 30; ++i) f.tick(1); // заведомо больше, чем нужно для схождения
+    for (int i = 0; i < 30; ++i)
+        f.tick(1);                          // заведомо больше, чем нужно для схождения
     CHECK_EQ(f.channels[0].period, target); // сошёлся на цели, не перепрыгнул её
 }
 
@@ -302,7 +308,7 @@ void test_tone_porta_vol_slide_converges_and_applies_volume_slide() {
     f.dispatch_row(f.note_on(48, Effect::TonePorta, 10)); // заводим порто-память (10) обычным TonePorta
     const uint16_t target = soundsinth::model::amiga_note_to_period(60);
     f.dispatch_row(f.note_on(60, Effect::TonePortaVolSlide, 0x05)); // volume slide down=5, без своей porta-скорости
-    CHECK(!f.channels[0].triggered_this_row); // ретриггер подавлен, как у обычного TonePorta
+    CHECK(!f.channels[0].triggered_this_row);                       // ретриггер подавлен, как у обычного TonePorta
     CHECK_EQ(f.channels[0].tone_porta_target, target);
     CHECK(f.channels[0].tone_porta_active);
     CHECK(f.channels[0].volume_slide_active);
@@ -310,9 +316,10 @@ void test_tone_porta_vol_slide_converges_and_applies_volume_slide() {
 
     f.tick(1); // одного тика достаточно, чтобы проверить, что оба слайда движутся
     CHECK_EQ(f.channels[0].volume, static_cast<uint8_t>(59)); // 64-5 - volume-слайд применился
-    CHECK(f.channels[0].period != target);                    // период ещё сходится (скорость 10, разница явно больше)
+    CHECK(f.channels[0].period != target); // период ещё сходится (скорость 10, разница явно больше)
 
-    for (int i = 0; i < 30; ++i) f.tick(1); // заведомо больше, чем нужно для схождения периода
+    for (int i = 0; i < 30; ++i)
+        f.tick(1);                          // заведомо больше, чем нужно для схождения периода
     CHECK_EQ(f.channels[0].period, target); // порто всё равно сошёлся: скорость (10) взята из памяти PortaUp/Down/TonePorta
 }
 
@@ -340,7 +347,7 @@ void test_tone_porta_resets_volume_to_sample_default_without_retriggering() {
     // ретриггер подавлен, но громкость должна вернуться к громкости сэмпла
     // (64), а не остаться на 20.
     f.dispatch_row(f.note_on(60, Effect::TonePorta, 10));
-    CHECK(!f.channels[0].triggered_this_row); // ретриггер по-прежнему подавлен
+    CHECK(!f.channels[0].triggered_this_row);                 // ретриггер по-прежнему подавлен
     CHECK_EQ(f.channels[0].volume, static_cast<uint8_t>(64)); // но громкость сброшена на громкость сэмпла
 }
 
@@ -433,8 +440,8 @@ void test_arpeggio_with_volume_column_vibrato() {
 
     Fixture f(FrequencyModel::Linear);
     f.dispatch_row(f.note_on(48, Effect::SetVibratoWaveform, 2));
-    PatternCell cell = f.empty_with_effect(Effect::Arpeggio, 0x40);
-    cell.volume.type = VolumeColumnType::VibratoDepth;
+    PatternCell cell  = f.empty_with_effect(Effect::Arpeggio, 0x40);
+    cell.volume.type  = VolumeColumnType::VibratoDepth;
     cell.volume.param = 8; // глубина 8 << 2 = 32
     f.dispatch_row(cell);
     f.tick(1); // фаза арпеджио 1: +4 полутона
@@ -456,7 +463,7 @@ void test_set_vibrato_waveform_selects_square_instead_of_sine() {
     Fixture f(FrequencyModel::Amiga);
     f.dispatch_row(f.note_on(48, Effect::Vibrato, 0x44)); // speed=4, depth=4(<<2=16)
     f.tick(0);
-    CHECK_EQ(f.channels[0].pitch_offset, static_cast<int32_t>(0)); // синус: table[0]==0
+    CHECK_EQ(f.channels[0].pitch_offset, static_cast<int32_t>(0));     // синус: table[0]==0
     CHECK_EQ(f.channels[0].vibrato_waveform, static_cast<uint8_t>(0)); // умолчание - синус
 
     Fixture g(FrequencyModel::Amiga);
@@ -489,8 +496,7 @@ void test_lfo_waveform_no_retrigger_bit() {
     CHECK_EQ(f.channels[0].vibrato_phase, static_cast<uint8_t>(0));
 
     Fixture it(FrequencyModel::Linear);
-    it.song.quirks = soundsinth::model::kQuirkFineSlideInParam | soundsinth::model::kQuirkItEffectBeforeVolColumn |
-                     soundsinth::model::kQuirkItVibratoTable;
+    it.song.quirks = soundsinth::model::kQuirkFineSlideInParam | soundsinth::model::kQuirkItEffectBeforeVolColumn | soundsinth::model::kQuirkItVibratoTable;
     it.dispatch_row(it.note_on(48, Effect::Tremolo, 0x44));
     it.tick(1);
     it.dispatch_row(it.note_on(50));
@@ -674,13 +680,14 @@ void test_tone_porta_converges_to_target_under_linear_frequency_model() {
     CHECK_EQ(f.channels[0].linear_pitch, static_cast<int32_t>(0));
 
     constexpr int32_t kTarget = 12 * engine::kLinearAmountUnitsPerSemitone; // октава выше 48 = +768
-    f.dispatch_row(f.note_on(60, Effect::TonePorta, 10)); // ретриггер должен быть подавлен
+    f.dispatch_row(f.note_on(60, Effect::TonePorta, 10));                   // ретриггер должен быть подавлен
     CHECK(!f.channels[0].triggered_this_row);
     CHECK_EQ(f.channels[0].linear_pitch, static_cast<int32_t>(0)); // тик 0 ещё не сдвинул
     CHECK_EQ(f.channels[0].linear_tone_porta_target, kTarget);
     CHECK(f.channels[0].tone_porta_active);
 
-    for (int i = 0; i < 30; ++i) f.tick(1); // заведомо больше, чем нужно для схождения
+    for (int i = 0; i < 30; ++i)
+        f.tick(1);                                 // заведомо больше, чем нужно для схождения
     CHECK_EQ(f.channels[0].linear_pitch, kTarget); // сошёлся на цели, не перепрыгнул её
 }
 
@@ -693,18 +700,18 @@ void test_vibrato_phase_holds_on_tick_zero_and_does_not_touch_period() {
     std::printf("test_vibrato_phase_holds_on_tick_zero_and_does_not_touch_period\n");
 
     Fixture f(FrequencyModel::Amiga);
-    f.dispatch_row(f.note_on(48, Effect::Vibrato, 0x44)); // speed=4, depth=4(<<2=16)
+    f.dispatch_row(f.note_on(48, Effect::Vibrato, 0x44));           // speed=4, depth=4(<<2=16)
     CHECK_EQ(f.channels[0].vibrato_phase, static_cast<uint8_t>(0)); // сброшен триггером
     CHECK(f.channels[0].vibrato_active);
 
     f.tick(0);
-    CHECK_EQ(f.channels[0].pitch_offset, static_cast<int16_t>(0)); // table[0]==0
+    CHECK_EQ(f.channels[0].pitch_offset, static_cast<int16_t>(0));  // table[0]==0
     CHECK_EQ(f.channels[0].vibrato_phase, static_cast<uint8_t>(0)); // тик 0 - фаза стоит
     CHECK_EQ(f.channels[0].period, static_cast<uint16_t>(428));     // сам period не тронут
 
     f.tick(1);
     CHECK_EQ(f.channels[0].vibrato_phase, static_cast<uint8_t>(4)); // фаза продвинулась на speed
-    f.tick(2); // table[4]==97, offset = 97*16/512 = 3 (целочисленно)
+    f.tick(2);                                                      // table[4]==97, offset = 97*16/512 = 3 (целочисленно)
     CHECK_EQ(f.channels[0].pitch_offset, static_cast<int16_t>(3));
     f.tick(0); // новый тик 0: действует фаза 8, сама не двигается
     CHECK_EQ(f.channels[0].vibrato_phase, static_cast<uint8_t>(8));
@@ -748,7 +755,7 @@ void test_vibrato_speed_and_depth_memory_are_independent() {
     CHECK_EQ(f.channels[0].vibrato_speed, static_cast<uint8_t>(6));
     CHECK_EQ(f.channels[0].vibrato_depth, static_cast<uint8_t>(16));
 
-    f.dispatch_row(f.empty_with_effect(Effect::Vibrato, 0x08)); // speed=0(повторяет 6), depth=8(<<2=32)
+    f.dispatch_row(f.empty_with_effect(Effect::Vibrato, 0x08));      // speed=0(повторяет 6), depth=8(<<2=32)
     CHECK_EQ(f.channels[0].vibrato_speed, static_cast<uint8_t>(6));  // не изменилась
     CHECK_EQ(f.channels[0].vibrato_depth, static_cast<uint8_t>(32)); // изменилась
 }
@@ -812,9 +819,9 @@ void test_vibrato_vol_slide_continues_vibrato_and_applies_volume_slide() {
 
     f.dispatch_row(f.empty_with_effect(Effect::VibratoVolSlide, 0x05)); // volume slide down=5 (volume уже на максимуме 64, up сразу упёрся бы в потолок)
     CHECK(f.channels[0].vibrato_active);                                // вибрато продолжается
-    CHECK_EQ(f.channels[0].vibrato_speed, speed_before);                // память не тронута
+    CHECK_EQ(f.channels[0].vibrato_speed, speed_before); // память не тронута
     CHECK_EQ(f.channels[0].vibrato_depth, depth_before);
-    CHECK_EQ(f.channels[0].vibrato_phase, phase_before);                // фаза не сброшена (это не ретриггер)
+    CHECK_EQ(f.channels[0].vibrato_phase, phase_before); // фаза не сброшена (это не ретриггер)
     CHECK(f.channels[0].volume_slide_active);
     CHECK_EQ(f.channels[0].volume_slide_memory, static_cast<uint8_t>(0x05));
 
@@ -859,7 +866,7 @@ void test_fine_slides_in_param() {
         CHECK_EQ(f.channels[0].period, static_cast<uint16_t>(428 + 3));
         f.tick(1);
         CHECK_EQ(f.channels[0].period, static_cast<uint16_t>(428 + 3)); // на тиках 1.. не меняется
-        f.dispatch_row(f.empty_with_effect(Effect::PortaDown, 0x00)); // E00 - сырой EF3 из памяти
+        f.dispatch_row(f.empty_with_effect(Effect::PortaDown, 0x00));   // E00 - сырой EF3 из памяти
         CHECK_EQ(f.channels[0].period, static_cast<uint16_t>(428 + 6));
         f.dispatch_row(f.empty_with_effect(Effect::PortaDown, 0xE3)); // EE3 - (3 + 2) / 4 = 1
         CHECK_EQ(f.channels[0].period, static_cast<uint16_t>(428 + 7));
@@ -896,8 +903,8 @@ void test_fine_slides_in_param() {
     {
         // IT без Compatible Gxx: G20 пишет и память Fxx - F00 скользит на 0x20 * 4 за тик.
         Fixture f(FrequencyModel::Linear);
-        f.song.quirks = soundsinth::model::kQuirkFineSlideInParam | soundsinth::model::kQuirkItEffectBeforeVolColumn |
-                        soundsinth::model::kQuirkGxxSharesPortaMemory;
+        f.song.quirks =
+            soundsinth::model::kQuirkFineSlideInParam | soundsinth::model::kQuirkItEffectBeforeVolColumn | soundsinth::model::kQuirkGxxSharesPortaMemory;
         f.dispatch_row(f.note_on(48));
         f.dispatch_row(f.empty_with_effect(Effect::TonePorta, 0x20));
         f.dispatch_row(f.empty_with_effect(Effect::PortaUp, 0x00));
@@ -1010,7 +1017,7 @@ void test_midi_dispatch() {
         CHECK_EQ(h.channels[0].bend_offset, static_cast<int32_t>(64));
         Fixture k(FrequencyModel::Linear);
         k.ps.speed = 6;
-        k.dispatch_row(k.note_on(48, Effect::SetPitchOffset, 58)); // чужой бенд слота: -70
+        k.dispatch_row(k.note_on(48, Effect::SetPitchOffset, 58));  // чужой бенд слота: -70
         k.dispatch_row(k.note_on(50, Effect::SetPitchOffset, 128)); // новая нота со своим 0
         CHECK_EQ(k.channels[0].bend_offset, static_cast<int32_t>(0));
         CHECK_EQ(k.channels[0].bend_step, static_cast<int16_t>(0));
@@ -1019,11 +1026,11 @@ void test_midi_dispatch() {
         // (б) Срез от силы удара: срез инструмента 40 + (громкость - 32) * 32 / 32.
         for (uint8_t vol : {uint8_t(64), uint8_t(0)}) {
             Fixture f(FrequencyModel::Linear);
-            f.instrument.filter_cutoff = 0x80 | 40;
+            f.instrument.filter_cutoff      = 0x80 | 40;
             f.instrument.velocity_to_cutoff = 32;
-            PatternCell cell = f.note_on(60);
-            cell.volume.type = VolumeColumnType::SetVolume;
-            cell.volume.param = vol;
+            PatternCell cell                = f.note_on(60);
+            cell.volume.type                = VolumeColumnType::SetVolume;
+            cell.volume.param               = vol;
             f.dispatch_row(cell);
             CHECK_EQ(f.channels[0].filter_cutoff, static_cast<uint8_t>(vol == 64 ? 72 : 8));
         }
@@ -1032,34 +1039,35 @@ void test_midi_dispatch() {
         // (в) Срез не ниже основного тона: 16 делений на октаву, нота 72 -
         // 16 * 24 / 12 + запас в октаву 16 = 48.
         Fixture f(FrequencyModel::Linear);
-        f.song.filter_follows_note = true;
+        f.song.filter_follows_note     = true;
         f.song.filter_units_per_octave = 16;
-        f.instrument.filter_cutoff = 0x80 | 40;
+        f.instrument.filter_cutoff     = 0x80 | 40;
         f.dispatch_row(f.note_on(72));
-        CHECK_EQ(f.channels[0].filter_cutoff,
-                 static_cast<uint8_t>(16 * 24 / 12 + SOUNDSINTH_MIDI_FILTER_NOTE_MARGIN * 16 / 24));
+        CHECK_EQ(f.channels[0].filter_cutoff, static_cast<uint8_t>(16 * 24 / 12 + SOUNDSINTH_MIDI_FILTER_NOTE_MARGIN * 16 / 24));
     }
     for (uint32_t rate : {0u, 60000u}) {
         // (г) Затухание в децибелах: нулевое не опускает громкость вовсе, 60000
         // обнуляется на пороге 256 на 63-м тике и снимает голос; огибающая
         // отпущенной ноты стоит.
         Fixture f(FrequencyModel::Linear);
-        f.song.quirks = soundsinth::model::kQuirkFadeoutExponential;
-        f.envelope.enabled = true;
-        f.envelope.sustain_enabled = true;
-        f.envelope.point_count = 2;
-        f.envelope.points[0] = soundsinth::model::EnvelopePoint{0, 64};
-        f.envelope.points[1] = soundsinth::model::EnvelopePoint{10, 0};
-        f.envelope.sustain_point = 0;
-        f.envelope.sustain_end = 0;
+        f.song.quirks                = soundsinth::model::kQuirkFadeoutExponential;
+        f.envelope.enabled           = true;
+        f.envelope.sustain_enabled   = true;
+        f.envelope.point_count       = 2;
+        f.envelope.points[0]         = soundsinth::model::EnvelopePoint{0, 64};
+        f.envelope.points[1]         = soundsinth::model::EnvelopePoint{10, 0};
+        f.envelope.sustain_point     = 0;
+        f.envelope.sustain_end       = 0;
         f.instrument.volume_envelope = &f.envelope;
-        f.instrument.fadeout_rate = rate;
+        f.instrument.fadeout_rate    = rate;
         f.dispatch_row(f.note_on(48));
-        for (int i = 0; i < 3; ++i) f.tick(0);
+        for (int i = 0; i < 3; ++i)
+            f.tick(0);
         f.dispatch_row(f.empty_with_effect(Effect::KeyOff, 0));
         const uint16_t env_tick = f.channels[0].envelope_tick;
-        const int ticks = rate == 0 ? 100 : 62;
-        for (int i = 0; i < ticks; ++i) f.tick(0);
+        const int ticks         = rate == 0 ? 100 : 62;
+        for (int i = 0; i < ticks; ++i)
+            f.tick(0);
         CHECK_EQ(f.channels[0].envelope_tick, env_tick);
         CHECK(f.channels[0].voice_active);
         if (rate == 0) {
@@ -1075,14 +1083,15 @@ void test_midi_dispatch() {
         // (г) Огибающая дошла до нуля у удержанной ноты - голос жив; после
         // отпускания на нуле - снят.
         Fixture f(FrequencyModel::Linear);
-        f.song.quirks = soundsinth::model::kQuirkFadeoutExponential;
-        f.envelope.enabled = true;
-        f.envelope.point_count = 2;
-        f.envelope.points[0] = soundsinth::model::EnvelopePoint{0, 64};
-        f.envelope.points[1] = soundsinth::model::EnvelopePoint{10, 0};
+        f.song.quirks                = soundsinth::model::kQuirkFadeoutExponential;
+        f.envelope.enabled           = true;
+        f.envelope.point_count       = 2;
+        f.envelope.points[0]         = soundsinth::model::EnvelopePoint{0, 64};
+        f.envelope.points[1]         = soundsinth::model::EnvelopePoint{10, 0};
         f.instrument.volume_envelope = &f.envelope;
         f.dispatch_row(f.note_on(48));
-        for (int i = 0; i < 12; ++i) f.tick(0);
+        for (int i = 0; i < 12; ++i)
+            f.tick(0);
         CHECK_EQ(f.channels[0].envelope_volume, static_cast<uint8_t>(0));
         CHECK(f.channels[0].voice_active);
         f.dispatch_row(f.empty_with_effect(Effect::KeyOff, 0));
@@ -1105,39 +1114,43 @@ void test_it_fade_rules() {
     fade.note = soundsinth::model::kNoteFade;
     {
         Fixture f(FrequencyModel::Linear);
-        f.song.quirks = soundsinth::model::kQuirkItEnvelopeSustainLoop;
-        f.envelope.enabled = true;
-        f.envelope.point_count = 2;
-        f.envelope.points[0] = EnvelopePoint{0, 64};
-        f.envelope.points[1] = EnvelopePoint{4, 64};
+        f.song.quirks                = soundsinth::model::kQuirkItEnvelopeSustainLoop;
+        f.envelope.enabled           = true;
+        f.envelope.point_count       = 2;
+        f.envelope.points[0]         = EnvelopePoint{0, 64};
+        f.envelope.points[1]         = EnvelopePoint{4, 64};
         f.instrument.volume_envelope = &f.envelope;
-        f.instrument.fadeout_rate = 1024;
+        f.instrument.fadeout_rate    = 1024;
         f.dispatch_row(f.note_on(48));
-        for (int i = 0; i < 3; ++i) f.tick(0);
+        for (int i = 0; i < 3; ++i)
+            f.tick(0);
         CHECK(!f.channels[0].note_fading);
         CHECK_EQ(f.channels[0].fadeout_level, 65536u);
-        for (int i = 0; i < 10; ++i) f.tick(0);
+        for (int i = 0; i < 10; ++i)
+            f.tick(0);
         CHECK(f.channels[0].note_fading);
         CHECK(!f.channels[0].key_released);
         CHECK(f.channels[0].fadeout_level < 65536u);
     }
     for (const PatternCell* cell : {&off, &fade}) {
         Fixture f(FrequencyModel::Linear);
-        f.song.quirks = soundsinth::model::kQuirkItEnvelopeSustainLoop;
-        f.envelope.enabled = true;
-        f.envelope.sustain_enabled = true;
-        f.envelope.point_count = 2;
-        f.envelope.points[0] = EnvelopePoint{0, 64};
-        f.envelope.points[1] = EnvelopePoint{10, 64};
+        f.song.quirks                = soundsinth::model::kQuirkItEnvelopeSustainLoop;
+        f.envelope.enabled           = true;
+        f.envelope.sustain_enabled   = true;
+        f.envelope.point_count       = 2;
+        f.envelope.points[0]         = EnvelopePoint{0, 64};
+        f.envelope.points[1]         = EnvelopePoint{10, 64};
         f.instrument.volume_envelope = &f.envelope;
-        f.instrument.fadeout_rate = 1024;
+        f.instrument.fadeout_rate    = 1024;
         f.dispatch_row(f.note_on(48));
-        for (int i = 0; i < 3; ++i) f.tick(0);
+        for (int i = 0; i < 3; ++i)
+            f.tick(0);
         f.dispatch_row(*cell);
         const bool is_off = cell == &off;
         CHECK_EQ(f.channels[0].key_released, is_off);
         CHECK_EQ(f.channels[0].note_fading, !is_off);
-        for (int i = 0; i < 15; ++i) f.tick(0);
+        for (int i = 0; i < 15; ++i)
+            f.tick(0);
         CHECK(f.channels[0].note_fading);
         if (!is_off) CHECK_EQ(f.channels[0].envelope_tick, static_cast<uint16_t>(0)); // удержание на точке 0
     }
@@ -1146,7 +1159,8 @@ void test_it_fade_rules() {
         f.song.quirks = soundsinth::model::kQuirkItEnvelopeSustainLoop;
         f.dispatch_row(f.note_on(48));
         f.dispatch_row(off);
-        for (int i = 0; i < 10; ++i) f.tick(0);
+        for (int i = 0; i < 10; ++i)
+            f.tick(0);
         CHECK(f.channels[0].voice_active);
         CHECK(!f.channels[0].stop_voice_pending);
         CHECK_EQ(f.channels[0].fadeout_level, 65536u);
@@ -1159,7 +1173,10 @@ void test_it_fade_rules() {
 void test_lone_instrument_restores_volume() {
     std::printf("test_lone_instrument_restores_volume\n");
     using soundsinth::model::QuirkFlags;
-    struct Case { QuirkFlags quirks; uint8_t want; };
+    struct Case {
+        QuirkFlags quirks;
+        uint8_t want;
+    };
     const Case cases[] = {
         {0, 64},
         {soundsinth::model::kQuirkItEffectBeforeVolColumn, 64},
@@ -1176,7 +1193,7 @@ void test_lone_instrument_restores_volume() {
         f.dispatch_row(lone);
         CHECK_EQ(f.channels[0].volume, c.want);
         CHECK(!f.channels[0].triggered_this_row);
-        lone.volume.type = VolumeColumnType::SetVolume;
+        lone.volume.type  = VolumeColumnType::SetVolume;
         lone.volume.param = 20;
         f.dispatch_row(lone);
         CHECK_EQ(f.channels[0].volume, static_cast<uint8_t>(20));
@@ -1194,7 +1211,7 @@ void test_retrigger_memory_and_counter() {
         f.ps.speed = 6;
         std::vector<int> fired;
         const uint8_t first = it ? 0x43 : 0x03;
-        const uint8_t next = it ? 0x00 : 0x03;
+        const uint8_t next  = it ? 0x00 : 0x03;
         for (int row = 0; row < 3; ++row) {
             if (row == 0) {
                 f.dispatch_row(f.note_on(48, Effect::Retrigger, first));
@@ -1263,7 +1280,7 @@ void test_glissando_linear_grid_with_finetune() {
             f.sample.finetune = ft;
             f.dispatch_row(f.note_on(note));
             engine::ChannelState& cs = f.channels[0];
-            const int32_t grid = cs.linear_pitch;
+            const int32_t grid       = cs.linear_pitch;
             if (grid < 0) ++negative;
             CHECK_EQ(engine::glissando_linear_pitch(cs, ft, true), grid);
             CHECK_EQ(engine::glissando_linear_pitch(cs, ft, false), grid);
@@ -1285,15 +1302,15 @@ void test_envelope_loop_end_by_format() {
     std::printf("test_envelope_loop_end_by_format\n");
     for (bool it : {false, true}) {
         Fixture f(FrequencyModel::Linear);
-        f.song.quirks = it ? soundsinth::model::kQuirkItEnvelopeSustainLoop : soundsinth::model::kQuirkXmVolColumnBeforeEffect;
-        f.envelope.enabled = true;
-        f.envelope.loop_enabled = true;
-        f.envelope.point_count = 3;
-        f.envelope.points[0] = soundsinth::model::EnvelopePoint{0, 0};
-        f.envelope.points[1] = soundsinth::model::EnvelopePoint{2, 64};
-        f.envelope.points[2] = soundsinth::model::EnvelopePoint{4, 0};
-        f.envelope.loop_start = 0;
-        f.envelope.loop_end = 1;
+        f.song.quirks                = it ? soundsinth::model::kQuirkItEnvelopeSustainLoop : soundsinth::model::kQuirkXmVolColumnBeforeEffect;
+        f.envelope.enabled           = true;
+        f.envelope.loop_enabled      = true;
+        f.envelope.point_count       = 3;
+        f.envelope.points[0]         = soundsinth::model::EnvelopePoint{0, 0};
+        f.envelope.points[1]         = soundsinth::model::EnvelopePoint{2, 64};
+        f.envelope.points[2]         = soundsinth::model::EnvelopePoint{4, 0};
+        f.envelope.loop_start        = 0;
+        f.envelope.loop_end          = 1;
         f.instrument.volume_envelope = &f.envelope;
         f.dispatch_row(f.note_on(48));
         const uint8_t want_xm[4] = {0, 32, 0, 32};
@@ -1313,7 +1330,7 @@ void test_xm_retrigger_ft2() {
     std::printf("test_xm_retrigger_ft2\n");
     Fixture f(FrequencyModel::Linear);
     f.song.quirks = soundsinth::model::kQuirkXmVolColumnBeforeEffect;
-    f.ps.speed = 6;
+    f.ps.speed    = 6;
     std::vector<int> fired;
     const uint8_t params[3] = {0x43, 0x40, 0x03};
     for (int row = 0; row < 3; ++row) {
@@ -1394,9 +1411,9 @@ void test_arpeggio_cycles_period_amiga() {
     CHECK_EQ(f.channels[0].arpeggio_x, static_cast<uint8_t>(3));
     CHECK_EQ(f.channels[0].arpeggio_y, static_cast<uint8_t>(7));
 
-    const uint16_t base_period = f.channels[0].period; // note=48
-    const uint16_t period_x = soundsinth::model::amiga_note_to_period(51); // 48+3
-    const uint16_t period_y = soundsinth::model::amiga_note_to_period(55); // 48+7
+    const uint16_t base_period = f.channels[0].period;                        // note=48
+    const uint16_t period_x    = soundsinth::model::amiga_note_to_period(51); // 48+3
+    const uint16_t period_y    = soundsinth::model::amiga_note_to_period(55); // 48+7
 
     f.tick(0); // phase 0 -> база
     CHECK_EQ(f.channels[0].pitch_offset, static_cast<int32_t>(0));
@@ -1521,8 +1538,8 @@ void test_volume_column_set_volume_and_slide_up() {
     std::printf("test_volume_column_set_volume_and_slide_up\n");
 
     Fixture f(FrequencyModel::Amiga);
-    PatternCell cell = f.note_on(48);
-    cell.volume.type = VolumeColumnType::SetVolume;
+    PatternCell cell  = f.note_on(48);
+    cell.volume.type  = VolumeColumnType::SetVolume;
     cell.volume.param = 50;
     f.dispatch_row(cell);
     CHECK_EQ(f.channels[0].volume, static_cast<uint8_t>(50)); // не default_volume(64) сэмпла - переопределено volume-колонкой
@@ -1552,8 +1569,8 @@ void test_surround_then_volume_column_panning() {
             Fixture f(FrequencyModel::Linear);
             if (it) f.song.quirks |= soundsinth::model::kQuirkItEffectBeforeVolColumn;
             if (voice) f.dispatch_row(f.note_on(48));
-            PatternCell cell = f.empty_with_volcol(VolumeColumnType::SetPanning, 10);
-            cell.effect.type = Effect::SoundControl;
+            PatternCell cell  = f.empty_with_volcol(VolumeColumnType::SetPanning, 10);
+            cell.effect.type  = Effect::SoundControl;
             cell.effect.param = 0x01;
             f.dispatch_row(cell);
             CHECK(!f.channels[0].surround);
@@ -1596,9 +1613,9 @@ void test_volume_column_tone_porta_xm_scale_and_suppresses_retrigger() {
     std::printf("test_volume_column_tone_porta_xm_scale_and_suppresses_retrigger\n");
 
     Fixture f(FrequencyModel::Amiga);
-    f.dispatch_row(f.note_on(48)); // обычный триггер, period=428
-    PatternCell cell = f.note_on(60); // новая нота + volcol-toneporta - ретриггер должен быть подавлен
-    cell.volume.type = VolumeColumnType::TonePorta;
+    f.dispatch_row(f.note_on(48));     // обычный триггер, period=428
+    PatternCell cell  = f.note_on(60); // новая нота + volcol-toneporta - ретриггер должен быть подавлен
+    cell.volume.type  = VolumeColumnType::TonePorta;
     cell.volume.param = 4; // 4*16=64
     f.dispatch_row(cell);
     CHECK_EQ(f.channels[0].period, static_cast<uint16_t>(428)); // не ретриггернуто - период на этой строке не изменился
@@ -1616,8 +1633,8 @@ void test_volume_column_tone_porta_it_scale_uses_lookup_table() {
     Fixture f(FrequencyModel::Amiga);
     f.song.quirks |= soundsinth::model::kQuirkItEffectBeforeVolColumn | soundsinth::model::kQuirkItVolColumnPortaTable;
     f.dispatch_row(f.note_on(48));
-    PatternCell cell = f.note_on(60);
-    cell.volume.type = VolumeColumnType::TonePorta;
+    PatternCell cell  = f.note_on(60);
+    cell.volume.type  = VolumeColumnType::TonePorta;
     cell.volume.param = 4; // kItPortaVolCmdTable[4]==16, а не 4*16=64, как у XM
     f.dispatch_row(cell);
     CHECK_EQ(f.channels[0].porta_memory, static_cast<uint16_t>(16));
@@ -1631,9 +1648,9 @@ void test_volume_column_offset_scales_by_2048() {
 
     Fixture f(FrequencyModel::Amiga);
     f.sample.length_samples = 100000; // достаточно длинный, чтобы 3*2048 не вышло за предел
-    PatternCell cell = f.note_on(48);
-    cell.volume.type = VolumeColumnType::Offset;
-    cell.volume.param = 3;
+    PatternCell cell        = f.note_on(48);
+    cell.volume.type        = VolumeColumnType::Offset;
+    cell.volume.param       = 3;
     f.dispatch_row(cell);
     CHECK_EQ(f.channels[0].trigger_sample_offset, static_cast<uint32_t>(3 * 2048));
 }
@@ -1846,7 +1863,11 @@ void test_arpeggio_memory_it_s3m() {
 void test_volume_slide_both_nibbles_by_format() {
     std::printf("test_volume_slide_both_nibbles_by_format\n");
     using soundsinth::model::QuirkFlags;
-    struct Case { QuirkFlags quirks; uint8_t param; uint8_t want; };
+    struct Case {
+        QuirkFlags quirks;
+        uint8_t param;
+        uint8_t want;
+    };
     const Case cases[] = {
         {soundsinth::model::kQuirkFineSlideInParam | soundsinth::model::kQuirkItEffectBeforeVolColumn, 0x99, 32},
         {soundsinth::model::kQuirkFineSlideInParam | soundsinth::model::kQuirkS3mVolSlideDownPriority, 0x35, 27},
@@ -1871,12 +1892,16 @@ void test_panning_slide_direction_it_s3m() {
     using soundsinth::model::kQuirkItEffectBeforeVolColumn;
     using soundsinth::model::kQuirkS3mVolSlideDownPriority;
     using soundsinth::model::QuirkFlags;
-    const QuirkFlags it = kQuirkFineSlideInParam | kQuirkItEffectBeforeVolColumn;
+    const QuirkFlags it  = kQuirkFineSlideInParam | kQuirkItEffectBeforeVolColumn;
     const QuirkFlags s3m = kQuirkFineSlideInParam | kQuirkS3mVolSlideDownPriority;
-    struct Case { QuirkFlags quirks; uint8_t param; uint8_t tick0, tick1, tick2; };
+    struct Case {
+        QuirkFlags quirks;
+        uint8_t param;
+        uint8_t tick0, tick1, tick2;
+    };
     const Case cases[] = {
-        {it, 0x05, 32, 37, 42},  {it, 0x50, 32, 27, 22}, {it, 0xF2, 34, 34, 34}, {it, 0x2F, 30, 30, 30},
-        {it, 0x55, 32, 32, 32},  {s3m, 0x50, 32, 27, 22}, {s3m, 0x55, 32, 37, 42},
+        {it, 0x05, 32, 37, 42}, {it, 0x50, 32, 27, 22},  {it, 0xF2, 34, 34, 34},  {it, 0x2F, 30, 30, 30},
+        {it, 0x55, 32, 32, 32}, {s3m, 0x50, 32, 27, 22}, {s3m, 0x55, 32, 37, 42},
     };
     for (const Case& c : cases) {
         Fixture f(FrequencyModel::Linear);
@@ -1898,10 +1923,10 @@ void test_sample_default_panning_minus1_inherits_else_applied_on_trigger() {
     std::printf("test_sample_default_panning_minus1_inherits_else_applied_on_trigger\n");
 
     Fixture f(FrequencyModel::Amiga);
-    f.channels[0].pan = 10; // как будто на канале раньше уже что-то стояло
+    f.channels[0].pan = 10;                                      // как будто на канале раньше уже что-то стояло
     CHECK_EQ(f.sample.default_panning, static_cast<int8_t>(-1)); // в Fixture по умолчанию - "нет своей панорамы"
 
-    f.dispatch_row(f.note_on(48)); // без SetPanning на строке
+    f.dispatch_row(f.note_on(48));                         // без SetPanning на строке
     CHECK_EQ(f.channels[0].pan, static_cast<uint8_t>(10)); // унаследовал, не сброшен в центр
 
     f.sample.default_panning = 60;
@@ -1996,27 +2021,29 @@ void test_keyoff_with_envelope_enters_release_instead_of_stopping() {
     std::printf("test_keyoff_with_envelope_enters_release_instead_of_stopping\n");
 
     Fixture f(FrequencyModel::Amiga);
-    f.envelope.enabled = true;
-    f.envelope.sustain_enabled = true;
-    f.envelope.point_count = 3;
-    f.envelope.points[0] = soundsinth::model::EnvelopePoint{0, 64};
-    f.envelope.points[1] = soundsinth::model::EnvelopePoint{4, 32}; // sustain здесь
-    f.envelope.points[2] = soundsinth::model::EnvelopePoint{8, 0};  // release-хвост, после sustain
-    f.envelope.sustain_point = 1;
-    f.envelope.sustain_end = 1;
+    f.envelope.enabled           = true;
+    f.envelope.sustain_enabled   = true;
+    f.envelope.point_count       = 3;
+    f.envelope.points[0]         = soundsinth::model::EnvelopePoint{0, 64};
+    f.envelope.points[1]         = soundsinth::model::EnvelopePoint{4, 32}; // sustain здесь
+    f.envelope.points[2]         = soundsinth::model::EnvelopePoint{8, 0};  // release-хвост, после sustain
+    f.envelope.sustain_point     = 1;
+    f.envelope.sustain_end       = 1;
     f.instrument.volume_envelope = &f.envelope;
 
     f.dispatch_row(f.note_on(48));
-    for (int i = 0; i < 10; ++i) f.tick(0); // держится на sustain (тик 4), как в тесте без KeyOff
+    for (int i = 0; i < 10; ++i)
+        f.tick(0); // держится на sustain (тик 4), как в тесте без KeyOff
     CHECK_EQ(f.channels[0].envelope_tick, static_cast<uint16_t>(4));
     CHECK(f.channels[0].voice_active);
 
     f.dispatch_row(f.empty_with_effect(Effect::KeyOff, 0));
-    CHECK(f.channels[0].voice_active);      // не остановлен - есть envelope
+    CHECK(f.channels[0].voice_active); // не остановлен - есть envelope
     CHECK(f.channels[0].key_released);
     CHECK_EQ(f.channels[0].envelope_tick, static_cast<uint16_t>(4)); // тик 0 KeyOff-строки ещё не сдвинул
 
-    for (int i = 0; i < 10; ++i) f.tick(0); // заведомо больше, чем нужно, чтобы дойти до точки 8
+    for (int i = 0; i < 10; ++i)
+        f.tick(0); // заведомо больше, чем нужно, чтобы дойти до точки 8
     // envelope_tick продолжает расти и после последней точки
     // (evaluate_envelope держит значение последней точки для любого tick за
     // её пределами, см. .cpp). Важно не точное значение тика, а то, что он
@@ -2028,7 +2055,8 @@ void test_keyoff_with_envelope_enters_release_instead_of_stopping() {
 
     // Позиция насыщается на 0xFFFF, а не заворачивает в 0 (там снова 64).
     f.channels[0].envelope_tick = 0xFFFE;
-    for (int i = 0; i < 3; ++i) f.tick(1);
+    for (int i = 0; i < 3; ++i)
+        f.tick(1);
     CHECK_EQ(f.channels[0].envelope_tick, static_cast<uint16_t>(0xFFFF));
     CHECK_EQ(f.channels[0].envelope_volume, static_cast<uint8_t>(0));
 }
@@ -2039,14 +2067,15 @@ void test_envelope_carry_keeps_position_on_new_note() {
     std::printf("test_envelope_carry_keeps_position_on_new_note\n");
     for (const bool carry : {true, false}) {
         Fixture f(FrequencyModel::Amiga);
-        f.envelope.enabled = true;
-        f.envelope.carry = carry;
-        f.envelope.point_count = 2;
-        f.envelope.points[0] = soundsinth::model::EnvelopePoint{0, 64};
-        f.envelope.points[1] = soundsinth::model::EnvelopePoint{20, 0};
+        f.envelope.enabled           = true;
+        f.envelope.carry             = carry;
+        f.envelope.point_count       = 2;
+        f.envelope.points[0]         = soundsinth::model::EnvelopePoint{0, 64};
+        f.envelope.points[1]         = soundsinth::model::EnvelopePoint{20, 0};
         f.instrument.volume_envelope = &f.envelope;
         f.dispatch_row(f.note_on(48));
-        for (uint8_t t = 0; t < 5; ++t) f.tick(t);
+        for (uint8_t t = 0; t < 5; ++t)
+            f.tick(t);
         CHECK_EQ(f.channels[0].envelope_tick, static_cast<uint16_t>(5));
         f.dispatch_row(f.note_on(50));
         CHECK_EQ(f.channels[0].envelope_tick, static_cast<uint16_t>(carry ? 5 : 0));
@@ -2061,20 +2090,20 @@ void test_it_envelope_sustain_loop() {
     std::printf("test_it_envelope_sustain_loop\n");
 
     Fixture f(FrequencyModel::Linear);
-    f.song.quirks |= soundsinth::model::kQuirkItEnvelopeSustainLoop;
-    f.envelope.enabled = true;
-    f.envelope.sustain_enabled = true;
-    f.envelope.loop_enabled = true;
-    f.envelope.point_count = 4;
-    f.envelope.points[0] = soundsinth::model::EnvelopePoint{0, 64};
-    f.envelope.points[1] = soundsinth::model::EnvelopePoint{2, 32}; // начало удержания
-    f.envelope.points[2] = soundsinth::model::EnvelopePoint{4, 48}; // конец удержания
-    f.envelope.points[3] = soundsinth::model::EnvelopePoint{6, 0};
-    f.envelope.sustain_point = 1;
-    f.envelope.sustain_end = 2;
-    f.envelope.loop_start = 0;
-    f.envelope.loop_end = 1;
-    f.instrument.volume_envelope = &f.envelope;
+    f.song.quirks                |= soundsinth::model::kQuirkItEnvelopeSustainLoop;
+    f.envelope.enabled            = true;
+    f.envelope.sustain_enabled    = true;
+    f.envelope.loop_enabled       = true;
+    f.envelope.point_count        = 4;
+    f.envelope.points[0]          = soundsinth::model::EnvelopePoint{0, 64};
+    f.envelope.points[1]          = soundsinth::model::EnvelopePoint{2, 32}; // начало удержания
+    f.envelope.points[2]          = soundsinth::model::EnvelopePoint{4, 48}; // конец удержания
+    f.envelope.points[3]          = soundsinth::model::EnvelopePoint{6, 0};
+    f.envelope.sustain_point      = 1;
+    f.envelope.sustain_end        = 2;
+    f.envelope.loop_start         = 0;
+    f.envelope.loop_end           = 1;
+    f.instrument.volume_envelope  = &f.envelope;
 
     f.dispatch_row(f.note_on(48));
     const uint16_t expected[] = {1, 2, 3, 4, 2, 3, 4, 2};
@@ -2096,19 +2125,20 @@ void test_envelope_time_step() {
     std::printf("test_envelope_time_step\n");
 
     Fixture f(FrequencyModel::Linear);
-    f.envelope.enabled = true;
-    f.envelope.point_count = 2;
-    f.envelope.points[0] = soundsinth::model::EnvelopePoint{0, 64};
-    f.envelope.points[1] = soundsinth::model::EnvelopePoint{100, 0};
+    f.envelope.enabled           = true;
+    f.envelope.point_count       = 2;
+    f.envelope.points[0]         = soundsinth::model::EnvelopePoint{0, 64};
+    f.envelope.points[1]         = soundsinth::model::EnvelopePoint{100, 0};
     f.instrument.volume_envelope = &f.envelope;
-    f.instrument.fadeout_rate = 1000;
+    f.instrument.fadeout_rate    = 1000;
     f.dispatch_row(f.note_on(48));
 
     engine::ChannelState& cs = f.channels[0];
     engine::advance_envelope_and_fadeout(cs, false, 0, 512);
     CHECK_EQ(cs.envelope_tick, static_cast<uint16_t>(2));
-    for (int i = 0; i < 4; ++i) engine::advance_envelope_and_fadeout(cs, false, 0, 128);
-    CHECK_EQ(cs.envelope_tick, static_cast<uint16_t>(4)); // 4 * 0.5
+    for (int i = 0; i < 4; ++i)
+        engine::advance_envelope_and_fadeout(cs, false, 0, 128);
+    CHECK_EQ(cs.envelope_tick, static_cast<uint16_t>(4));    // 4 * 0.5
     engine::advance_envelope_and_fadeout(cs, false, 0, 384); // 1.5
     CHECK_EQ(cs.envelope_tick, static_cast<uint16_t>(5));
     engine::advance_envelope_and_fadeout(cs, false, 0, 128); // остаток 0.5 + 0.5
@@ -2130,24 +2160,24 @@ void test_silent_envelope_end_stops_voice_only() {
 
     auto run = [](bool loop, bool sustain, bool released, bool last_zero, int ticks) {
         Fixture f(FrequencyModel::Linear);
-        f.envelope.enabled = true;
-        f.envelope.point_count = 2;
-        f.envelope.points[0] = soundsinth::model::EnvelopePoint{0, 64};
-        f.envelope.points[1] = soundsinth::model::EnvelopePoint{4, static_cast<int16_t>(last_zero ? 0 : 16)};
-        f.envelope.loop_enabled = loop;
-        f.envelope.sustain_enabled = sustain;
-        f.envelope.loop_start = 0;
-        f.envelope.loop_end = 1;
-        f.envelope.sustain_point = 1;
-        f.envelope.sustain_end = 1;
+        f.envelope.enabled           = true;
+        f.envelope.point_count       = 2;
+        f.envelope.points[0]         = soundsinth::model::EnvelopePoint{0, 64};
+        f.envelope.points[1]         = soundsinth::model::EnvelopePoint{4, static_cast<int16_t>(last_zero ? 0 : 16)};
+        f.envelope.loop_enabled      = loop;
+        f.envelope.sustain_enabled   = sustain;
+        f.envelope.loop_start        = 0;
+        f.envelope.loop_end          = 1;
+        f.envelope.sustain_point     = 1;
+        f.envelope.sustain_end       = 1;
         f.instrument.volume_envelope = &f.envelope;
         f.dispatch_row(f.note_on(48));
-        engine::ChannelState& cs = f.channels[0];
-        cs.key_released = released;
-        cs.stop_voice_pending = false;
-        const soundsinth::model::QuirkFlags it = soundsinth::model::kQuirkItEnvelopeSustainLoop |
-                                               soundsinth::model::kQuirkItSilentEnvelopeEndStops;
-        for (int i = 0; i < ticks; ++i) engine::advance_envelope_and_fadeout(cs, false, it, 256);
+        engine::ChannelState& cs               = f.channels[0];
+        cs.key_released                        = released;
+        cs.stop_voice_pending                  = false;
+        const soundsinth::model::QuirkFlags it = soundsinth::model::kQuirkItEnvelopeSustainLoop | soundsinth::model::kQuirkItSilentEnvelopeEndStops;
+        for (int i = 0; i < ticks; ++i)
+            engine::advance_envelope_and_fadeout(cs, false, it, 256);
         CHECK(cs.voice_active); // память эффектов канала не зависит от огибающей
         return cs.stop_voice_pending;
     };
@@ -2168,10 +2198,10 @@ void test_fadeout_stops_voice_after_key_off_when_configured() {
 
     Fixture f(FrequencyModel::Amiga);
     f.envelope.enabled = true; // без envelope KeyOff остановил бы голос сразу - envelope нужен, чтобы попасть в путь fadeout
-    f.envelope.point_count = 1;
-    f.envelope.points[0] = soundsinth::model::EnvelopePoint{0, 64};
+    f.envelope.point_count       = 1;
+    f.envelope.points[0]         = soundsinth::model::EnvelopePoint{0, 64};
     f.instrument.volume_envelope = &f.envelope;
-    f.instrument.fadeout_rate = 16384; // 65536/16384 = 4 тика до нуля
+    f.instrument.fadeout_rate    = 16384; // 65536/16384 = 4 тика до нуля
 
     f.dispatch_row(f.note_on(48));
     f.dispatch_row(f.empty_with_effect(Effect::KeyOff, 0));
@@ -2201,15 +2231,16 @@ void test_fadeout_zero_never_auto_stops_voice() {
     std::printf("test_fadeout_zero_never_auto_stops_voice\n");
 
     Fixture f(FrequencyModel::Amiga);
-    f.envelope.enabled = true;
-    f.envelope.point_count = 1;
-    f.envelope.points[0] = soundsinth::model::EnvelopePoint{0, 64};
+    f.envelope.enabled           = true;
+    f.envelope.point_count       = 1;
+    f.envelope.points[0]         = soundsinth::model::EnvelopePoint{0, 64};
     f.instrument.volume_envelope = &f.envelope;
     CHECK_EQ(f.instrument.fadeout_rate, static_cast<uint32_t>(0)); // значение по умолчанию в Fixture/Instrument
 
     f.dispatch_row(f.note_on(48));
     f.dispatch_row(f.empty_with_effect(Effect::KeyOff, 0));
-    for (int i = 0; i < 200; ++i) f.tick(0); // заведомо много тиков
+    for (int i = 0; i < 200; ++i)
+        f.tick(0); // заведомо много тиков
     CHECK(f.channels[0].voice_active);
     CHECK_EQ(f.channels[0].fadeout_level, static_cast<uint32_t>(65536)); // не сдвинулся ни разу
 }
@@ -2223,13 +2254,13 @@ void test_note_off_via_note_column_enters_release() {
     std::printf("test_note_off_via_note_column_enters_release\n");
 
     Fixture f(FrequencyModel::Amiga);
-    f.envelope.enabled = true;
-    f.envelope.sustain_enabled = true;
-    f.envelope.point_count = 2;
-    f.envelope.points[0] = soundsinth::model::EnvelopePoint{0, 64};
-    f.envelope.points[1] = soundsinth::model::EnvelopePoint{4, 32};
-    f.envelope.sustain_point = 1;
-    f.envelope.sustain_end = 1;
+    f.envelope.enabled           = true;
+    f.envelope.sustain_enabled   = true;
+    f.envelope.point_count       = 2;
+    f.envelope.points[0]         = soundsinth::model::EnvelopePoint{0, 64};
+    f.envelope.points[1]         = soundsinth::model::EnvelopePoint{4, 32};
+    f.envelope.sustain_point     = 1;
+    f.envelope.sustain_end       = 1;
     f.instrument.volume_envelope = &f.envelope;
 
     f.dispatch_row(f.note_on(48));
@@ -2250,9 +2281,9 @@ void test_note_cut_via_note_column_stops_immediately() {
     std::printf("test_note_cut_via_note_column_stops_immediately\n");
 
     Fixture f(FrequencyModel::Amiga);
-    f.envelope.enabled = true;
-    f.envelope.point_count = 1;
-    f.envelope.points[0] = soundsinth::model::EnvelopePoint{0, 64};
+    f.envelope.enabled           = true;
+    f.envelope.point_count       = 1;
+    f.envelope.points[0]         = soundsinth::model::EnvelopePoint{0, 64};
     f.instrument.volume_envelope = &f.envelope;
 
     f.dispatch_row(f.note_on(48));
@@ -2325,10 +2356,10 @@ void test_volume_envelope_interpolates_and_does_not_touch_volume() {
     std::printf("test_volume_envelope_interpolates_and_does_not_touch_volume\n");
 
     Fixture f(FrequencyModel::Amiga);
-    f.envelope.enabled = true;
-    f.envelope.point_count = 2;
-    f.envelope.points[0] = soundsinth::model::EnvelopePoint{0, 64};
-    f.envelope.points[1] = soundsinth::model::EnvelopePoint{8, 0};
+    f.envelope.enabled           = true;
+    f.envelope.point_count       = 2;
+    f.envelope.points[0]         = soundsinth::model::EnvelopePoint{0, 64};
+    f.envelope.points[1]         = soundsinth::model::EnvelopePoint{8, 0};
     f.instrument.volume_envelope = &f.envelope;
 
     f.dispatch_row(f.note_on(48));
@@ -2339,11 +2370,13 @@ void test_volume_envelope_interpolates_and_does_not_touch_volume() {
     CHECK_EQ(f.channels[0].envelope_tick, static_cast<uint16_t>(1));
     CHECK_EQ(f.channels[0].envelope_volume, static_cast<uint8_t>(64)); // точка 0
 
-    for (int i = 0; i < 4; ++i) f.tick(0); // прочитаны позиции 1..4
+    for (int i = 0; i < 4; ++i)
+        f.tick(0); // прочитаны позиции 1..4
     CHECK_EQ(f.channels[0].envelope_tick, static_cast<uint16_t>(5));
     CHECK_EQ(f.channels[0].envelope_volume, static_cast<uint8_t>(32)); // 64 + (0-64)*4/8
 
-    for (int i = 0; i < 4; ++i) f.tick(0); // позиции 5..8, конец огибающей
+    for (int i = 0; i < 4; ++i)
+        f.tick(0); // позиции 5..8, конец огибающей
     CHECK_EQ(f.channels[0].envelope_volume, static_cast<uint8_t>(0));
     CHECK_EQ(f.channels[0].volume, static_cast<uint8_t>(64)); // по-прежнему не тронут - множитель отдельно
 }
@@ -2352,18 +2385,19 @@ void test_volume_envelope_sustain_holds_indefinitely_while_voice_alive() {
     std::printf("test_volume_envelope_sustain_holds_indefinitely_while_voice_alive\n");
 
     Fixture f(FrequencyModel::Amiga);
-    f.envelope.enabled = true;
-    f.envelope.sustain_enabled = true;
-    f.envelope.point_count = 3;
-    f.envelope.points[0] = soundsinth::model::EnvelopePoint{0, 64};
-    f.envelope.points[1] = soundsinth::model::EnvelopePoint{4, 32}; // sustain здесь
-    f.envelope.points[2] = soundsinth::model::EnvelopePoint{8, 0};
-    f.envelope.sustain_point = 1;
-    f.envelope.sustain_end = 1;
+    f.envelope.enabled           = true;
+    f.envelope.sustain_enabled   = true;
+    f.envelope.point_count       = 3;
+    f.envelope.points[0]         = soundsinth::model::EnvelopePoint{0, 64};
+    f.envelope.points[1]         = soundsinth::model::EnvelopePoint{4, 32}; // sustain здесь
+    f.envelope.points[2]         = soundsinth::model::EnvelopePoint{8, 0};
+    f.envelope.sustain_point     = 1;
+    f.envelope.sustain_end       = 1;
     f.instrument.volume_envelope = &f.envelope;
 
     f.dispatch_row(f.note_on(48));
-    for (int i = 0; i < 10; ++i) f.tick(0); // заведомо больше, чем нужно для достижения sustain (тик 4)
+    for (int i = 0; i < 10; ++i)
+        f.tick(0); // заведомо больше, чем нужно для достижения sustain (тик 4)
 
     CHECK_EQ(f.channels[0].envelope_tick, static_cast<uint16_t>(4)); // держится, не доходит до 8
     CHECK_EQ(f.channels[0].envelope_volume, static_cast<uint8_t>(32));
@@ -2377,18 +2411,19 @@ void test_volume_envelope_loop_wraps_to_start() {
     std::printf("test_volume_envelope_loop_wraps_to_start\n");
 
     Fixture f(FrequencyModel::Amiga);
-    f.song.quirks = soundsinth::model::kQuirkItEnvelopeSustainLoop; // IT: заворот за концом петли, у XM - на нём
-    f.envelope.enabled = true;
-    f.envelope.loop_enabled = true;
-    f.envelope.point_count = 2;
-    f.envelope.points[0] = soundsinth::model::EnvelopePoint{0, 0};
-    f.envelope.points[1] = soundsinth::model::EnvelopePoint{4, 64};
-    f.envelope.loop_start = 0;
-    f.envelope.loop_end = 1;
+    f.song.quirks                = soundsinth::model::kQuirkItEnvelopeSustainLoop; // IT: заворот за концом петли, у XM - на нём
+    f.envelope.enabled           = true;
+    f.envelope.loop_enabled      = true;
+    f.envelope.point_count       = 2;
+    f.envelope.points[0]         = soundsinth::model::EnvelopePoint{0, 0};
+    f.envelope.points[1]         = soundsinth::model::EnvelopePoint{4, 64};
+    f.envelope.loop_start        = 0;
+    f.envelope.loop_end          = 1;
     f.instrument.volume_envelope = &f.envelope;
 
     f.dispatch_row(f.note_on(48));
-    for (int i = 0; i < 5; ++i) f.tick(0); // 1,2,3,4,5 - на 5-м envelope_tick(5) > loop_end_tick(4) -> заворот на 0
+    for (int i = 0; i < 5; ++i)
+        f.tick(0); // 1,2,3,4,5 - на 5-м envelope_tick(5) > loop_end_tick(4) -> заворот на 0
 
     CHECK_EQ(f.channels[0].envelope_tick, static_cast<uint16_t>(0));
     CHECK_EQ(f.channels[0].envelope_volume, static_cast<uint8_t>(64)); // прочитана точка 4 перед заворотом
@@ -2417,25 +2452,26 @@ void test_panning_envelope_advances_independently_of_volume_envelope() {
     std::printf("test_panning_envelope_advances_independently_of_volume_envelope\n");
 
     Fixture f(FrequencyModel::Amiga);
-    f.envelope.enabled = true;
-    f.envelope.point_count = 2;
-    f.envelope.points[0] = soundsinth::model::EnvelopePoint{0, 64};
-    f.envelope.points[1] = soundsinth::model::EnvelopePoint{8, 0};
+    f.envelope.enabled           = true;
+    f.envelope.point_count       = 2;
+    f.envelope.points[0]         = soundsinth::model::EnvelopePoint{0, 64};
+    f.envelope.points[1]         = soundsinth::model::EnvelopePoint{8, 0};
     f.instrument.volume_envelope = &f.envelope;
 
-    f.pan_envelope.enabled = true;
+    f.pan_envelope.enabled     = true;
     f.pan_envelope.point_count = 2;
-    f.pan_envelope.points[0] = soundsinth::model::EnvelopePoint{0, 32}; // 32=нейтрально (центр)
-    f.pan_envelope.points[1] = soundsinth::model::EnvelopePoint{4, 64}; // вдвое короче volume-огибающей - движется быстрее
+    f.pan_envelope.points[0]   = soundsinth::model::EnvelopePoint{0, 32}; // 32=нейтрально (центр)
+    f.pan_envelope.points[1]   = soundsinth::model::EnvelopePoint{4, 64}; // вдвое короче volume-огибающей - движется быстрее
     f.instrument.panning_envelope = &f.pan_envelope;
 
     f.dispatch_row(f.note_on(48));
     CHECK_EQ(f.channels[0].pan_envelope_value, static_cast<uint8_t>(32)); // нейтрально до первого тика
 
-    for (int i = 0; i < 4; ++i) f.tick(0);
-    CHECK_EQ(f.channels[0].envelope_tick, static_cast<uint16_t>(4));     // прочитаны позиции 0..3
-    CHECK_EQ(f.channels[0].envelope_volume, static_cast<uint8_t>(40));   // 64+(0-64)*3/8
-    CHECK_EQ(f.channels[0].pan_envelope_tick, static_cast<uint16_t>(4)); // pan - у конца своей огибающей (длиной 4 тика)
+    for (int i = 0; i < 4; ++i)
+        f.tick(0);
+    CHECK_EQ(f.channels[0].envelope_tick, static_cast<uint16_t>(4));      // прочитаны позиции 0..3
+    CHECK_EQ(f.channels[0].envelope_volume, static_cast<uint8_t>(40));    // 64+(0-64)*3/8
+    CHECK_EQ(f.channels[0].pan_envelope_tick, static_cast<uint16_t>(4));  // pan - у конца своей огибающей (длиной 4 тика)
     CHECK_EQ(f.channels[0].pan_envelope_value, static_cast<uint8_t>(56)); // 32+(64-32)*3/4
     f.tick(0);
     CHECK_EQ(f.channels[0].pan_envelope_value, static_cast<uint8_t>(64));
@@ -2451,38 +2487,41 @@ void test_pitch_envelope_applies_under_linear_model_only() {
     std::printf("test_pitch_envelope_applies_under_linear_model_only\n");
 
     Fixture linear(FrequencyModel::Linear);
-    linear.pitch_envelope.enabled = true;
+    linear.pitch_envelope.enabled     = true;
     linear.pitch_envelope.point_count = 2;
-    linear.pitch_envelope.points[0] = soundsinth::model::EnvelopePoint{0, 32}; // нейтрально
-    linear.pitch_envelope.points[1] = soundsinth::model::EnvelopePoint{4, 40};
-    linear.instrument.pitch_envelope = &linear.pitch_envelope;
+    linear.pitch_envelope.points[0]   = soundsinth::model::EnvelopePoint{0, 32}; // нейтрально
+    linear.pitch_envelope.points[1]   = soundsinth::model::EnvelopePoint{4, 40};
+    linear.instrument.pitch_envelope  = &linear.pitch_envelope;
 
     linear.dispatch_row(linear.note_on(48));
     CHECK_EQ(linear.channels[0].pitch_envelope_offset, static_cast<int16_t>(0)); // нейтрально до первого тика
-    for (int i = 0; i < 4; ++i) linear.tick(0);
+    for (int i = 0; i < 4; ++i)
+        linear.tick(0);
     CHECK_EQ(linear.channels[0].pitch_envelope_tick, static_cast<uint16_t>(4));
     CHECK_EQ(linear.channels[0].pitch_envelope_offset, static_cast<int16_t>(256));
 
     Fixture top(FrequencyModel::Linear);
-    top.pitch_envelope.enabled = true;
+    top.pitch_envelope.enabled     = true;
     top.pitch_envelope.point_count = 2;
-    top.pitch_envelope.points[0] = soundsinth::model::EnvelopePoint{0, 32};
-    top.pitch_envelope.points[1] = soundsinth::model::EnvelopePoint{4, 64};
-    top.instrument.pitch_envelope = &top.pitch_envelope;
+    top.pitch_envelope.points[0]   = soundsinth::model::EnvelopePoint{0, 32};
+    top.pitch_envelope.points[1]   = soundsinth::model::EnvelopePoint{4, 64};
+    top.instrument.pitch_envelope  = &top.pitch_envelope;
     top.dispatch_row(top.note_on(48));
-    for (int i = 0; i < 4; ++i) top.tick(0);
+    for (int i = 0; i < 4; ++i)
+        top.tick(0);
     CHECK_EQ(top.channels[0].pitch_envelope_offset, static_cast<int16_t>(1020));
 
     Fixture amiga(FrequencyModel::Amiga);
-    amiga.pitch_envelope.enabled = true;
+    amiga.pitch_envelope.enabled     = true;
     amiga.pitch_envelope.point_count = 2;
-    amiga.pitch_envelope.points[0] = soundsinth::model::EnvelopePoint{0, 32};
-    amiga.pitch_envelope.points[1] = soundsinth::model::EnvelopePoint{4, 40};
-    amiga.instrument.pitch_envelope = &amiga.pitch_envelope;
+    amiga.pitch_envelope.points[0]   = soundsinth::model::EnvelopePoint{0, 32};
+    amiga.pitch_envelope.points[1]   = soundsinth::model::EnvelopePoint{4, 40};
+    amiga.instrument.pitch_envelope  = &amiga.pitch_envelope;
 
     amiga.dispatch_row(amiga.note_on(48));
-    for (int i = 0; i < 4; ++i) amiga.tick(0);
-    CHECK_EQ(amiga.channels[0].pitch_envelope_tick, static_cast<uint16_t>(4)); // тик продвигается и тут
+    for (int i = 0; i < 4; ++i)
+        amiga.tick(0);
+    CHECK_EQ(amiga.channels[0].pitch_envelope_tick, static_cast<uint16_t>(4));  // тик продвигается и тут
     CHECK_EQ(amiga.channels[0].pitch_envelope_offset, static_cast<int16_t>(0)); // но под Amiga не применяется (см. .h)
 }
 
@@ -2493,16 +2532,16 @@ void test_set_envelope_position_moves_both_volume_and_pan_tick() {
     std::printf("test_set_envelope_position_moves_both_volume_and_pan_tick\n");
 
     Fixture f(FrequencyModel::Amiga);
-    f.envelope.enabled = true;
-    f.envelope.point_count = 2;
-    f.envelope.points[0] = soundsinth::model::EnvelopePoint{0, 64};
-    f.envelope.points[1] = soundsinth::model::EnvelopePoint{10, 0};
+    f.envelope.enabled           = true;
+    f.envelope.point_count       = 2;
+    f.envelope.points[0]         = soundsinth::model::EnvelopePoint{0, 64};
+    f.envelope.points[1]         = soundsinth::model::EnvelopePoint{10, 0};
     f.instrument.volume_envelope = &f.envelope;
 
-    f.pan_envelope.enabled = true;
-    f.pan_envelope.point_count = 2;
-    f.pan_envelope.points[0] = soundsinth::model::EnvelopePoint{0, 32};
-    f.pan_envelope.points[1] = soundsinth::model::EnvelopePoint{10, 64};
+    f.pan_envelope.enabled        = true;
+    f.pan_envelope.point_count    = 2;
+    f.pan_envelope.points[0]      = soundsinth::model::EnvelopePoint{0, 32};
+    f.pan_envelope.points[1]      = soundsinth::model::EnvelopePoint{10, 64};
     f.instrument.panning_envelope = &f.pan_envelope;
 
     f.dispatch_row(f.note_on(48));

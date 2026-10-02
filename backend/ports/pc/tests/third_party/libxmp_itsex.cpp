@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 // Адаптация libxmp src/loaders/itsex.c ("Public domain IT sample
 // decompressor by Olivier Lapicque", доработан Alice Rowan 2023-2024).
 // Арифметика (read_bits, unpacking-автомат в decompress8/16) - как в
@@ -13,13 +14,13 @@ namespace libxmp_itsex {
 
 namespace {
 
-using uint8 = uint8_t;
+using uint8  = uint8_t;
 using uint16 = uint16_t;
 using uint32 = uint32_t;
-using int16 = int16_t;
+using int16  = int16_t;
 
 #define READ_BITS_MASK(n) ((1u << (unsigned)(n)) - 1u)
-#define MIN(x, y) ((x) < (y) ? (x) : (y))
+#define MIN(x, y)         ((x) < (y) ? (x) : (y))
 
 struct it_stream {
     uint8* pos;
@@ -52,16 +53,16 @@ inline uint32 read_bits(it_stream* in, int n) {
 
         used = static_cast<uint32>(MIN(in->left, 4));
 
-        in->num_bits = static_cast<int>(used * 8);
-        in->pos += 4;
-        in->left -= used;
+        in->num_bits  = static_cast<int>(used * 8);
+        in->pos      += 4;
+        in->left     -= used;
 
-        n -= static_cast<int>(offset);
+        n      -= static_cast<int>(offset);
         retval |= (in->bits & READ_BITS_MASK(n)) << offset;
     }
 
-    in->bits >>= n;
-    in->num_bits -= n;
+    in->bits     >>= n;
+    in->num_bits  -= n;
 
     return retval;
 }
@@ -75,11 +76,11 @@ bool init_block(it_stream* in, std::vector<uint8_t>& tmp, const uint8_t* bitstre
     tmp.assign(padded, 0);
     std::memcpy(tmp.data(), bitstream, bitstream_bytes);
 
-    in->pos = tmp.data();
-    in->left = bitstream_bytes;
-    in->bits = 0;
+    in->pos      = tmp.data();
+    in->left     = bitstream_bytes;
+    in->bits     = 0;
     in->num_bits = 0;
-    in->err = 0;
+    in->err      = 0;
     return true;
 }
 
@@ -98,7 +99,7 @@ int decompress8(const uint8_t* bitstream, uint32_t bitstream_bytes, int8_t* dst_
     while (len) {
         if (!block_count) {
             block_count = 0x8000;
-            left = 9;
+            left        = 9;
             temp = temp2 = 0;
             if (!init_block(&in, tmp, bitstream, bitstream_bytes)) return -1;
         }
@@ -126,8 +127,7 @@ int decompress8(const uint8_t* bitstream, uint32_t bitstream_bytes, int8_t* dst_
                 uint16 j = static_cast<uint16>(i - 8);
                 if ((bits <= j) || (bits > i)) goto unpack_byte;
                 bits = static_cast<uint16>(bits - j);
-                left = (static_cast<uint8>(bits & 0xff) < left) ? static_cast<uint8>(bits & 0xff)
-                                                                  : static_cast<uint8>((bits + 1) & 0xff);
+                left = (static_cast<uint8>(bits & 0xff) < left) ? static_cast<uint8>(bits & 0xff) : static_cast<uint8>((bits + 1) & 0xff);
                 goto next;
             }
 
@@ -140,14 +140,14 @@ int decompress8(const uint8_t* bitstream, uint32_t bitstream_bytes, int8_t* dst_
 
         unpack_byte:
             if (left < 8) {
-                uint8 shift = static_cast<uint8>(8 - left);
+                uint8 shift   = static_cast<uint8>(8 - left);
                 signed char c = static_cast<signed char>(bits << shift);
-                c = static_cast<signed char>(c >> shift);
-                bits = static_cast<uint16>(c);
+                c             = static_cast<signed char>(c >> shift);
+                bits          = static_cast<uint16>(c);
             }
-            bits = static_cast<uint16>(bits + temp);
-            temp = static_cast<uint8>(bits);
-            temp2 = static_cast<uint8>(temp2 + temp);
+            bits     = static_cast<uint16>(bits + temp);
+            temp     = static_cast<uint8>(bits);
+            temp2    = static_cast<uint8>(temp2 + temp);
             dst[pos] = it215 ? temp2 : temp;
 
         skip_byte:
@@ -157,8 +157,8 @@ int decompress8(const uint8_t* bitstream, uint32_t bitstream_bytes, int8_t* dst_
         } while (pos < d);
 
         block_count -= d;
-        len -= static_cast<int>(d);
-        dst += d;
+        len         -= static_cast<int>(d);
+        dst         += d;
     }
 
     return 0;
@@ -167,7 +167,7 @@ int decompress8(const uint8_t* bitstream, uint32_t bitstream_bytes, int8_t* dst_
 int decompress16(const uint8_t* bitstream, uint32_t bitstream_bytes, int16_t* dst, int len, int it215) {
     it_stream in;
     uint32 block_count = 0;
-    uint8 left = 0;
+    uint8 left         = 0;
     int16 temp = 0, temp2 = 0;
     uint32 d, pos;
     std::vector<uint8_t> tmp;
@@ -177,7 +177,7 @@ int decompress16(const uint8_t* bitstream, uint32_t bitstream_bytes, int16_t* ds
     while (len) {
         if (!block_count) {
             block_count = 0x4000;
-            left = 17;
+            left        = 17;
             temp = temp2 = 0;
             if (!init_block(&in, tmp, bitstream, bitstream_bytes)) return -1;
         }
@@ -196,8 +196,7 @@ int decompress16(const uint8_t* bitstream, uint32_t bitstream_bytes, int16_t* ds
                 if (i != j) goto unpack_byte;
                 bits = read_bits(&in, 4) + 1;
                 if (in.err) return -1;
-                left = (static_cast<uint8>(bits & 0xff) < left) ? static_cast<uint8>(bits & 0xff)
-                                                                  : static_cast<uint8>((bits + 1) & 0xff);
+                left = (static_cast<uint8>(bits & 0xff) < left) ? static_cast<uint8>(bits & 0xff) : static_cast<uint8>((bits + 1) & 0xff);
                 goto next;
             }
 
@@ -206,8 +205,7 @@ int decompress16(const uint8_t* bitstream, uint32_t bitstream_bytes, int16_t* ds
                 uint32 j = (i - 16) & 0xffffu;
                 if ((bits <= j) || (bits > (i & 0xffffu))) goto unpack_byte;
                 bits -= j;
-                left = (static_cast<uint8>(bits & 0xff) < left) ? static_cast<uint8>(bits & 0xff)
-                                                                  : static_cast<uint8>((bits + 1) & 0xff);
+                left  = (static_cast<uint8>(bits & 0xff) < left) ? static_cast<uint8>(bits & 0xff) : static_cast<uint8>((bits + 1) & 0xff);
                 goto next;
             }
 
@@ -221,13 +219,13 @@ int decompress16(const uint8_t* bitstream, uint32_t bitstream_bytes, int16_t* ds
         unpack_byte:
             if (left < 16) {
                 uint8 shift = static_cast<uint8>(16 - left);
-                int16 c = static_cast<int16>(bits << shift);
-                c = static_cast<int16>(c >> shift);
-                bits = static_cast<uint32>(c);
+                int16 c     = static_cast<int16>(bits << shift);
+                c           = static_cast<int16>(c >> shift);
+                bits        = static_cast<uint32>(c);
             }
-            bits = static_cast<uint32>(bits + temp);
-            temp = static_cast<int16>(bits);
-            temp2 = static_cast<int16>(temp2 + temp);
+            bits     = static_cast<uint32>(bits + temp);
+            temp     = static_cast<int16>(bits);
+            temp2    = static_cast<int16>(temp2 + temp);
             dst[pos] = it215 ? temp2 : temp;
 
         skip_byte:
@@ -237,8 +235,8 @@ int decompress16(const uint8_t* bitstream, uint32_t bitstream_bytes, int16_t* ds
         } while (pos < d);
 
         block_count -= d;
-        len -= static_cast<int>(d);
-        dst += d;
+        len         -= static_cast<int>(d);
+        dst         += d;
         if (len <= 0) break;
     }
 

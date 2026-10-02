@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 #include "devices/gs/gs_device.h"
 
 #include <cstring>
@@ -34,7 +35,7 @@ constexpr uint8_t kCmdLoadModule      = 0x30u;
 constexpr uint8_t kCmdPlayModule      = 0x31u;
 constexpr uint8_t kCmdStopModule      = 0x32u;
 constexpr uint8_t kCmdContModule      = 0x33u;
-constexpr uint8_t kCmdDataOn          = 0x36u; // положить в регистр вывода 0xFF
+constexpr uint8_t kCmdDataOn          = 0x36u; // положить в регистр вывода 0xff
 constexpr uint8_t kCmdReinit          = 0x37u;
 constexpr uint8_t kCmdSongPosition    = 0x60u;
 constexpr uint8_t kCmdPatternPosition = 0x61u;
@@ -50,8 +51,8 @@ constexpr uint8_t kCmdBusyOff         = 0xf6u;
 constexpr uint8_t kCmdGetHx           = 0xf7u;
 
 // Внутренние порты карты.
-constexpr uint8_t kInnerPortMask              = GsDevice::kInnerPortCount - 1u;
-static_assert((GsDevice::kInnerPortCount & kInnerPortMask) == 0, "число внутренних портов - степень двойки");
+constexpr uint8_t kInnerPortMask = GsDevice::kInnerPortCount - 1u;
+static_assert((GsDevice::kInnerPortCount & kInnerPortMask) == 0, "the number of internal ports is a power of two");
 constexpr uint8_t kInnerPortPages             = 0x00u;
 constexpr uint8_t kInnerPortCommand           = 0x01u;
 constexpr uint8_t kInnerPortData              = 0x02u;
@@ -62,8 +63,8 @@ constexpr uint8_t kInnerPortVolume4           = 0x09u;
 constexpr uint8_t kInnerPortDataFromPages     = 0x0au;
 constexpr uint8_t kInnerPortCommandFromVolume = 0x0bu;
 // Биты, которые читают #0A и #0B.
-constexpr uint8_t kPagesDataBit      = 0x01u; // порт #00, D0
-constexpr uint8_t kVolumeCommandBit  = 0x20u; // порт #09, D5
+constexpr uint8_t kPagesDataBit     = 0x01u; // порт #00, D0
+constexpr uint8_t kVolumeCommandBit = 0x20u; // порт #09, D5
 
 constexpr uint8_t kHxBusyBit = 0x80u; // регистр HX (#F7), D7
 
@@ -81,7 +82,8 @@ struct RomVar {
     uint16_t addr;
     uint8_t value;
 };
-SOUNDSINTH_HOT_PATH_ATTR("gs_rom_vars") constexpr RomVar kRomVars[] = {
+SOUNDSINTH_HOT_PATH_ATTR("gs_rom_vars")
+constexpr RomVar kRomVars[] = {
     {0x409fu, 0x0fu},
     {0x40a4u, 0x40u},
     {0x4151u, 0xc3u},
@@ -98,7 +100,9 @@ uint8_t mem_peek(uint16_t addr) {
 }
 
 // Слово из младшего и старшего байта хвоста.
-constexpr uint16_t make_word(uint8_t lo, uint8_t hi) { return static_cast<uint16_t>(lo | (hi << 8)); }
+constexpr uint16_t make_word(uint8_t lo, uint8_t hi) {
+    return static_cast<uint16_t>(lo | (hi << 8));
+}
 
 // Счётчик гистограммы команд насыщается.
 constexpr uint16_t kHistMax = 0xffffu;
@@ -107,21 +111,21 @@ constexpr uint16_t kHistMax = 0xffffu;
 
 SOUNDSINTH_HOT_PATH_ATTR("gs_reset")
 void GsDevice::reset() {
-    status_ = kStatusIdle;
-    last_cmd_ = 0;
-    arg_ = 0;
-    has_arg_ = false;
-    tail_left_ = 0;
-    de_ = 0;
-    sink_left_ = 0;
-    zeros_left_ = 0;
-    resp_n_ = 0;
-    resp_pos_ = 0;
-    stream_ = Stream::None;
+    status_       = kStatusIdle;
+    last_cmd_     = 0;
+    arg_          = 0;
+    has_arg_      = false;
+    tail_left_    = 0;
+    de_           = 0;
+    sink_left_    = 0;
+    zeros_left_   = 0;
+    resp_n_       = 0;
+    resp_pos_     = 0;
+    stream_       = Stream::None;
     stream_bytes_ = 0;
-    out_reg_ = 0;
-    hx_busy_ = false;
-    cur_fx_ = 0;
+    out_reg_      = 0;
+    hx_busy_      = false;
+    cur_fx_       = 0;
     // unknown_* не сбрасываются: это мера покрытия за всё время работы.
 }
 
@@ -136,20 +140,21 @@ void GsDevice::respond(const uint8_t* bytes, uint8_t n) {
         n = sizeof(resp_);
     }
     std::memcpy(resp_, bytes, n);
-    resp_n_ = n;
+    resp_n_   = n;
     resp_pos_ = 0;
     refresh_data_status(); // софт ждёт на бите данных (WN)
 }
 
 SOUNDSINTH_HOT_PATH_ATTR("gs_respond_u24")
 void GsDevice::respond_u24(uint32_t v) {
-    const uint8_t b[3] = {static_cast<uint8_t>(v & 0xffu), static_cast<uint8_t>((v >> 8) & 0xffu),
-                          static_cast<uint8_t>((v >> 16) & 0xffu)};
+    const uint8_t b[3] = {static_cast<uint8_t>(v & 0xffu), static_cast<uint8_t>((v >> 8) & 0xffu), static_cast<uint8_t>((v >> 16) & 0xffu)};
     respond(b, 3);
 }
 
 SOUNDSINTH_HOT_PATH_ATTR("gs_respond_u8")
-void GsDevice::respond_u8(uint8_t v) { respond(&v, 1); }
+void GsDevice::respond_u8(uint8_t v) {
+    respond(&v, 1);
+}
 
 SOUNDSINTH_HOT_PATH_ATTR("gs_write_data")
 bool GsDevice::write_data(uint8_t value) {
@@ -172,7 +177,7 @@ bool GsDevice::write_data(uint8_t value) {
     // Вне потока запись в регистр данных - аргумент будущей команды:
     // софт кладёт их до подачи кода (SD ... SC).
     if (!has_arg_) {
-        arg_ = value;
+        arg_     = value;
         has_arg_ = true;
     }
     return false;
@@ -248,8 +253,8 @@ uint8_t GsDevice::read_data() {
 // отсутствующей.
 SOUNDSINTH_HOT_PATH_ATTR("gs_inner_write")
 void GsDevice::inner_write(uint8_t port, uint8_t value) {
-    port &= kInnerPortMask;
-    inner_[port] = value;
+    port         &= kInnerPortMask;
+    inner_[port]  = value;
     switch (port) {
         case kInnerPortOut:
             // Регистр вывода в Spectrum: записанное отдаётся через GSDAT
@@ -293,14 +298,18 @@ SOUNDSINTH_HOT_PATH_ATTR("gs_inner_read")
 uint8_t GsDevice::inner_read(uint8_t port) {
     port &= kInnerPortMask;
     switch (port) {
-        case kInnerPortCommand: return last_cmd_;   // код последней команды от ZX
-        case kInnerPortData:    return last_data_;  // последний байт данных от ZX
-        case kInnerPortStatus:  return status_;     // слово состояния целиком
+        case kInnerPortCommand:
+            return last_cmd_; // код последней команды от ZX
+        case kInnerPortData:
+            return last_data_; // последний байт данных от ZX
+        case kInnerPortStatus:
+            return status_; // слово состояния целиком
         case kInnerPortDataFromPages:
         case kInnerPortCommandFromVolume:
             apply_status_link(port); // эти два двигают биты и при чтении
             return inner_[port];
-        default: return inner_[port];
+        default:
+            return inner_[port];
     }
 }
 
@@ -309,11 +318,11 @@ uint8_t GsDevice::inner_read(uint8_t port) {
 // бросаются.
 SOUNDSINTH_HOT_PATH_ATTR("gs_drop_pending_exchange")
 void GsDevice::drop_pending_exchange() {
-    status_ = kStatusIdle;
-    resp_n_ = 0;
-    resp_pos_ = 0;
-    tail_left_ = 0;
-    sink_left_ = 0;
+    status_     = kStatusIdle;
+    resp_n_     = 0;
+    resp_pos_   = 0;
+    tail_left_  = 0;
+    sink_left_  = 0;
     zeros_left_ = 0;
 }
 
@@ -323,19 +332,19 @@ void GsDevice::drop_pending_exchange() {
 SOUNDSINTH_HOT_PATH_ATTR("gs_card_memory_command")
 void GsDevice::card_memory_command(uint8_t value) {
     switch (value) {
-        case kCmdJump:      // SD ADR.L / SC / WC / SD ADR.H
-        case kCmdPoke20:    // SD ADR.L / SC / WC / SD Byte
+        case kCmdJump:   // SD ADR.L / SC / WC / SD ADR.H
+        case kCmdPoke20: // SD ADR.L / SC / WC / SD Byte
             tail_left_ = 1;
             break;
-        case kCmdLoadDe:    // SD E / SC / WC / SD D
-            de_ = arg_;
+        case kCmdLoadDe: // SD E / SC / WC / SD D
+            de_        = arg_;
             tail_left_ = 1;
             break;
-        case kCmdPeek:      // SD ADR.L / SC / WD / SD ADR.H / GD Byte
+        case kCmdPeek: // SD ADR.L / SC / WD / SD ADR.H / GD Byte
             tail_word_ = arg_;
             tail_left_ = 1;
             break;
-        case kCmdPoke:      // SD Byte / SC / WC / SD ADR.L / SD ADR.H
+        case kCmdPoke: // SD Byte / SC / WC / SD ADR.L / SD ADR.H
             tail_left_ = 2;
             break;
         case kCmdLoadBlock: // SD LEN.L / SC / SD LEN.H, ADR.L, ADR.H / SD x LEN
@@ -343,15 +352,15 @@ void GsDevice::card_memory_command(uint8_t value) {
             tail_word_ = arg_;
             tail_left_ = kBlockTailBytes;
             break;
-        case kCmdPokeDe:    // SD Byte / SC
+        case kCmdPokeDe: // SD Byte / SC
             break;
-        case kCmdIncDe:     // SC
+        case kCmdIncDe: // SC
             ++de_;
             break;
-        case kCmdPeekDe:    // SC / GD Byte
+        case kCmdPeekDe: // SC / GD Byte
             respond_u8(mem_peek(de_));
             break;
-        case kCmdPeek20:    // SD ADR.L / SC / GD Byte
+        case kCmdPeek20: // SD ADR.L / SC / GD Byte
             respond_u8(mem_peek(static_cast<uint16_t>(kPeek20Base | arg_)));
             break;
     }
@@ -457,7 +466,7 @@ Event GsDevice::write_command(uint8_t value) {
                 // Поток открывается уже здесь, #D1 ничего не делает: запись в
                 // GSDAT между #30 и #D1 идёт в поток. Номер модуля всегда 1, у GS
                 // их не бывает больше одного.
-                stream_ = Stream::Module;
+                stream_       = Stream::Module;
                 stream_bytes_ = 0;
                 respond_u8(1);
                 event = Event::StreamBegin;
@@ -510,7 +519,7 @@ Event GsDevice::write_command(uint8_t value) {
                     // hold_parse_done().
                     hold_parse_begin();
                     stream_ = Stream::None;
-                    event = Event::StreamEnd;
+                    event   = Event::StreamEnd;
                 }
                 break;
 
@@ -525,7 +534,7 @@ Event GsDevice::write_command(uint8_t value) {
 
     // Аргументы съедены командой: следующая получила бы чужие.
     if (value != kCmdStreamOpen) {
-        arg_ = 0;
+        arg_     = 0;
         has_arg_ = false;
     }
     return event;

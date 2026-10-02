@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 #include "core/codec/pattern_packer.h"
 
 #include <cstring>
@@ -16,11 +17,14 @@ uint32_t g_max_pattern_bytes = 0;
 uint32_t g_dict_compares = 0;
 
 PatternPacker::PatternPacker(uint8_t* buffer, uint32_t buffer_size, uint16_t row_count, uint8_t channel_count)
-    : buffer_(buffer), buffer_size_(buffer_size), row_count_(row_count), channel_count_(channel_count) {
+    : buffer_(buffer)
+    , buffer_size_(buffer_size)
+    , row_count_(row_count)
+    , channel_count_(channel_count) {
     const uint32_t header_size = row_offset_pos(row_count_);
-    write_cursor_ = header_size;
-    dict_cursor_ = buffer_size_;
-    ok_ = header_size <= buffer_size_;
+    write_cursor_              = header_size;
+    dict_cursor_               = buffer_size_;
+    ok_                        = header_size <= buffer_size_;
 }
 
 bool PatternPacker::cell_is_active(const soundsinth::model::PatternCell& c) {
@@ -35,7 +39,7 @@ uint8_t* PatternPacker::dict_entry(uint32_t k) {
 uint16_t PatternPacker::dict_lookup_or_insert(const soundsinth::model::PatternCell& cell) {
     // Смещения в блоке 16-битные, буфер не больше 64 КБ: индекс kDictFull
     // недостижим.
-    static_assert(65536u / kEncodedCellBytes < kDictFull, "индекс словаря в 16 бит");
+    static_assert(65536u / kEncodedCellBytes < kDictFull, "the dictionary index fits 16 bits");
     uint8_t encoded[kEncodedCellBytes];
     encode_cell(cell, encoded);
 
@@ -45,15 +49,15 @@ uint16_t PatternPacker::dict_lookup_or_insert(const soundsinth::model::PatternCe
     // проход: несовпадение младшего слова - прямой путь без перехода.
     // Записи уникальны, поэтому найденный индекс тот же, что при побайтовом
     // сравнении. Запись выровнена на 2, а не на 4: читается memcpy.
-    static_assert(kEncodedCellBytes == 6, "сравнение ниже - слово и полуслово");
+    static_assert(kEncodedCellBytes == 6, "the comparison below is a word and a half-word");
     uint32_t key_lo;
     uint16_t key_hi;
     std::memcpy(&key_lo, encoded, 4);
     std::memcpy(&key_hi, encoded + 4, 2);
     const uint8_t* const first = buffer_ + dict_cursor_;
-    const uint8_t* const end = first + dict_count_ * kEncodedCellBytes;
-    const uint8_t* entry = first;
-    auto hi_matches = [key_hi](const uint8_t* e) {
+    const uint8_t* const end   = first + dict_count_ * kEncodedCellBytes;
+    const uint8_t* entry       = first;
+    auto hi_matches            = [key_hi](const uint8_t* e) {
         uint16_t hi;
         std::memcpy(&hi, e + 4, 2);
         return hi == key_hi;
@@ -63,8 +67,14 @@ uint16_t PatternPacker::dict_lookup_or_insert(const soundsinth::model::PatternCe
         uint32_t a, b;
         std::memcpy(&a, entry, 4);
         std::memcpy(&b, entry + kEncodedCellBytes, 4);
-        if (SOUNDSINTH_UNLIKELY(a == key_lo) && hi_matches(entry)) { found = entry; break; }
-        if (SOUNDSINTH_UNLIKELY(b == key_lo) && hi_matches(entry + kEncodedCellBytes)) { found = entry + kEncodedCellBytes; break; }
+        if (SOUNDSINTH_UNLIKELY(a == key_lo) && hi_matches(entry)) {
+            found = entry;
+            break;
+        }
+        if (SOUNDSINTH_UNLIKELY(b == key_lo) && hi_matches(entry + kEncodedCellBytes)) {
+            found = entry + kEncodedCellBytes;
+            break;
+        }
     }
     if (found == nullptr && entry != end) {
         uint32_t a;
@@ -72,8 +82,8 @@ uint16_t PatternPacker::dict_lookup_or_insert(const soundsinth::model::PatternCe
         if (a == key_lo && hi_matches(entry)) found = entry;
     }
     if (found != nullptr) {
-        const uint32_t m = static_cast<uint32_t>(found - first) / kEncodedCellBytes;
-        g_dict_compares += m + 1;
+        const uint32_t m  = static_cast<uint32_t>(found - first) / kEncodedCellBytes;
+        g_dict_compares  += m + 1;
         return static_cast<uint16_t>(dict_count_ - 1 - m);
     }
     g_dict_compares += dict_count_;
@@ -90,7 +100,7 @@ bool PatternPacker::add_row(const soundsinth::model::PatternCell* cells) {
         return false;
     }
 
-    uint64_t mask = 0;
+    uint64_t mask         = 0;
     uint32_t active_count = 0;
     for (uint8_t ch = 0; ch < channel_count_; ++ch) {
         if (cell_is_active(cells[ch])) {
@@ -119,7 +129,7 @@ bool PatternPacker::add_row(const soundsinth::model::PatternCell* cells) {
     // Место под всю строку (маска и индексы) резервируется до вставок в
     // словарь, иначе вставка откусила бы ещё не записанное место строки.
     const uint32_t row_start = write_cursor_;
-    write_cursor_ = row_start + required;
+    write_cursor_            = row_start + required;
     if (active_count == 0) empty_row_offset_ = row_start;
 
     write_u16(buffer_ + table_pos, row_start);

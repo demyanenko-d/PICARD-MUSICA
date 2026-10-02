@@ -56,6 +56,7 @@ add_executable(soundsinth_tests
     test_live_stream.cpp
     test_live_chain.cpp
     test_it_golden.cpp
+    test_psram_alloc.cpp
     test_psram_pattern_alloc.cpp
     test_sequencer.cpp
     test_sequencer_libxmp.cpp
@@ -67,6 +68,7 @@ add_executable(soundsinth_tests
     test_gs_device.cpp
     test_ay_midi.cpp
     test_debug_ring.cpp
+    test_config.cpp
     test_hid.cpp
     test_hid_parser.cpp
     third_party/libxmp_itsex.cpp

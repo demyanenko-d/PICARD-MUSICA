@@ -10,35 +10,47 @@
 #include <cinttypes>
 #include <iterator>
 
-#include "tusb.h"
-
 #include "hardware/irq.h"
 #include "hardware/structs/powman.h"
 #include "hardware/structs/usb.h"
-#include "pico/platform.h"
+#include "hardware/structs/watchdog.h"
+#include "pico.h"
 
-#include "devices/hid/joystick.h"
-#include "devices/hid/keyboard.h"
-#include "devices/hid/mouse.h"
-#include "devices/hid/report_map.h"
-#include "devices/config/config_service.h"
-#include "devices/zcontroller/zcontroller.h"
-#include "devices/hid/usb_map.h"
+#include "tusb.h"
+
 #include "platform/boot_mode.h"
-#include "hal/host_signals.h"
+#include "platform/compiler.h"
 #include "platform/hot_path.h"
 #include "platform/log.h"
 #include "platform/mono_time.h"
 #include "platform/usb_host.h"
+
+#include "devices/config/config_service.h"
+#include "devices/hid/joystick.h"
+#include "devices/hid/keyboard.h"
+#include "devices/hid/mouse.h"
+#include "devices/hid/report_map.h"
+#include "devices/hid/usb_map.h"
+#include "devices/zcontroller/zcontroller.h"
+
+#include "hw_config.h" // IRQ_PRIO_USB
+
+#include "bus.h" // port_answer_state
+#include "hal/host_signals.h"
 #include "usb_msc.h"
+
+// Счётчик драйвера хоста TinyUSB: управляющие обмены, оборванные сроком.
+extern "C" volatile uint32_t soundsinth_hcd_ctrl_timeouts;
+extern "C" volatile uint32_t soundsinth_hcd_ctrl_cut_req;
+extern "C" volatile uint32_t soundsinth_hcd_ctrl_cut_value;
 
 namespace rp2350::usb {
 namespace {
 
-// Ниже всех шинных обработчиков и ниже звука: ответ машине на чтение
-// порта ждать USB не должен ни такта. Своего срока у хоста нет - кадр
-// шины 1 мс, а стек и так разбирается в цикле.
-constexpr uint8_t kIrqPriority = 0xC0;
+// Приоритет прерывания - bus::IRQ_PRIO_USB: ниже всех шинных обработчиков
+// и ниже звука, ответ машине на чтение порта ждать USB не должен ни такта.
+// Своего срока у хоста нет - кадр шины 1 мс, а стек и так разбирается в
+// цикле.
 
 // Чем занять ожидание внутри стека. Ставит цикл того ядра, которое ведёт
 // шину; до установки ожидания просто крутятся.
@@ -49,17 +61,15 @@ void* s_wait_user             = nullptr;
 // спрашивать стек на каждом отчёте - лишние обращения в горячем месте.
 enum class Role : uint8_t { None, Keyboard, Mouse, Gamepad };
 
-constexpr uint8_t kMaxDev = CFG_TUH_DEVICE_MAX + 1; // адреса с единицы
-constexpr uint8_t kMaxItf = CFG_TUH_HID;
+// Состояние интерфейса HID - массивами по idx обратных вызовов. В TinyUSB
+// 0.21.0 idx - номер в общем массиве интерфейсов HID стека (CFG_TUH_HID на
+// все устройства), а не номер интерфейса внутри устройства. Сменилась
+// версия TinyUSB - проверить заново.
+constexpr uint8_t kItfCount = CFG_TUH_HID;
 
-Role s_role[kMaxDev][kMaxItf];
+Role s_role[kItfCount];
+uint8_t s_dev[kItfCount]; // адрес устройства: повтору заказа нужна пара
 HostStats s_stats;
-
-Role& role_of(uint8_t dev_addr, uint8_t idx) {
-    static Role dummy = Role::None;
-    if (dev_addr >= kMaxDev || idx >= kMaxItf) return dummy;
-    return s_role[dev_addr][idx];
-}
 
 void count_role(Role r, int delta) {
     switch (r) {
@@ -77,6 +87,22 @@ void count_role(Role r, int delta) {
     }
 }
 
+// Сколько интерфейсов держат роль. Порт устройства один на роль, и снимать
+// его можно только с последним: вынули одну клавиатуру - пульт или вторая
+// клавиатура обязаны работать дальше.
+uint8_t role_count(Role r) {
+    switch (r) {
+        case Role::Keyboard:
+            return s_stats.hid_keyboards;
+        case Role::Mouse:
+            return s_stats.hid_mice;
+        case Role::Gamepad:
+            return s_stats.hid_gamepads;
+        default:
+            return 0;
+    }
+}
+
 // --- Что видно в журнале ---
 //
 // Подключение само по себе ничего не доказывает: устройство могло
@@ -87,79 +113,23 @@ void count_role(Role r, int delta) {
 
 // Карта полей интерфейса: что нашлось в его дескрипторе. Снимается один
 // раз при подключении, дальше по ней разбирается каждый отчёт.
-//
-// Карт ровно столько, сколько стек держит интерфейсов HID сразу, а не по
-// одной на каждую пару "адрес, интерфейс": вторых двадцать четыре, и
-// заняты из них хорошо если две. Владелец слота помнится рядом.
-constexpr uint8_t kMapSlots = CFG_TUH_HID;
-constexpr uint8_t kNoOwner  = 0xFF;
-
-devices::hid::ReportMap s_map[kMapSlots];
-uint8_t s_map_owner[kMapSlots];
-// Ответ, когда слота нет: пустая карта, и никто её не пишет - потому
-// const, то есть во флеше, а не в SRAM. Читается только на отчёте от
-// интерфейса без слота.
-const devices::hid::ReportMap s_map_none{};
-
-constexpr uint8_t kNoSlot = 0xFF;
-
-uint8_t owner_key(uint8_t dev_addr, uint8_t idx) {
-    return static_cast<uint8_t>((dev_addr << 4) | (idx & 0x0F));
-}
-
-// Номер слота этого интерфейса или kNoSlot. По слоту, а не по паре
-// "адрес, интерфейс", индексируется всё состояние интерфейса: пар
-// двадцать четыре, слотов четыре.
-uint8_t slot_of(uint8_t dev_addr, uint8_t idx) {
-    const uint8_t key = owner_key(dev_addr, idx);
-    for (uint8_t i = 0; i < kMapSlots; ++i) {
-        if (s_map_owner[i] == key) return i;
-    }
-    return kNoSlot;
-}
-
-// Слот под подключившийся интерфейс: свой, если он уже был, иначе первый
-// свободный. Слотов не осталось - карты не будет, отчёты пойдут мимо.
-uint8_t map_claim(uint8_t dev_addr, uint8_t idx) {
-    const uint8_t own = slot_of(dev_addr, idx);
-    if (own != kNoSlot) return own;
-    for (uint8_t i = 0; i < kMapSlots; ++i) {
-        if (s_map_owner[i] != kNoOwner) continue;
-        s_map_owner[i] = owner_key(dev_addr, idx);
-        return i;
-    }
-    return kNoSlot;
-}
-
-const devices::hid::ReportMap& map_of(uint8_t dev_addr, uint8_t idx) {
-    const uint8_t slot = slot_of(dev_addr, idx);
-    return slot == kNoSlot ? s_map_none : s_map[slot];
-}
+devices::hid::ReportMap s_map[kItfCount];
+static_assert(std::size(s_map) == CFG_TUH_HID, "a map for every HID interface of the stack");
 
 // Напечатан ли первый отчёт этого интерфейса, и прошлый отчёт
 // клавиатуры: модификаторы и шесть кодов. Печатать каждый - значит
 // печатать и автоповтор, а он идёт пока клавишу держат.
 //
-// По слоту, как и карта: пар "адрес, интерфейс" двадцать четыре, а
-// занятых слотов хорошо если два. Слот при отпускании чистится, иначе
-// следующая клавиатура получила бы чужой прошлый отчёт и первое нажатие
-// не напечаталось бы.
-bool s_first_report[kMapSlots];
-uint8_t s_last_kbd[kMapSlots][8];
+// При отпускании интерфейса чистится, иначе следующая клавиатура на том же
+// idx получила бы чужой прошлый отчёт и первое нажатие не напечаталось бы.
+bool s_first_report[kItfCount];
+uint8_t s_last_kbd[kItfCount][8];
 
-void slot_forget(uint8_t slot) {
-    if (slot >= kMapSlots) return;
-    s_first_report[slot] = false;
-    for (uint8_t& b : s_last_kbd[slot]) {
+void itf_forget(uint8_t idx) {
+    s_first_report[idx] = false;
+    for (uint8_t& b : s_last_kbd[idx]) {
         b = 0;
     }
-}
-
-void map_release(uint8_t dev_addr, uint8_t idx) {
-    const uint8_t slot = slot_of(dev_addr, idx);
-    if (slot == kNoSlot) return;
-    s_map_owner[slot] = kNoOwner;
-    slot_forget(slot);
 }
 
 uint8_t s_last_joy = 0;
@@ -170,29 +140,51 @@ int32_t s_mouse_dy                = 0;
 uint32_t s_mouse_reports          = 0;
 uint32_t s_mouse_foreign          = 0; // отчёты с чужим номером: осей в них нет
 uint8_t s_mouse_buttons           = 0;
+uint32_t s_mouse_prev_us          = 0;
+uint32_t s_mouse_gap_max_us       = 0;
 uint32_t s_mouse_logged_us        = 0;
 constexpr uint32_t kMousePeriodUs = 500u * 1000u;
+
+// Байты в шестнадцатеричный вид: две цифры и пробел на байт, в конце ноль.
+// Не влезающие в cap байты отбрасываются. Возвращает, сколько байт выведено.
+uint16_t hex_bytes(char* out, size_t cap, const uint8_t* p, uint16_t n) {
+    static const char kHex[] = "0123456789ABCDEF";
+    const size_t fit         = cap == 0 ? 0 : (cap - 1u) / 3u;
+    if (n > fit) n = static_cast<uint16_t>(fit);
+    for (uint16_t i = 0; i < n; ++i) {
+        out[i * 3u]      = kHex[p[i] >> 4];
+        out[i * 3u + 1u] = kHex[p[i] & 0x0fu];
+        out[i * 3u + 2u] = ' ';
+    }
+    if (cap != 0) out[n * 3u] = '\0';
+    return n;
+}
+
+const char* role_name(Role r) {
+    switch (r) {
+        case Role::Keyboard:
+            return "keyboard";
+        case Role::Mouse:
+            return "mouse";
+        case Role::Gamepad:
+            return "gamepad";
+        default:
+            return "device";
+    }
+}
 
 void log_raw(const char* what, uint8_t dev_addr, uint8_t idx, const uint8_t* report, uint16_t len) {
     // Буфер журнала 192 байта, поэтому не больше шестнадцати байт отчёта:
     // длиннее у загрузочных протоколов не бывает, а у джойстика хватает и
     // этого, чтобы увидеть раскладку.
     char hex[3 * 16 + 1];
-    uint16_t n = len > 16 ? 16 : len;
-    for (uint16_t i = 0; i < n; ++i) {
-        const uint8_t b = report[i];
-        hex[i * 3]      = "0123456789ABCDEF"[b >> 4];
-        hex[i * 3 + 1]  = "0123456789ABCDEF"[b & 0x0F];
-        hex[i * 3 + 2]  = ' ';
-    }
-    hex[n * 3] = '\0';
+    hex_bytes(hex, sizeof(hex), report, len);
     debug_logf("usb: first report %s %u/%u, %u B: %s\n", what, dev_addr, idx, len, hex);
 }
 
 void log_keyboard(uint8_t dev_addr, uint8_t idx, const uint8_t* report, uint16_t len) {
-    const uint8_t slot = slot_of(dev_addr, idx);
-    if (len < 8 || slot == kNoSlot) return;
-    uint8_t* last = s_last_kbd[slot];
+    if (len < 8) return;
+    uint8_t* last = s_last_kbd[idx];
     bool same     = true;
     for (uint8_t i = 0; i < 8; ++i) {
         if (last[i] != report[i]) same = false;
@@ -200,16 +192,13 @@ void log_keyboard(uint8_t dev_addr, uint8_t idx, const uint8_t* report, uint16_t
     }
     if (same) return; // автоповтор: состояние то же
 
-    char keys[3 * 6 + 1];
+    uint8_t codes[6];
     uint8_t n = 0;
     for (uint8_t i = 2; i < 8; ++i) {
-        if (report[i] == 0) continue;
-        keys[n * 3]     = "0123456789ABCDEF"[report[i] >> 4];
-        keys[n * 3 + 1] = "0123456789ABCDEF"[report[i] & 0x0F];
-        keys[n * 3 + 2] = ' ';
-        ++n;
+        if (report[i] != 0) codes[n++] = report[i];
     }
-    keys[n * 3] = '\0';
+    char keys[3 * 6 + 1];
+    hex_bytes(keys, sizeof(keys), codes, n);
     if (n == 0 && report[0] == 0) {
         debug_logf("usb: keyboard %u/%u - all released\n", dev_addr, idx);
         return;
@@ -222,8 +211,8 @@ void log_keyboard(uint8_t dev_addr, uint8_t idx, const uint8_t* report, uint16_t
 void log_mouse(const devices::hid::ReportMap& map, const uint8_t* report, uint16_t len) {
     int32_t dx       = 0;
     int32_t dy       = 0;
-    const bool got_x = devices::hid::report_field_read(map.axis[static_cast<uint8_t>(devices::hid::Axis::X)], report, len, dx);
-    const bool got_y = devices::hid::report_field_read(map.axis[static_cast<uint8_t>(devices::hid::Axis::Y)], report, len, dy);
+    const bool got_x = devices::hid::report_field_read(map.field(devices::hid::Axis::X), report, len, dx);
+    const bool got_y = devices::hid::report_field_read(map.field(devices::hid::Axis::Y), report, len, dy);
     if (got_x) s_mouse_dx += dx;
     if (got_y) s_mouse_dy += dy;
     // Отчёт не того номера - он не про мышь.
@@ -235,16 +224,28 @@ void log_mouse(const devices::hid::ReportMap& map, const uint8_t* report, uint16
     s_mouse_buttons = b;
     ++s_mouse_reports;
 
+    // Наибольший разрыв между отчётами. Медленное движение "залипает" либо
+    // от округления, либо оттого, что отчёты не доходят; округление
+    // ничего не теряет (остаток точный), так что отличает их только это
+    // число. Мышь шлёт раз в 8 мс - всё, что заметно больше, и есть помеха.
     const uint32_t now = platform::mono_us();
+    if (s_mouse_prev_us != 0) {
+        const uint32_t gap = now - s_mouse_prev_us;
+        if (gap > s_mouse_gap_max_us) s_mouse_gap_max_us = gap;
+    }
+    s_mouse_prev_us = now;
+
     if (now - s_mouse_logged_us < kMousePeriodUs) return;
     s_mouse_logged_us = now;
     debug_logf("usb: mouse - reports %" PRIu32 " (foreign %" PRIu32 "), delta %+" PRId32 " %+" PRId32 ", buttons 0x%02X, ZX x=%u y=%u b=0x%02X\n",
                s_mouse_reports, s_mouse_foreign, s_mouse_dx, s_mouse_dy, s_mouse_buttons, devices::hid::mouse_page()[devices::hid::kMouseHiX],
                devices::hid::mouse_page()[devices::hid::kMouseHiY], devices::hid::mouse_page()[devices::hid::kMouseHiButtons]);
-    s_mouse_reports = 0;
-    s_mouse_foreign = 0;
-    s_mouse_dx      = 0;
-    s_mouse_dy      = 0;
+    debug_logf("usb: mouse - longest gap between reports %" PRIu32 " us\n", s_mouse_gap_max_us);
+    s_mouse_gap_max_us = 0;
+    s_mouse_reports    = 0;
+    s_mouse_foreign    = 0;
+    s_mouse_dx         = 0;
+    s_mouse_dy         = 0;
 }
 
 // Дескриптор байтами, один раз при подключении. Буфер строки 192 Б,
@@ -252,14 +253,9 @@ void log_mouse(const devices::hid::ReportMap& map, const uint8_t* report, uint16
 void dump_descriptor(const uint8_t* desc, uint16_t len) {
     char line[80];
     for (uint16_t off = 0; off < len; off += 24u) {
-        const uint16_t n = (len - off) < 24u ? static_cast<uint16_t>(len - off) : 24u;
-        for (uint16_t i = 0; i < n; ++i) {
-            static const char kHex[] = "0123456789ABCDEF";
-            line[i * 3u]             = kHex[desc[off + i] >> 4];
-            line[i * 3u + 1u]        = kHex[desc[off + i] & 0x0Fu];
-            line[i * 3u + 2u]        = ' ';
-        }
-        line[n * 3u] = '\0';
+        const uint16_t left = static_cast<uint16_t>(len - off);
+        const uint16_t n    = left < 24u ? left : 24u;
+        hex_bytes(line, sizeof(line), desc + off, n);
         debug_logf("usb:   dsc %03u: %s\n", off, line);
     }
 }
@@ -289,25 +285,10 @@ void log_joystick() {
                (now & devices::hid::kJoyLeft) ? " left" : "", (now & devices::hid::kJoyRight) ? " right" : "", (now & devices::hid::kJoyFire) ? " fire" : "");
 }
 
-// Сброс шины USB: SE0 на линиях. Дольше 10 мс он возвращает любое
-// устройство в состояние Default с адресом 0 (спецификация USB 2.0,
-// 7.1.7.5).
-//
-// Нужен потому, что питание на разъёме не пропадает никогда - отключать
-// его плата не умеет. После перезапуска микроконтроллера (тройка с
-// клавиатуры, сброс с отладчика, отказ) устройство остаётся с прежним
-// адресом и на обращения к нулевому не отвечает: перечисление не идёт,
-// клавиатура мертва до снятия питания со всей машины.
-//
-// Стек этого не делает: hcd_port_reset у порта RP2350 - пустая заглушка,
-// шинный сброс он не выдаёт ни разу за всё перечисление.
-//
-// Разрядом SIE_CTRL.RESET_BUS этого не добиться: он самоочищается за
-// микросекунду, и SE0 после него на линиях не держится - замер платы дал
-// "SE0 держался 1 мкс" при клавиатуре, которая так и не перечислилась.
-// Поэтому держим сами, прямым управлением PHY мимо SIE: обе линии в ноль
-// на заданный срок - это и есть SE0, и длительность наша, а не
-// паспортная неизвестность.
+// Сброс шины USB: SE0 дольше 10 мс возвращает устройство в Default с адресом 0.
+// Питание на разъёме не снимается, и после перезапуска платы устройство
+// остаётся с прежним адресом. hcd_port_reset порта RP2350 пуст, а
+// SIE_CTRL.RESET_BUS держит SE0 1 мкс, поэтому SE0 ставится прямым управлением PHY.
 constexpr uint32_t kBusResetHoldUs     = 15000; // больше 10 мс по спецификации
 constexpr uint32_t kBusResetRecoveryUs = 20000; // TRSTRCY, с запасом
 
@@ -360,19 +341,19 @@ constexpr uint8_t kRetryLimit    = 2;
 uint32_t s_up_us   = 0;
 uint8_t s_retries  = 0;
 bool s_retry_armed = false;
+bool s_host_up     = false; // host_init звали: без него tuh_task не крутится
 
 } // namespace
 
 void host_init() {
-    for (auto& dev : s_role) {
-        for (Role& r : dev) {
-            r = Role::None;
-        }
+    for (Role& r : s_role) {
+        r = Role::None;
     }
-    for (uint8_t& o : s_map_owner) {
-        o = kNoOwner;
+    for (uint8_t& d : s_dev) {
+        d = 0;
     }
-    s_stats = HostStats{};
+    s_stats   = HostStats{};
+    s_host_up = true;
 
     // tuh_init(0) с 0.21.0 объявлен устаревшим: роль корневого порта теперь
     // задаётся явно, и одним вызовом поднимается любая сторона стека.
@@ -385,7 +366,7 @@ void host_init() {
         return;
     }
     // Приоритет - после подъёма: обработчик регистрирует он.
-    irq_set_priority(USBCTRL_IRQ, kIrqPriority);
+    irq_set_priority(USBCTRL_IRQ, bus::IRQ_PRIO_USB);
     // После подъёма: до него контроллер не в режиме хоста и шину не ведёт.
     // До первого витка стека: событие подключения лежит в очереди и
     // разбирается позже, так что перечисление начнётся уже по сброшенной
@@ -394,8 +375,10 @@ void host_init() {
     s_up_us = platform::mono_us();
     // Повтор сторожим только после тёплого перезапуска: по замеру после
     // снятия питания перечисление проходит всегда, и трогать работающее
-    // незачем.
-    s_retry_armed = (powman_hw->chip_reset & POWMAN_CHIP_RESET_HAD_POR_BITS) == 0u;
+    // незачем. Перезапуск сторожем (вход в конфигуратор, выход из него)
+    // CHIP_RESET не обновляет, и HAD_POR от включения держится через все
+    // такие перезапуски; их видно по причине в регистре сторожа.
+    s_retry_armed = (powman_hw->chip_reset & POWMAN_CHIP_RESET_HAD_POR_BITS) == 0u || watchdog_hw->reason != 0u;
     // Метка времени: от сброса до готовности хоста - это наша загрузка, а
     // дальше идёт перечисление, которым правит устройство. Без двух меток
     // "долго до клавиатуры" не поделить между ними.
@@ -411,13 +394,12 @@ void host_init() {
 // повторным заказом.
 //
 // Признак - конечная точка свободна: значит отчёта никто не ждёт. Проверка
-// идёт каждым витком, поэтому пропажа живёт один оборот цикла, а не до конца сеанса.
+// раз в kRearmPeriodUs, поэтому пропажа живёт не дольше 2 мс, а не до
+// переподключения.
 namespace {
-// По сроку, а не каждым витком. Решётка 6 на 4 развёрнута компилятором
-// целиком - около 96 команд впустую, когда устройств нет, а виток при
-// работающем плагине просыпается на каждом прерывании шины. Сторож ловит
-// единственный непрошедший заказ, и задержка в миллисекунды на нём не
-// сказывается.
+// По сроку, а не каждым витком: виток при работающем плагине просыпается на
+// каждом прерывании шины, а сторож ловит единственный непрошедший заказ, и
+// задержка в миллисекунды на нём не сказывается.
 constexpr uint32_t kRearmPeriodUs = 2000;
 
 void rearm_reports() {
@@ -425,40 +407,32 @@ void rearm_reports() {
     const uint32_t now        = platform::mono_us();
     if (now - s_last_us < kRearmPeriodUs) return;
     s_last_us = now;
-    for (uint8_t dev = 0; dev < kMaxDev; ++dev) {
-        for (uint8_t idx = 0; idx < kMaxItf; ++idx) {
-            if (s_role[dev][idx] == Role::None) continue;
-            if (!tuh_hid_receive_ready(dev, idx)) continue;
-            if (tuh_hid_receive_report(dev, idx)) ++s_stats.rearms;
-        }
+    // Циклом, а не развёрткой: проход раз в 2 мс, а развёртка - 40 байт SRAM.
+#pragma GCC unroll 1
+    for (uint8_t idx = 0; idx < kItfCount; ++idx) {
+        if (s_role[idx] == Role::None) continue;
+        if (!tuh_hid_receive_ready(s_dev[idx], idx)) continue;
+        if (tuh_hid_receive_report(s_dev[idx], idx)) ++s_stats.rearms;
     }
 }
 // --- Повтор подъёма стека после тёплого перезапуска ---
 //
-// Устройства за концентратором остаются под питанием и с прежними
-// адресами: SE0 на корневом порту сбрасывает сам концентратор, а его
-// нижние порты сброса не наследуют. Пропустив одно перечисление,
-// устройство не возвращается до снятия питания, и какое именно
-// пропустит - заранее не известно.
-//
-// Лечение: поднять стек заново. tuh_deinit гасит прерывание, разбирает
-// контроллер и отключает все устройства - то есть возвращает условие "в
-// полёте ничего нет". Повтор одного только сброса шины, без него, роняет
-// плату в панику.
-//
-// Цена попытки - пятнадцать миллисекунд SE0, и всё это время виток шины
-// стоит. Отсюда и срок: ждать до него, а не пробовать сразу. Машина к
-// этому моменту отпущена, так что заказ сектора эти миллисекунды ждёт -
-// видно в строке "sector request waited for the loop".
+// Устройства за концентратором после тёплого перезапуска сброса не получают,
+// и пропустившее перечисление не возвращается. Поэтому стек поднимается заново:
+// tuh_deinit останавливает все обмены; один сброс шины без него роняет HCD
+// в панику. Попытка стоит 35 мс (SE0 15 мс и восстановление 20 мс), на это
+// время цикл Core1 стоит; снятие и регистрация обработчика USB гасят
+// прерывания Core1 (PRIMASK).
 
 // Чего ждут настройки и чего не пришло. Мышь и джойстик сюда не входят:
 // их отсутствие ничего не ломает, а повтор из-за неподключенной мыши
 // стоил бы перечисления на каждой загрузке.
+// Флешку ждут, только если её берёт включённый эмулятор, и не в
+// конфигураторе: ему носитель не нужен.
 bool expected_device_missing() {
     const soundsinth::config::Settings& cfg = devices::config::settings();
     if (soundsinth::config::keyboard_enabled(cfg) && s_stats.hid_keyboards == 0) return true;
-    const bool usb_medium = cfg.disksys_media == static_cast<uint8_t>(soundsinth::config::Media::Usb) ||
-                            cfg.zcontroller_media == static_cast<uint8_t>(soundsinth::config::Media::Usb);
+    const bool usb_medium = !platform::config_rom_active() && soundsinth::config::usb_medium_needed(cfg);
     return usb_medium && msc_drive_count() == 0;
 }
 
@@ -469,15 +443,37 @@ void retry_host_if_short() {
         s_retry_armed = false; // всё пришло: больше не смотрим
         return;
     }
+    // Перезапуск отключает все устройства, и исправные тоже. Если с флешки
+    // уже читали, машина с неё грузится: без носителя она встанет, это
+    // хуже, чем остаться без клавиатуры.
+    if (msc_stats().read_cmds != 0) {
+        s_retry_armed = false;
+        debug_log("usb: a device is missing, but the drive is already in use - the host stack stays up\n");
+        return;
+    }
     ++s_retries;
     debug_logf("usb: expected device missing, restarting the host stack, attempt %u\n", s_retries);
     tuh_deinit(0);
     host_init();
 }
 
+// Тик платы, не стека USB: сроки сброса и NMI машины и перезапуск платы по
+// F12 и Win+F12 (host_signals_tick), признак носителя Z-Controller. Идёт
+// витком USB и только им: ожидание загрузки виток не крутит, и сигналы в
+// это время не отпускаются.
+SOUNDSINTH_ALWAYS_INLINE void board_tick() {
+    rp2350::hal::host_signals_tick();
+    devices::zcontroller::zcontroller_tick();
+}
+
 } // namespace
 
 void SOUNDSINTH_HOT_PATH(host_task)() {
+    if (!s_host_up) {
+        // Стек не поднят: остаётся тик платы.
+        board_tick();
+        return;
+    }
     const uint32_t start = platform::mono_us();
     tuh_task();
     msc_task();
@@ -485,11 +481,9 @@ void SOUNDSINTH_HOT_PATH(host_task)() {
     // После витка, а не до: внутри стека обмен может идти, а повтор
     // разбирает контроллер целиком.
     retry_host_if_short();
-    // Сброс и NMI подаёт клавиатура отсюда же, а держатся они по сроку.
-    rp2350::hal::host_signals_tick();
-    // Признак носителя у Z-Controller - здесь же: флешка встаёт в msc_task
-    // выше, и машина узнаёт о ней тем же витком.
-    devices::zcontroller::zcontroller_tick();
+    // После стека: сброс и NMI подаёт клавиатура этим же витком, а флешка
+    // встаёт в msc_task выше, и машина узнаёт о ней тем же витком.
+    board_tick();
     // Виток крутит ядро шины: сколько он занял, столько шина не получала
     // кооперативного обслуживания. Прерывания при этом идут - стек собран без
     // операционной системы и ничего не маскирует.
@@ -519,27 +513,42 @@ void host_log_health() {
     static uint32_t s_reported = 0;
     const HostStats s          = host_stats();
     // Прирост важнее суммы: по нему видно, идёт поток или устройство
-    // подключено и молчит.
-    const uint32_t delta = s.reports - s_reported;
+    // подключено и молчит. Перезапуск стека обнуляет s_stats: сумма меньше
+    // прошлой - прирост с нуля.
+    const uint32_t delta = s.reports >= s_reported ? s.reports - s_reported : s.reports;
     s_reported           = s.reports;
     debug_logf("usb: keyboards %u, mice %u, gamepads %u, disks %u | reports %" PRIu32 " (+%" PRIu32 ") | task max %" PRIu32 " us\n", s.hid_keyboards,
                s.hid_mice, s.hid_gamepads, s.msc_drives, s.reports, delta, s.task_max_us);
+    // Управляющие обмены, оборванные сроком драйвера хоста: устройство
+    // отвечало NAK дольше срока. Строка - только когда такие были; последний
+    // оборванный - устройство, запрос и этап.
+    if (const uint32_t cut = soundsinth_hcd_ctrl_timeouts; cut != 0) {
+        const uint32_t req = soundsinth_hcd_ctrl_cut_req;
+        const uint32_t val = soundsinth_hcd_ctrl_cut_value;
+        debug_logf("usb: control transfers cut by deadline %" PRIu32 ", last: device %u, request %02X/%02X, wValue %04X, wIndex %04X, stage ep %02X\n", cut,
+                   static_cast<unsigned>(req >> 24), static_cast<unsigned>((req >> 16) & 0xFFu), static_cast<unsigned>((req >> 8) & 0xFFu),
+                   static_cast<unsigned>(val & 0xFFFFu), static_cast<unsigned>(val >> 16), static_cast<unsigned>(req & 0xFFu));
+    }
     // Нажатия по кодам без записи в раскладке - своей строкой и только когда
     // они есть: в строку выше не влезает, а при жалобе "клавиша не
     // нажимается" ненулевое число сразу указывает на раскладку, а не на
     // дескриптор и не на потерю отчёта.
+    // Kempston: режим клавиатуры, кто держит порт и что порт 0x1F отвечает
+    // на шине на самом деле (ячейка таблицы портов, а не состояние
+    // устройства). Только когда порт кто-то держит или режим включён.
+    {
+        const bool arrows = devices::hid::usb_map_key_mode() == devices::hid::KeyMode::KempstonArrows;
+        const bool keys   = devices::hid::joystick_keys_held();
+        const bool pad    = devices::hid::joystick_pad_held();
+        if (arrows || keys || pad) {
+            const int32_t a = bus::port_answer_state(devices::hid::kJoystickPort);
+            debug_logf("usb: kempston mode %s, held keys %u pad %u, bits %02X, port 1F answers %s%02X\n", arrows ? "arrows" : "normal", keys ? 1u : 0u,
+                       pad ? 1u : 0u, devices::hid::joystick_state(), a == bus::kPortReleased ? "NOTHING " : (a == bus::kPortPaged ? "PAGE " : ""),
+                       a < 0 ? 0u : static_cast<unsigned>(a));
+        }
+    }
     const uint32_t unmapped = devices::hid::usb_map_unmapped_presses();
     if (unmapped != 0) debug_logf("usb: keys without a keymap entry %" PRIu32 "\n", unmapped);
-    // Обмен с флешкой - только когда он был. Среднее важнее суммы:
-    // по нему видно цену круга CBW-данные-CSW, а с ней и то, сколько
-    // даст пачка секторов одной командой.
-    const MscStats m = msc_stats();
-    if (m.reads != 0 || m.writes != 0 || m.failed != 0) {
-        debug_logf("usb: drive sector: reads %" PRIu32 " (mean %" PRIu32 " us, max %" PRIu32 " us), writes %" PRIu32 " (mean %" PRIu32 " us, max %" PRIu32
-                   " us), failed %" PRIu32 "\n",
-                   m.reads, m.reads ? static_cast<uint32_t>(m.read_total_us / m.reads) : 0u, m.read_max_us, m.writes,
-                   m.writes ? static_cast<uint32_t>(m.write_total_us / m.writes) : 0u, m.write_max_us, m.failed);
-    }
     // Печатается только когда есть что печатать: в норме сторож молчит.
     if (s.rearms != 0) {
         debug_logf("usb: watchdog re-armed transfers %" PRIu32 "\n", s.rearms);
@@ -552,7 +561,7 @@ void host_log_health() {
 // слоя платы. Единственное место, где он смотрит на время, - паузы
 // перечисления.
 extern "C" uint32_t tusb_time_millis_api(void) {
-    return platform::mono_us() / 1000u;
+    return platform::mono_ms();
 }
 
 // Пауза перечисления. Своя вместо готовой: та крутит пустой цикл, а пауза
@@ -581,13 +590,15 @@ void platform::usb_host_set_wait_service(void (*fn)(void*), void* user) {
 //
 // Зовутся из tuh_task, то есть из цикла Core1, а не из прерывания.
 
+namespace rp2350::usb {
+
 extern "C" {
 
 void tuh_mount_cb(uint8_t dev_addr) {
     uint16_t vid = 0;
     uint16_t pid = 0;
     tuh_vid_pid_get(dev_addr, &vid, &pid);
-    debug_logf("usb: device %u attached, %04x:%04x, t=%" PRIu32 " ms\n", dev_addr, vid, pid, platform::mono_us() / 1000u);
+    debug_logf("usb: device %u attached, %04x:%04x, t=%" PRIu32 " ms\n", dev_addr, vid, pid, platform::mono_ms());
 }
 
 void tuh_umount_cb(uint8_t dev_addr) {
@@ -595,14 +606,12 @@ void tuh_umount_cb(uint8_t dev_addr) {
 }
 
 void tuh_hid_mount_cb(uint8_t dev_addr, uint8_t idx, const uint8_t* desc, uint16_t desc_len) {
-    using rp2350::usb::Role;
+    if (idx >= kItfCount) return;
     const soundsinth::config::Settings& cfg = devices::config::settings();
     const uint8_t proto                     = tuh_hid_interface_protocol(dev_addr, idx);
     Role role                               = Role::Gamepad;
-    const char* name                        = "gamepad";
     if (proto == HID_ITF_PROTOCOL_KEYBOARD) {
         role = Role::Keyboard;
-        name = "keyboard";
         // Интерфейс берётся всегда, а на шину клавиатура выходит только по
         // настройке: Win+F12 обязан работать и при выключенной, иначе
         // вернуть её будет нечем. Сигнальные клавиши идут мимо матрицы.
@@ -617,44 +626,38 @@ void tuh_hid_mount_cb(uint8_t dev_addr, uint8_t idx, const uint8_t* desc, uint16
             return;
         }
         role = Role::Mouse;
-        name = "mouse";
         devices::hid::mouse_attach();
     } else {
-        if (cfg.usb_gamepad == 0) {
+        if (!devices::hid::joystick_allowed()) {
             debug_logf("usb: gamepad disabled by settings, interface %u of device %u not taken\n", idx, dev_addr);
             return;
         }
         devices::hid::joystick_attach();
     }
-    rp2350::usb::role_of(dev_addr, idx) = role;
-    rp2350::usb::count_role(role, +1);
+    s_role[idx] = role;
+    s_dev[idx]  = dev_addr;
+    count_role(role, +1);
+    // Первый отчёт печатается заново после каждого подключения: воткнули
+    // то же устройство - должно быть видно, что оно ожило.
+    itf_forget(idx);
     // Дескриптор разбирается здесь и только здесь: таблица предметов
     // разборщика велика, а нужна из неё выжимка в полсотни байт.
-    const uint8_t slot = rp2350::usb::map_claim(dev_addr, idx);
-    if (slot == rp2350::usb::kNoSlot) {
-        debug_logf("usb: no free maps, interface %u of device %u left unparsed\n", idx, dev_addr);
-        return;
-    }
-    // Первый отчёт печатается заново после каждого подключения: воткнули
-    // то же устройство - должно быть видно, что оно ожило. Чистится после
-    // занятия слота: до него номера ещё нет.
-    rp2350::usb::slot_forget(slot);
-    devices::hid::ReportMap& map = rp2350::usb::s_map[slot];
+    devices::hid::ReportMap& map = s_map[idx];
     const bool parsed            = devices::hid::report_map_build(desc, desc_len, map);
-    if (role == Role::Mouse && !map.axis[static_cast<uint8_t>(devices::hid::Axis::X)].present()) {
+    if (role == Role::Mouse && !map.field(devices::hid::Axis::X).present()) {
         // Дескриптор не разобрался или осей в нём нет: раскладка
         // загрузочной мыши задана спецификацией, ею и пользуемся.
         devices::hid::report_map_boot_mouse(map);
     }
 
-    debug_logf("usb: %s on device %u, interface %u, t=%" PRIu32 " ms\n", name, dev_addr, idx, platform::mono_us() / 1000u);
+    debug_logf("usb: %s on device %u, interface %u, t=%" PRIu32 " ms\n", role_name(role), dev_addr, idx, platform::mono_ms());
     // Код отказа разборщика рядом со словом: потолок предметов (32) и номеров
     // отчёта (8) лечится не так, как незнакомая страница назначений, а по
     // одному "НЕ РАЗОБРАН" их не различить.
     debug_logf("usb: descriptor %u B %s (code %u) | axes %u, hat %u, buttons %u, report ids %u\n", desc_len, parsed ? "parsed" : "NOT PARSED",
                devices::hid::report_map_last_error(), map.has_axes() ? 1u : 0u, map.hat.present() ? 1u : 0u, map.button_count, map.uses_report_ids ? 1u : 0u);
-    rp2350::usb::dump_descriptor(desc, desc_len);
-    rp2350::usb::dump_report_map(map);
+    dump_descriptor(desc, desc_len);
+    dump_report_map(map);
 
     // Первый заказ отчёта: дальше каждый следующий заказывается из
     // обработчика принятого, иначе поток прекратится после первого.
@@ -664,61 +667,65 @@ void tuh_hid_mount_cb(uint8_t dev_addr, uint8_t idx, const uint8_t* desc, uint16
 }
 
 void tuh_hid_umount_cb(uint8_t dev_addr, uint8_t idx) {
-    using rp2350::usb::Role;
-    Role& r = rp2350::usb::role_of(dev_addr, idx);
+    if (idx >= kItfCount) return;
+    Role& r = s_role[idx];
+    if (r == Role::None) return;
+    count_role(r, -1);
     // Отпустить всё: зажатое при отключении осталось бы висеть на шине.
+    // Оставшиеся устройства той же роли пришлют своё состояние следующим
+    // отчётом. Порт снимается только с последним держателем роли.
+    const bool last = role_count(r) == 0;
     switch (r) {
         case Role::Keyboard:
             devices::hid::usb_map_keyboard_release_all();
-            devices::hid::keyboard_detach();
+            if (last) devices::hid::keyboard_detach();
             break;
         case Role::Mouse:
-            devices::hid::mouse_detach();
+            if (last) devices::hid::mouse_detach();
             break;
         case Role::Gamepad:
             devices::hid::usb_map_gamepad_release_all();
-            devices::hid::joystick_detach();
+            if (last) devices::hid::joystick_detach();
             break;
         default:
-            return;
+            break;
     }
-    rp2350::usb::count_role(r, -1);
-    r = Role::None;
-    rp2350::usb::map_release(dev_addr, idx);
+    r          = Role::None;
+    s_dev[idx] = 0;
+    itf_forget(idx);
     debug_logf("usb: interface %u of device %u detached\n", idx, dev_addr);
 }
 
 void tuh_hid_report_received_cb(uint8_t dev_addr, uint8_t idx, const uint8_t* report, uint16_t len) {
-    using rp2350::usb::Role;
-    const Role role = rp2350::usb::role_of(dev_addr, idx);
+    if (idx >= kItfCount) return;
+    const Role role = s_role[idx];
 
     // Первый отчёт печатается целиком: по нему видно, что отчёты доходят от
     // устройства, и сразу показывает раскладку - у джойстиков она
     // своя у каждого.
-    const uint8_t slot = rp2350::usb::slot_of(dev_addr, idx);
-    if (slot != rp2350::usb::kNoSlot && !rp2350::usb::s_first_report[slot]) {
-        rp2350::usb::s_first_report[slot] = true;
-        const char* what                  = role == Role::Keyboard ? "keyboard" : role == Role::Mouse ? "mouse" : role == Role::Gamepad ? "gamepad" : "device";
-        rp2350::usb::log_raw(what, dev_addr, idx, report, len);
+    if (role != Role::None && !s_first_report[idx]) {
+        s_first_report[idx] = true;
+        log_raw(role_name(role), dev_addr, idx, report, len);
     }
 
+    const devices::hid::ReportMap& map = s_map[idx];
     switch (role) {
         case Role::Keyboard:
-            devices::hid::usb_map_keyboard(rp2350::usb::map_of(dev_addr, idx), report, len);
-            rp2350::usb::log_keyboard(dev_addr, idx, report, len);
+            devices::hid::usb_map_keyboard(map, report, len);
+            log_keyboard(dev_addr, idx, report, len);
             break;
         case Role::Mouse:
-            devices::hid::usb_map_mouse(rp2350::usb::map_of(dev_addr, idx), report, len);
-            rp2350::usb::log_mouse(rp2350::usb::map_of(dev_addr, idx), report, len);
+            devices::hid::usb_map_mouse(map, report, len);
+            log_mouse(map, report, len);
             break;
         case Role::Gamepad:
-            devices::hid::usb_map_gamepad(rp2350::usb::map_of(dev_addr, idx), report, len);
-            rp2350::usb::log_joystick();
+            devices::hid::usb_map_gamepad(map, report, len);
+            log_joystick();
             break;
         default:
             break;
     }
-    ++rp2350::usb::s_stats.reports;
+    ++s_stats.reports;
 
     // Заказ следующего - здесь: без него устройство замолкает. Не прошёл -
     // подберёт сторожевой виток, поэтому возврат не проверяется.
@@ -726,3 +733,5 @@ void tuh_hid_report_received_cb(uint8_t dev_addr, uint8_t idx, const uint8_t* re
 }
 
 } // extern "C"
+
+} // namespace rp2350::usb

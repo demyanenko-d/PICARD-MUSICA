@@ -7,6 +7,8 @@
 add_library(soundsinth_player STATIC
     bank_sd.cpp
     gs/bridge.cpp
+    gs/fx_player.cpp
+    gs/midi_sched.cpp
     audio/buffer_pool.cpp
     protocol/host_protocol.cpp
     load/bus_byte_source.cpp

@@ -6,18 +6,14 @@
 
 namespace player::audio {
 
+// Память стека задаёт потолок роли в платформе, ключ только передаётся в
+// заведение задачи: разойдутся - ужатие ключом не освободит ни байта.
+static_assert(SOUNDSINTH_RENDER_TASK_STACK_WORDS == platform::kOsTaskStackWords[static_cast<uint32_t>(platform::TaskRole::Render)],
+              "stack size key and the platform stack ceiling disagree");
+
 namespace {
 
-// Задача рендера заводится один раз и живёт до перезагрузки: между треками
-// она стоит на s_start. Пересоздавать её на каждый трек нельзя - stop()
-// возвращается, пока задача ещё доживает свой последний виток, и второй
-// запуск на то же место порвал бы списки планировщика.
-//
-// Семафоры тоже одни на все треки: их владелец - задача, а не трек.
-platform::Semaphore* s_start          = nullptr; // трек -> задача: работать
-platform::Semaphore* s_finished       = nullptr; // задача -> трек: виток кончился
-platform::Semaphore* s_stop_requested = nullptr; // трек -> задача: кончай
-RenderTask* s_current                 = nullptr;
+ParkedTask s_task;
 
 } // namespace
 
@@ -25,21 +21,10 @@ RenderTask::RenderTask(soundsinth::mixbus::MixBus& bus, BufferPool& pool, std::a
     : bus_(bus)
     , pool_(pool)
     , busy_us_counter_(busy_us_counter) {
-    if (s_start == nullptr) {
-        s_start          = platform::os_sem_create(0, 1);
-        s_finished       = platform::os_sem_create(0, 1);
-        s_stop_requested = platform::os_sem_create(0, 1);
-        platform::os_task_create_static(platform::TaskRole::Render, &RenderTask::task_fn, nullptr, "render_task", SOUNDSINTH_RENDER_TASK_STACK_WORDS,
-                                        SOUNDSINTH_RENDER_TASK_PRIORITY);
+    if (!s_task.created()) {
+        s_task.create<RenderTask>(platform::TaskRole::Render, "render_task", SOUNDSINTH_RENDER_TASK_STACK_WORDS, SOUNDSINTH_RENDER_TASK_PRIORITY);
     }
-    // Счётчик с прошлого трека не переносится: остаток обернулся бы
-    // мгновенной остановкой нового. Сбрасывается здесь, а не в задаче:
-    // задача сейчас заведомо стоит на s_start и помешать не может.
-    while (platform::os_sem_try_wait(s_stop_requested)) {
-    }
-    // Себя видимым до пробуждения: задача берёт указатель сразу после s_start.
-    s_current = this;
-    platform::os_sem_post(s_start);
+    s_task.launch(this);
 }
 
 RenderTask::~RenderTask() {
@@ -49,23 +34,9 @@ RenderTask::~RenderTask() {
 }
 
 void RenderTask::stop(void (*on_slow)(uint32_t waited_ms)) {
-    platform::os_sem_post(s_stop_requested);
-    uint32_t waited = 0;
-    while (!platform::os_sem_wait_ms(s_finished, kStopWaitPortionMs)) {
-        waited += kStopWaitPortionMs;
-        if (on_slow) on_slow(waited);
-    }
-    stopped_  = true;
-    s_current = nullptr;
-}
-
-void RenderTask::task_fn(void*) {
-    for (;;) {
-        platform::os_sem_wait(s_start);
-        RenderTask* const self = s_current;
-        if (self != nullptr) self->run();
-        platform::os_sem_post(s_finished);
-    }
+    s_task.request_stop();
+    s_task.wait_stopped(on_slow);
+    stopped_ = true;
 }
 
 void RenderTask::run() {
@@ -74,7 +45,7 @@ void RenderTask::run() {
     // нынешний промежуток, а замеряется в конце прошлого оборота.
     uint32_t prev_push_us = 0;
     bool have_prev        = false;
-    while (!platform::os_sem_try_wait(s_stop_requested)) {
+    while (!s_task.stop_requested()) {
         const uint32_t wait0   = platform::time_us();
         int16_t* w             = pool_.begin_write(); // ожидание, это не занятость ядра
         const uint32_t t0      = platform::time_us();

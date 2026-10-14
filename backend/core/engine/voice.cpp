@@ -2,6 +2,7 @@
 #include "core/engine/voice.h"
 
 #include <cmath>
+#include <cstring>
 
 #include "platform/compiler.h"
 #include "platform/hot_path.h"
@@ -443,6 +444,177 @@ void voice_recompute_linear_step(Voice& voice, int32_t amount_units, uint32_t c5
     voice.pitch_memo_c5 = c5_speed;
 }
 
+namespace {
+
+// Родной отсчёт прямого кодека по адресу в странице.
+template <ResidentEncoding kEnc>
+SOUNDSINTH_ALWAYS_INLINE int32_t direct_at(const uint8_t* p) {
+    if constexpr (kEnc == ResidentEncoding::Raw16) {
+        int16_t v;
+        std::memcpy(&v, p, sizeof v); // младший байт первым, как raw16_from_bytes
+        return v;
+    } else {
+        return raw8_to_s16(p[0]);
+    }
+}
+
+// Сегмент прямого кодека без эрмитовой интерполяции: выходные отсчёты, за
+// которые голос не выходит ни за страницу, ни за loop_end. Указатель, дробь,
+// шаг и пара prev/next - в регистрах, в Voice пишется раз на сегмент. Стык
+// страницы, заворот петли и конец сэмпла оставлены обычному проходу: сегмент
+// останавливается на отсчёте, который бы их задел.
+//
+// Арифметика та же, что у обычного прохода: интерполяция interpolate_linear,
+// новые родные отсчёты по одному (k = 1, 2 - последовательный путь) или
+// последние два из k (k >= 3 - прыжок). Счётчики диагностики - те же.
+// Возвращает число выданных отсчётов, 0 - сегмента нет.
+template <ResidentEncoding kEnc>
+SOUNDSINTH_ALWAYS_INLINE uint32_t render_direct_segment(Voice& voice, memory::PsramStore& psram, int16_t* __restrict out, uint32_t n_frames) {
+    constexpr uint32_t kStride = soundsinth::model::resident_bytes_per_sample(kEnc);
+    const uint32_t start       = voice.decoded_count;
+    if (start >= voice.loop_end || voice.page == memory::kPageChainEnd) return 0;
+    const uint32_t in_page = (memory::kPsramPageBytes - voice.byte_offset) / kStride;
+    const uint32_t to_end  = voice.loop_end - start;
+    const uint32_t avail   = in_page < to_end ? in_page : to_end;
+    uint32_t frac          = voice.frac_pos;
+    const uint32_t step    = voice.step;
+    // Отсчётов, после которых съедено не больше avail родных:
+    // (frac + n * step) >> 16 <= avail.
+    uint32_t n = n_frames;
+    if (step != 0) {
+        const uint32_t fit = ((((avail + 1u) << kQ16Bits) - 1u) - frac) / step;
+        if (fit < n) n = fit;
+    }
+    if (n == 0) return 0;
+
+    const uint8_t* p   = memory::psram_page_ptr(psram, voice.page) + voice.byte_offset;
+    int32_t prev       = voice.prev_sample;
+    int32_t next       = voice.next_sample;
+    uint32_t q         = 0; // съедено родных от start
+    uint32_t decodes   = 0;
+    uint32_t jumps     = 0;
+    uint32_t discarded = 0;
+    for (uint32_t j = 0; j < n; ++j) {
+        out[j]            = static_cast<int16_t>(prev + static_cast<int32_t>((static_cast<int64_t>(next - prev) * static_cast<int64_t>(frac)) >> kQ16Bits));
+        frac             += step;
+        const uint32_t k  = frac >> kQ16Bits;
+        frac             &= kQ16One - 1u;
+        if (k == 0) continue;
+        if (k == 1) {
+            prev = next;
+            next = direct_at<kEnc>(p + q * kStride);
+            ++decodes;
+        } else {
+            prev = direct_at<kEnc>(p + (q + k - 2u) * kStride);
+            next = direct_at<kEnc>(p + (q + k - 1u) * kStride);
+            if (k < 3u) {
+                decodes += 2u;
+            } else if (q + k == to_end && !voice.loop_enabled) {
+                // Обычный проход здесь не прыгает: незацикленный сэмпл кончается
+                // в этой пачке, и он декодирует её подряд.
+                decodes   += k;
+                discarded += k - 2u;
+            } else {
+                ++jumps;
+            }
+        }
+        q += k;
+    }
+
+    voice.prev_sample    = static_cast<int16_t>(prev);
+    voice.next_sample    = static_cast<int16_t>(next);
+    voice.frac_pos       = frac;
+    voice.decoded_count  = start + q;
+    const uint32_t bytes = voice.byte_offset + q * kStride; // не дальше конца страницы
+    if (bytes >= memory::kPsramPageBytes) {
+        voice.byte_offset = static_cast<uint16_t>(bytes - memory::kPsramPageBytes);
+        voice.page        = memory::psram_page_next(psram, voice.page);
+    } else {
+        voice.byte_offset = static_cast<uint16_t>(bytes);
+    }
+    s_decode_calls     += decodes;
+    s_direct_jumps     += jumps;
+    s_discarded_direct += discarded;
+    return n;
+}
+
+// Сегмент Dpcm8 без эрмитовой интерполяции: то же, что render_direct_segment,
+// но отсчёт зависит от всей цепочки байтов - предсказатель идёт по каждому
+// пройденному байту. Ещё одна граница - loop_start, пока точка петли не
+// захвачена: её ставит обычный проход ровно на этом отсчёте.
+//
+// Арифметика та же, что у обычного прохода: k = 1, 2 - последовательные
+// декоды, k >= 3 - пропуск k - 2 байтов шагом предсказателя
+// (dpcm_skip_forward) и два декода. Счётчики диагностики - те же.
+SOUNDSINTH_ALWAYS_INLINE uint32_t render_dpcm8_segment(Voice& voice, memory::PsramStore& psram, int16_t* __restrict out, uint32_t n_frames) {
+    const uint32_t start = voice.decoded_count;
+    if (start >= voice.loop_end || voice.page == memory::kPageChainEnd) return 0;
+    uint32_t avail        = memory::kPsramPageBytes - voice.byte_offset;
+    const uint32_t to_end = voice.loop_end - start;
+    if (to_end < avail) avail = to_end;
+    if (voice.loop_enabled && !voice.loop_checkpoint_captured && start <= voice.loop_start) {
+        const uint32_t to_loop = voice.loop_start - start;
+        if (to_loop < avail) avail = to_loop;
+    }
+    uint32_t frac       = voice.frac_pos;
+    const uint32_t step = voice.step;
+    uint32_t n          = n_frames;
+    if (step != 0) {
+        const uint32_t fit = ((((avail + 1u) << kQ16Bits) - 1u) - frac) / step;
+        if (fit < n) n = fit;
+    }
+    if (n == 0) return 0;
+
+    const uint8_t* p   = memory::psram_page_ptr(psram, voice.page) + voice.byte_offset;
+    int32_t pred       = voice.dpcm_state.predictor;
+    int32_t prev       = voice.prev_sample;
+    int32_t next       = voice.next_sample;
+    uint32_t q         = 0; // пройдено байтов от start
+    uint32_t decodes   = 0;
+    uint32_t discarded = 0;
+    for (uint32_t j = 0; j < n; ++j) {
+        out[j]      = static_cast<int16_t>(prev + static_cast<int32_t>((static_cast<int64_t>(next - prev) * static_cast<int64_t>(frac)) >> kQ16Bits));
+        frac       += step;
+        uint32_t k  = frac >> kQ16Bits;
+        frac       &= kQ16One - 1u;
+        if (k == 0) continue;
+        if (k >= 3u) {
+            const uint32_t skip = k - 2u;
+            for (uint32_t m = 0; m < skip; ++m) {
+                pred = dpcm8::decode_step(pred, p[q + m]);
+            }
+            q         += skip;
+            discarded += skip;
+            k          = 2u;
+        }
+        decodes += k;
+        for (uint32_t m = 0; m < k; ++m) {
+            prev = next;
+            pred = dpcm8::decode_step(pred, p[q]);
+            next = pred;
+            ++q;
+        }
+    }
+
+    voice.prev_sample          = static_cast<int16_t>(prev);
+    voice.next_sample          = static_cast<int16_t>(next);
+    voice.dpcm_state.predictor = static_cast<int16_t>(pred);
+    voice.frac_pos             = frac;
+    voice.decoded_count        = start + q;
+    const uint32_t bytes       = voice.byte_offset + q; // не дальше конца страницы
+    if (bytes >= memory::kPsramPageBytes) {
+        voice.byte_offset = static_cast<uint16_t>(bytes - memory::kPsramPageBytes);
+        voice.page        = memory::psram_page_next(psram, voice.page);
+    } else {
+        voice.byte_offset = static_cast<uint16_t>(bytes);
+    }
+    s_decode_calls    += decodes;
+    s_discarded_dpcm8 += discarded;
+    return n;
+}
+
+} // namespace
+
 // Вне безымянного namespace намеренно: с внутренним связыванием GCC встраивает
 // варианты в voice_render и выносит decode_and_advance<Dpcm8> из цикла.
 //
@@ -462,6 +634,13 @@ uint32_t SOUNDSINTH_HOT_PATH(voice_render_impl)(Voice& voice, memory::PsramStore
     constexpr uint32_t kFastPathMinFrac = (kUsed + 1u) << kQ16Bits;
     uint32_t produced                   = 0;
     while (produced < n_frames && voice.active) {
+        if constexpr (kDirect && !kHermite) {
+            produced += render_direct_segment<kEnc>(voice, psram, out + produced, n_frames - produced);
+            if (produced >= n_frames || !voice.active) break;
+        } else if constexpr (kEnc == ResidentEncoding::Dpcm8 && !kHermite) {
+            produced += render_dpcm8_segment(voice, psram, out + produced, n_frames - produced);
+            if (produced >= n_frames || !voice.active) break;
+        }
         if constexpr (kHermite) {
             out[produced++] = interpolate_hermite(voice);
         } else {

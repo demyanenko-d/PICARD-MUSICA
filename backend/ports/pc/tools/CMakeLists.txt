@@ -29,7 +29,33 @@ target_link_libraries(_sizecheck PRIVATE soundsinth_core platform_pc)
 target_compile_features(_sizecheck PRIVATE cxx_std_17)
 
 # Хэш того, что строит конвертер .mid (Song, арена, зона паттернов PSRAM) -
-# сторож перестроек загрузчика в tmp-проверках.
+# сторож перестроек загрузчика: хэш до правки и после обязан совпасть.
 add_executable(midi_song_hash midi_song_hash.cpp)
 target_link_libraries(midi_song_hash PRIVATE platform_pc)
 target_compile_features(midi_song_hash PRIVATE cxx_std_17)
+
+# Стенд Z-Player: гоняет настоящий плеер на ядре Z80 из Unreal против
+# GsDevice и пишет журнал обращений к портам с указанием PC. Цель
+# заводится, только когда исходники стенда на месте.
+set(ZPLAYER_TOOLS ${CMAKE_CURRENT_SOURCE_DIR}/../../../../ZPlayer/tools)
+if(EXISTS ${ZPLAYER_TOOLS}/zp_gs_run.cpp AND EXISTS ${ZPLAYER_TOOLS}/z80core/z80_cpu.cpp)
+    add_executable(zp_gs_run
+        ${ZPLAYER_TOOLS}/zp_gs_run.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/../../../devices/gs/gs_device.cpp
+        ${ZPLAYER_TOOLS}/z80core/z80_cpu.cpp
+        ${ZPLAYER_TOOLS}/z80core/tables.cpp
+        ${ZPLAYER_TOOLS}/z80core/op_noprefix.cpp
+        ${ZPLAYER_TOOLS}/z80core/op_cb.cpp
+        ${ZPLAYER_TOOLS}/z80core/op_dd.cpp
+        ${ZPLAYER_TOOLS}/z80core/op_ddcb.cpp
+        ${ZPLAYER_TOOLS}/z80core/op_ed.cpp
+        ${ZPLAYER_TOOLS}/z80core/op_fd.cpp
+        ${ZPLAYER_TOOLS}/z80core/daa_table.cpp)
+    target_include_directories(zp_gs_run PRIVATE
+        ${ZPLAYER_TOOLS}/z80core
+        ${CMAKE_CURRENT_SOURCE_DIR}/../../..)
+    target_compile_definitions(zp_gs_run PRIVATE Z80_STANDALONE_BUILD)
+    target_compile_features(zp_gs_run PRIVATE cxx_std_17)
+else()
+    message(STATUS "zp_gs_run: каталога ZPlayer/tools нет, стенд не собирается")
+endif()

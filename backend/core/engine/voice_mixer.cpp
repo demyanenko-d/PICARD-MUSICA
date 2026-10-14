@@ -295,7 +295,10 @@ void VoiceMixer::mix(memory::PsramStore& psram, int32_t* mix_l, int32_t* mix_r, 
         // шины (Q24.8), шина реверберации - в целых единицах int16: дробь
         // снимается делителем, иначе умножение на посыл переполнило бы int32.
         const uint8_t rev_send = reverb_send[idx];
-        const int32_t send_q16 = rev_send ? (((gain_l + gain_r) / (2 << (kGainQ24Bits - kQ16Bits))) * static_cast<int32_t>(rev_send)) / 127 : 0;
+        const int32_t gain_q16 = (gain_l + gain_r) / (2 << (kGainQ24Bits - kQ16Bits));
+        const int32_t send_q16 = rev_send ? (gain_q16 * static_cast<int32_t>(rev_send)) / 127 : 0;
+        const uint8_t cho_send = chorus_send[idx];
+        const int32_t cho_q16  = cho_send ? (gain_q16 * static_cast<int32_t>(cho_send)) / 127 : 0;
 
         // Затухание подмешивается параллельно, с начала батча, а не после голоса.
         // Иначе оно работало бы только для мёртвых голосов, а самый частый случай -
@@ -353,13 +356,27 @@ void VoiceMixer::mix(memory::PsramStore& psram, int32_t* mix_l, int32_t* mix_r, 
             }
 
             // Только голоса с посылом; не дальше reverb_frames - иначе запись за буфер.
-            if (send_q16 != 0 && i + done < reverb_frames) {
+            // Оба посыла - одним проходом: отсчёт голоса читается раз, а не по
+            // разу на шину.
+            if ((send_q16 | cho_q16) != 0 && i + done < reverb_frames) {
                 const uint32_t base = i + done;
                 uint32_t take       = reverb_frames - base;
                 if (take > produced) take = produced;
-                int32_t* bus = reverb_bus + base;
-                for (uint32_t e = 0; e < take; ++e) {
-                    bus[e] += (static_cast<int32_t>(voice_scratch[e]) * send_q16) >> kQ16Bits;
+                const int16_t* __restrict src = voice_scratch;
+                if (send_q16 != 0 && cho_q16 != 0) {
+                    int32_t* __restrict rev = reverb_bus + base;
+                    int32_t* __restrict cho = chorus_bus + base;
+                    for (uint32_t e = 0; e < take; ++e) {
+                        const int32_t x  = src[e];
+                        rev[e]          += (x * send_q16) >> kQ16Bits;
+                        cho[e]          += (x * cho_q16) >> kQ16Bits;
+                    }
+                } else {
+                    int32_t* __restrict bus = (send_q16 != 0 ? reverb_bus : chorus_bus) + base;
+                    const int32_t q         = send_q16 != 0 ? send_q16 : cho_q16;
+                    for (uint32_t e = 0; e < take; ++e) {
+                        bus[e] += (static_cast<int32_t>(src[e]) * q) >> kQ16Bits;
+                    }
                 }
             }
 

@@ -22,8 +22,10 @@ namespace soundsinth::formats::midi {
 
 using soundsinth::model::Effect;
 using soundsinth::model::Envelope;
+using soundsinth::model::FxParam;
 using soundsinth::model::Instrument;
 using soundsinth::model::KeymapRange;
+using soundsinth::model::kFxParamDefault;
 using soundsinth::model::kNoteNone;
 using soundsinth::model::kNoteOff;
 using soundsinth::model::PatternCell;
@@ -50,6 +52,9 @@ constexpr uint8_t kMasterVolumeStatus = 0xf1;
 // оно приходит по ходу игры, а не известно заранее, как у файла. d1 - канал,
 // d2 - ударный он теперь или нет.
 constexpr uint8_t kDrumChannelStatus = 0xf2;
+// Параметр общего эффекта из SysEx (sysex_effect_param): d1 - номер
+// FxParam, d2 - значение 0..127.
+constexpr uint8_t kEffectParamStatus = 0xf3;
 
 // Кэш выбора слоёв ноты: строка - пресет, клавиша и полоса силы удара.
 constexpr uint32_t kLayerCacheSlots = 1024;
@@ -96,6 +101,8 @@ struct MidiChannel {
     // CC91 - посыл в общий ревербератор, умолчание 0, а не 40 по GM2: эталонный
     // синтезатор без CC91 реверберации не добавляет. CC91 стоит у 51% архива.
     uint8_t cc91 = 0;
+    // CC93 - посыл в общий хорус, умолчание 0, как у CC91.
+    uint8_t cc93 = 0;
     // Портаменто: CC65 включает, CC5 задаёт время; задевает 2.25% архива.
     // Трекерный TonePorta делает то же: тянет высоту к ноте ячейки, не
     // перезапуская сэмпл.
@@ -137,7 +144,10 @@ struct TrackerChannel {
     // на канал, дальше только глубина; после смены темпа - заново.
     bool vib_speed_set = false;
     uint8_t rev        = 0xff;
-    uint16_t inst      = 0xffff; // инструмент канала: скользить можно только к тому же тембру
+    // Последний выписанный посыл хоруса. Начало 0, как у канала движка:
+    // файл без CC93 не получает ни одной команды хоруса.
+    uint8_t cho   = 0;
+    uint16_t inst = 0xffff; // инструмент канала: скользить можно только к тому же тембру
     // Сколько строк ещё дописывать TonePorta. Команда действует одну строку
     // (tone_porta_active сбрасывается построчно), поэтому скольжение
     // ведётся явно до конца - как Gxx на каждой строке перехода в модуле.
@@ -231,7 +241,12 @@ struct Converter {
     uint8_t vibrato_speed          = 0;
     // Общая громкость, запрошенная SysEx: выписывает её проход строки.
     uint8_t want_global = 0;
-    bool reverb_used    = false;
+    // Параметры общих эффектов: запрошенные SysEx и последние выписанные в
+    // ячейки. Выписывает finish_row при расхождении.
+    uint8_t want_fx[static_cast<uint32_t>(FxParam::Count)] = {kFxParamDefault, kFxParamDefault, kFxParamDefault};
+    uint8_t cur_fx[static_cast<uint32_t>(FxParam::Count)]  = {kFxParamDefault, kFxParamDefault, kFxParamDefault};
+    bool reverb_used                                       = false;
+    bool chorus_used                                       = false;
     // Живой вход: потолки песни и крюки. У загрузчика файла потолок
     // инструментов - номер в ячейке, сэмплов - без потолка, крюков нет.
     // alloc_instrument - номер новому инструменту (0xffff - нет, нота без
@@ -270,7 +285,12 @@ struct Converter {
         mt          = 0;
         cur_tempo   = start_tempo;
         want_global = global_volume;
+        for (uint32_t i = 0; i < static_cast<uint32_t>(FxParam::Count); ++i) {
+            want_fx[i] = kFxParamDefault;
+            cur_fx[i]  = kFxParamDefault;
+        }
         reverb_used = false;
+        chorus_used = false;
     }
 
     // --- Запись в ячейки строки ---
@@ -544,6 +564,8 @@ struct Converter {
             // строки, там же, где темп: канала у неё нет.
             const uint32_t mv = e.d1;
             want_global       = static_cast<uint8_t>((mv * mv * 128u + 8064u) / 16129u);
+        } else if (e.status == kEffectParamStatus) {
+            if (e.d1 < static_cast<uint32_t>(FxParam::Count)) want_fx[e.d1] = static_cast<uint8_t>(e.d2 & 0x7fu);
         } else if (e.status == kDrumChannelStatus) {
             if (e.d1 < 16) drum_channel[e.d1] = e.d2 != 0;
         } else if (kind == 0xe) {
@@ -575,6 +597,8 @@ struct Converter {
                 mch[ch].cc1 = e.d2;
             } else if (e.d1 == 91) {
                 mch[ch].cc91 = e.d2;
+            } else if (e.d1 == 93) {
+                mch[ch].cc93 = e.d2;
             } else if (e.d1 == 5) {
                 mch[ch].porta_time = e.d2;
             } else if (e.d1 == 65) {
@@ -866,6 +890,20 @@ struct Converter {
 
     // Конец строки: посыл реверберации, скольжение, догон бенда, вибрато.
     void finish_row(uint64_t row_mt) {
+        // Параметры общих эффектов - первыми: меняются раз за трек, обычно в
+        // начале, и строку промаха у ноты здесь не отнимают. Колонка - первая
+        // свободная, иначе на следующей строке.
+        for (uint32_t i = 0; i < static_cast<uint32_t>(FxParam::Count); ++i) {
+            if (want_fx[i] == cur_fx[i]) continue;
+            for (uint32_t c = 0; c < kMaxChannels; ++c) {
+                if (cells[c].effect.type != Effect::None) continue;
+                cells[c].effect.type  = Effect::SetEffectParam;
+                cells[c].effect.rate  = static_cast<SlideRate>(i);
+                cells[c].effect.param = want_fx[i];
+                cur_fx[i]             = want_fx[i];
+                break;
+            }
+        }
         // После событий и смены темпа - один проход, для канала в прежнем порядке:
         // посыл реверберации, скольжение, бенд, вибрато. Каждый шаг трогает только
         // ячейку и состояние своего канала.
@@ -905,6 +943,18 @@ struct Converter {
             // последнему выписанному значению.
             if (tch[c].midi < 16 && (tch[c].note != 0xff || tch[c].quiet_at > row_mt) && tch[c].bend != mch[tch[c].midi].bend) {
                 put_bend(c, mch[tch[c].midi].bend);
+            }
+
+            // Посыл хоруса - после высоты: меняется редко, и строку промаха
+            // слышно меньше, чем промах скольжения или бенда.
+            if (sounding) {
+                const uint8_t want = mch[tch[c].midi].cc93;
+                if (tch[c].cho != want && cells[c].effect.type == Effect::None) {
+                    cells[c].effect.type  = Effect::SetChorusSend;
+                    cells[c].effect.param = want;
+                    tch[c].cho            = want;
+                    if (want != 0) chorus_used = true;
+                }
             }
 
             // Вибрато по CC1 - последним: пропуск строки - строка без покачивания, а

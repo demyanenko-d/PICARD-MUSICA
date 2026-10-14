@@ -27,6 +27,12 @@ namespace platform {
 inline uint32_t mono_us() {
     return time_us_32();
 }
+// Миллисекунды от 64-битного таймера: заворачиваются раз в 49.7 суток.
+// 32-битные микросекунды, делённые на 1000, заворачиваются на 4294967 мс
+// (71.6 минуты), и знаковая разность отметок по обе стороны заворота неверна.
+inline uint32_t mono_ms() {
+    return static_cast<uint32_t>(time_us_64() / 1000u);
+}
 // Пауза занятым ожиданием. Не сон планировщика: на плате её зовёт Core1 с
 // шиной, а сон идёт через пул будильников SDK с запретом прерываний.
 inline void busy_wait(uint32_t us) {
@@ -34,6 +40,7 @@ inline void busy_wait(uint32_t us) {
 }
 #else
 uint32_t mono_us();
+uint32_t mono_ms();
 void busy_wait(uint32_t us);
 #endif
 

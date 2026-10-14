@@ -6,11 +6,18 @@
 #include <cinttypes>
 #include <cstdio>
 
+// До ff.h: на ПК он определяет isnan и isinf макросами, и <cmath> из
+// shared_state.h после него не собирается.
+#include "player/shared_state.h"
+
 #include "ff.h"
 
-#include "platform/memory.h"
+#include "platform/log.h"
+#include "platform/usb_host.h"
+
 #include "core/bank/bank_format.h"
 #include "core/memory/psram_store.h"
+
 #include "devices/storage/storage.h"
 
 namespace player {
@@ -37,28 +44,28 @@ uint32_t pcm_read(void*, uint32_t offset, uint8_t* dst, uint32_t bytes) {
 
 } // namespace
 
-bool bank_sd_open(soundsinth::bank::Bank& out, void (*pump)()) {
+bool bank_sd_open(soundsinth::bank::Bank& out) {
     namespace bank   = soundsinth::bank;
     namespace memory = soundsinth::memory;
 
-    if (!devices::storage::storage_present(devices::storage::Client::Board)) return false;
+    if (!devices::storage::storage_present()) return false;
 
     // Том монтируется сразу (второй аргумент 1): отложенное монтирование
     // перенесло бы отказ в первое чтение, а решение "флеш или карта"
     // нужно здесь.
     if (f_mount(&s_fs, "", 1) != FR_OK) {
-        std::printf("boot: bank from card - filesystem not mounted (FAT16/32?)\n");
+        debug_logf("boot: bank from card - filesystem not mounted (FAT16/32?)\n");
         return false;
     }
     if (f_open(&s_file, SOUNDSINTH_BANK_SD_PATH, FA_READ) != FR_OK) {
-        std::printf("boot: no bank on the card (%s) - taking the one in flash\n", SOUNDSINTH_BANK_SD_PATH);
+        debug_logf("boot: no bank on the card (%s) - taking the one in flash\n", SOUNDSINTH_BANK_SD_PATH);
         f_mount(nullptr, "", 0);
         return false;
     }
     s_open = true;
 
     auto give_up = [&](const char* why) {
-        std::printf("boot: bank from card not taken: %s\n", why);
+        debug_logf("boot: bank from card not taken: %s\n", why);
         f_close(&s_file);
         f_mount(nullptr, "", 0);
         s_open = false;
@@ -73,7 +80,7 @@ bool bank_sd_open(soundsinth::bank::Bank& out, void (*pump)()) {
     }
     if (head.magic != bank::kMagic) return give_up("not a bank: signature mismatch");
     // Версия проверяется здесь, с числами в логе: bank_open() скажет только
-    // "версия формата банка не та", а сигнатура SSB1 у всех версий одна, и
+    // "wrong bank format version", а сигнатура SSB1 у всех версий одна, и
     // старый банк иначе не отличить от испорченного файла или сбоя чтения.
     if (head.version != bank::kVersion) {
         char m[128];
@@ -90,7 +97,7 @@ bool bank_sd_open(soundsinth::bank::Bank& out, void (*pump)()) {
     // Таблицы - в конце чипа (kBankTableOffset); хранилище трека на них
     // ужимается при старте (psram_set_track_bytes), буфер GS режется уже
     // ниже, пересечения нет.
-    uint8_t* tables = platform::psram_base_acquire(memory::kPsramChipBytes) + memory::kBankTableOffset;
+    uint8_t* tables = shared::g_track_memory.psram.base + memory::kBankTableOffset;
     if (f_lseek(&s_file, 0) != FR_OK) return give_up("seek to the start failed");
     uint32_t done = 0;
     while (done < head.pcm_offset) {
@@ -101,9 +108,9 @@ bool bank_sd_open(soundsinth::bank::Bank& out, void (*pump)()) {
             return give_up("tables were not read to the end");
         }
         done += chunk;
-        // Между куска́ми: перечисление USB двигается витком стека, и без
+        // Между кусками: перечисление USB двигается витком стека, и без
         // этого клавиатура ждала бы все таблицы.
-        if (pump != nullptr) pump();
+        platform::usb_host_task();
     }
     // Таблицы легли в кэшируемое окно; bank_open и движок читают тем же
     // кэшем, сброс не нужен.
@@ -116,8 +123,8 @@ bool bank_sd_open(soundsinth::bank::Bank& out, void (*pump)()) {
 
     // Десятые мегабайта целыми: без плавающей точки в объекте.
     const uint32_t tenths_mb = head.total_bytes / (1048576u / 10u);
-    std::printf("boot: bank from card %s: %" PRIu32 ".%" PRIu32 " MB, tables %" PRIu32 " KB, instruments %u, samples %u\n", SOUNDSINTH_BANK_SD_PATH,
-                tenths_mb / 10u, tenths_mb % 10u, head.pcm_offset / 1024u, head.instrument_count, head.sample_count);
+    debug_logf("boot: bank from card %s: %" PRIu32 ".%" PRIu32 " MB, tables %" PRIu32 " KB, instruments %u, samples %u\n", SOUNDSINTH_BANK_SD_PATH,
+               tenths_mb / 10u, tenths_mb % 10u, head.pcm_offset / 1024u, head.instrument_count, head.sample_count);
     return true;
 }
 

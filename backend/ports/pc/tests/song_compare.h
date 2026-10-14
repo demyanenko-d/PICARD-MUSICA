@@ -72,7 +72,7 @@ inline void check_songs_equal(const soundsinth::model::Song& a, soundsinth::memo
     CHECK_EQ(a.filter_units_per_octave, b.filter_units_per_octave);
     CHECK(a.channel_muted == b.channel_muted);
     CHECK(a.channel_surround == b.channel_surround);
-    for (uint32_t ch = 0; ch < SOUNDSINTH_MAX_VOICES; ++ch) {
+    for (uint32_t ch = 0; ch < SOUNDSINTH_MAX_CHANNELS; ++ch) {
         CHECK_EQ(a.channel_pan[ch], b.channel_pan[ch]);
         CHECK_EQ(a.channel_volume[ch], b.channel_volume[ch]);
     }

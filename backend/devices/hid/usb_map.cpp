@@ -1,9 +1,12 @@
 // SPDX-License-Identifier: MIT
 #include "devices/hid/usb_map.h"
 
-#include "platform/hot_path.h"
-
 #include <array>
+#include <cstring>
+
+#include "platform/hot_path.h"
+#include "platform/log.h"
+#include "platform/mono_time.h"
 
 #include "devices/hal/host_signals.h"
 #include "devices/hid/joystick.h"
@@ -168,19 +171,19 @@ constexpr std::array<Combo, 512> build_keymap() {
 
 constexpr std::array<Combo, 512> kKeymap = build_keymap();
 
-// Разряды байта модификаторов загрузочного отчёта: слева Ctrl, Shift,
-// Alt, Gui, затем те же справа.
-constexpr uint8_t kModLeftCtrl   = 0x01;
-constexpr uint8_t kModLeftShift  = 0x02;
-constexpr uint8_t kModLeftAlt    = 0x04;
-constexpr uint8_t kModRightCtrl  = 0x10;
-constexpr uint8_t kModRightShift = 0x20;
-constexpr uint8_t kModRightAlt   = 0x40;
-constexpr uint8_t kModLeftGui    = 0x08;
-constexpr uint8_t kModRightGui   = 0x80;
-
-// Назначения HID тех же клавиш.
-constexpr uint8_t kUsageLeftShift = 0xe1;
+// Назначения HID модификаторов: слева Ctrl, Shift, Alt, Gui, затем те же
+// справа. Разряд i байта модификаторов загрузочного отчёта - назначение
+// kUsageLeftCtrl + i.
+constexpr uint8_t kUsageLeftCtrl     = 0xe0;
+constexpr uint8_t kUsageLeftShift    = 0xe1;
+constexpr uint8_t kUsageLeftAlt      = 0xe2;
+constexpr uint8_t kUsageLeftGui      = 0xe3;
+constexpr uint8_t kUsageRightCtrl    = 0xe4;
+constexpr uint8_t kUsageRightShift   = 0xe5;
+constexpr uint8_t kUsageRightAlt     = 0xe6;
+constexpr uint8_t kUsageRightGui     = 0xe7;
+constexpr uint8_t kBootModifierCount = 8;
+static_assert(kUsageLeftCtrl + kBootModifierCount - 1u == kUsageRightGui, "boot modifier bits map onto 0xE0..0xE7");
 
 ModifierRoles s_roles = ModifierRoles{};
 // Нажатий по кодам без записи в раскладке. Строка журнала с ненулевым
@@ -192,6 +195,39 @@ MouseTuning s_mouse;
 // ниже четырёх четвертей каждое из них округляется в ноль.
 int32_t s_mouse_rem_x = 0;
 int32_t s_mouse_rem_y = 0;
+
+// --- Обмен кнопок жестом ---
+//
+// Обе кнопки, зажатые полсекунды, меняют левую и правую местами. Полсекунды
+// нужны, чтобы жест не ловился случайно: обе кнопки разом нажимают и в
+// играх, но коротко.
+//
+// Срок считается по отчётам, а не отдельными часами: мышь шлёт их, пока
+// кнопки держат, и этого довольно. Повторно жест не срабатывает, пока
+// кнопки не отпустят, иначе обмен щёлкал бы без конца.
+constexpr uint32_t kAutoSwapHoldUs = 500000;
+uint32_t s_both_since_us           = 0;
+bool s_both_held                   = false;
+bool s_autoswap_done               = false;
+
+void note_both_buttons(bool both) {
+    if (!both) {
+        s_both_held     = false;
+        s_autoswap_done = false;
+        return;
+    }
+    const uint32_t now = platform::mono_us();
+    if (!s_both_held) {
+        s_both_held     = true;
+        s_both_since_us = now;
+        return;
+    }
+    if (s_autoswap_done || !s_mouse.autoswap) return;
+    if (now - s_both_since_us < kAutoSwapHoldUs) return;
+    s_autoswap_done      = true;
+    s_mouse.swap_buttons = !s_mouse.swap_buttons;
+    debug_logf("hid: mouse buttons %s\n", s_mouse.swap_buttons ? "swapped" : "normal");
+}
 
 // Приращение в четвертях с накоплением остатка. Остаток того же
 // знака, что и частное: тогда движение туда-сюда не накапливает сдвиг.
@@ -207,9 +243,11 @@ int32_t scale_with_remainder(int32_t delta, int32_t& rem) {
 // Стоят выше раскладки: в матрице машины их нет ни в одной, поэтому
 // назначить их клавишам нельзя, а дёрнуть линии больше нечем. Сигнал
 // уходит на нажатие; пока клавиша держится, повтора нет.
-constexpr uint8_t kCodeNmi    = 0x44; // F11
-constexpr uint8_t kCodeReset  = 0x45; // F12
-constexpr uint8_t kCodeDelete = 0x4c; // в тройке Ctrl+Alt+Delete
+constexpr uint8_t kCodeNmi          = 0x44; // F11
+constexpr uint8_t kCodeReset        = 0x45; // F12
+constexpr uint8_t kCodeDelete       = 0x4c; // в тройке Ctrl+Alt+Delete
+constexpr uint8_t kCodeModeNormal   = 0x3a; // F1
+constexpr uint8_t kCodeModeKempston = 0x3b; // F2
 
 struct Signals {
     bool nmi;
@@ -218,15 +256,82 @@ struct Signals {
     bool ctrl;
     bool alt;
     bool gui;
+    bool mode_normal;
+    bool mode_kempston;
 };
 
+// --- Быстрый режим управления ---
+//
+// Клавиши из таблицы привязок - либо клавиши машины, либо Kempston. Режим
+// живёт до выключения: поля в настройках нет.
+KeyMode s_key_mode = KeyMode::Normal;
+
+// Клавиши действий джойстика, по строке на разряд порта. Код ноль - клавиши
+// нет.
+uint8_t s_joy_keys[kJoyKeyActions][kJoyKeySlots] = {
+    {0x4f, 0}, {0x50, 0}, {0x51, 0}, {0x52, 0}, {0x2c, 0x28}, {0, 0}, {0, 0}, {0, 0},
+};
+
+// Разряды Kempston для клавиши. Ноль - клавиша не из этих, идёт в матрицу
+// обычным порядком.
+uint8_t kempston_bits(uint8_t code) {
+    if (code == 0) return 0;
+    uint8_t bits = 0;
+    for (uint32_t a = 0; a < kJoyKeyActions; ++a) {
+        for (const uint8_t k : s_joy_keys[a]) {
+            if (k == code) bits = static_cast<uint8_t>(bits | (1u << a));
+        }
+    }
+    return bits;
+}
+
 Signals s_signals = {};
+
+// --- Захват клавиши для конфигуратора ---
+
+enum class Capture : uint8_t { Off, WaitRelease, Listen, Done };
+Capture s_capture      = Capture::Off;
+uint8_t s_capture_code = 0;
+bool s_capture_seen    = false; // в отчёте была клавиша
+
+// Коды ниже 4 - не клавиши: пусто и переполнение.
+constexpr uint8_t kUsageFirstKey = 0x04;
+
+void capture_report_begin() {
+    s_capture_seen = false;
+}
+
+void capture_code(uint8_t code) {
+    if (code < kUsageFirstKey) return;
+    s_capture_seen = true;
+    if (s_capture == Capture::Listen) {
+        s_capture_code = code;
+        s_capture      = Capture::Done;
+    }
+}
+
+void capture_report_end() {
+    if (s_capture == Capture::WaitRelease && !s_capture_seen) s_capture = Capture::Listen;
+}
 
 // Win+F12 - вход в конфигуратор настроек. Одиночный F12 при этом машину
 // не сбрасывает: так же тройка Ctrl+Alt+Delete не отдаёт ей одиночный
 // Delete.
 bool config_combo(const Signals& s) {
     return s.gui && s.reset;
+}
+
+void set_key_mode(KeyMode mode) {
+    if (mode == s_key_mode) return;
+    s_key_mode = mode;
+    // Порт Kempston режим берёт сам, при любой настройке пульта: режим
+    // включает пользователь, и он нужен там, где пульта нет.
+    if (mode == KeyMode::KempstonArrows) {
+        joystick_keys_attach();
+    } else {
+        joystick_keys_detach();
+    }
+    debug_logf("hid: keyboard mode %s\n", mode == KeyMode::KempstonArrows ? "kempston arrows" : "normal");
 }
 
 // Сигнал взводится отпусканием: полный сброс перезапускает плату, и
@@ -242,6 +347,17 @@ void note_signal(Signals& now, uint8_t code) {
     if (code == kCodeNmi) now.nmi = true;
     if (code == kCodeReset) now.reset = true;
     if (code == kCodeDelete) now.del = true;
+    if (code == kCodeModeNormal) now.mode_normal = true;
+    if (code == kCodeModeKempston) now.mode_kempston = true;
+}
+
+// Смена режима - только с Win: одиночные F1 и F2 в матрице машины ничего
+// не значат, но занимать их молча всё равно нельзя.
+bool mode_normal_combo(const Signals& s) {
+    return s.gui && s.mode_normal;
+}
+bool mode_kempston_combo(const Signals& s) {
+    return s.gui && s.mode_kempston;
 }
 
 void fire_signals(const Signals& now) {
@@ -253,6 +369,14 @@ void fire_signals(const Signals& now) {
         s_signals       = now;
         return;
     }
+    // Любой сброс и NMI снимают переназначение стрелок, Enter и пробела:
+    // после них машина ждёт обычную клавиатуру. Сброс по Ctrl+Alt+Del и вход в
+    // конфигуратор перезапускают плату, и режим обычный и так; F12 плату не
+    // перезапускает. Снимается и при RESET_SIGNAL=0, когда сброса не будет:
+    // нажатие - намерение пользователя сбросить.
+    const bool any_reset = (hard_combo(now) && !hard_combo(s_signals)) || (config_combo(now) && !config_combo(s_signals)) ||
+                           (now.reset && !s_signals.reset && !now.gui) || (now.nmi && !s_signals.nmi);
+    if (any_reset) set_key_mode(KeyMode::Normal);
     if (hard_combo(now) && !hard_combo(s_signals)) hal::host_hard_reset_request();
     if (now.nmi && !s_signals.nmi) hal::host_nmi_request();
     if (config_combo(now) && !config_combo(s_signals)) {
@@ -260,6 +384,8 @@ void fire_signals(const Signals& now) {
     } else if (now.reset && !s_signals.reset && !now.gui) {
         hal::host_reset_request();
     }
+    if (mode_normal_combo(now) && !mode_normal_combo(s_signals)) set_key_mode(KeyMode::Normal);
+    if (mode_kempston_combo(now) && !mode_kempston_combo(s_signals)) set_key_mode(KeyMode::KempstonArrows);
     s_signals = now;
 }
 
@@ -315,19 +441,19 @@ bool press_code(uint8_t rows[kKeyboardRows], uint8_t code, bool shifted) {
 // попадает: он не клавиша, а выбор верхнего знака.
 void press_modifier(uint8_t rows[kKeyboardRows], uint8_t usage) {
     switch (usage) {
-        case 0xe0:
+        case kUsageLeftCtrl:
             press_role(rows, s_roles.left_ctrl);
             break;
-        case 0xe2:
+        case kUsageLeftAlt:
             press_role(rows, s_roles.left_alt);
             break;
-        case 0xe4:
+        case kUsageRightCtrl:
             press_role(rows, s_roles.right_ctrl);
             break;
-        case 0xe5:
+        case kUsageRightShift:
             press_role(rows, s_roles.right_shift);
             break;
-        case 0xe6:
+        case kUsageRightAlt:
             press_role(rows, s_roles.right_alt);
             break;
         default:
@@ -335,10 +461,50 @@ void press_modifier(uint8_t rows[kKeyboardRows], uint8_t usage) {
     }
 }
 
+// Нажатый модификатор: сигналы, выбор верхнего знака (левый Shift) или
+// роль в матрице.
+SOUNDSINTH_ALWAYS_INLINE void apply_modifier(uint8_t rows[kKeyboardRows], Signals& signals, bool& shifted, uint8_t usage) {
+    if (usage == kUsageLeftCtrl || usage == kUsageRightCtrl) signals.ctrl = true;
+    if (usage == kUsageLeftAlt || usage == kUsageRightAlt) signals.alt = true;
+    if (usage == kUsageLeftGui || usage == kUsageRightGui) signals.gui = true;
+    if (usage == kUsageLeftShift) {
+        shifted = true;
+        return;
+    }
+    press_modifier(rows, usage);
+}
+
 // Левый Shift, которому не нашлось верхнего знака, становится CAPS SHIFT.
 // С SYMBOL SHIFT он не складывается - это уже набранный знак.
 void finish_shift(uint8_t rows[kKeyboardRows], bool shifted) {
     if (shifted && !pressed(rows, kSymShift)) press(rows, kCapsShift);
+}
+
+// Код клавиши из отчёта: сигналы, Kempston на стрелках, матрица. false -
+// признак переполнения, отчёт пропускается.
+SOUNDSINTH_ALWAYS_INLINE bool apply_key_code(uint8_t rows[kKeyboardRows], Signals& signals, uint8_t& joy, uint8_t code, bool shifted) {
+    if (s_capture != Capture::Off) capture_code(code);
+    note_signal(signals, code);
+    // Тройка полного сброса в матрицу не идёт: Delete сам по себе
+    // нужен, а в тройке он часть сигнала.
+    if (code == kCodeDelete && signals.ctrl && signals.alt) return true;
+    if (s_key_mode == KeyMode::KempstonArrows) {
+        const uint8_t jb = kempston_bits(code);
+        if (jb != 0) {
+            joy = static_cast<uint8_t>(joy | jb);
+            return true; // в матрицу такая клавиша не идёт вовсе
+        }
+    }
+    return press_code(rows, code, shifted);
+}
+
+// Разобранный отчёт - машине: джойстик, сигналы, матрица.
+SOUNDSINTH_ALWAYS_INLINE void finish_report(uint8_t rows[kKeyboardRows], const Signals& signals, uint8_t joy, bool shifted) {
+    if (s_capture != Capture::Off) capture_report_end();
+    if (s_key_mode == KeyMode::KempstonArrows) joystick_set_keys(joy);
+    fire_signals(signals);
+    finish_shift(rows, shifted);
+    keyboard_set_rows(rows);
 }
 
 // Разбор по дескриптору: модификаторы разрядами, коды слотами массива.
@@ -361,34 +527,21 @@ bool keyboard_from_map(const ReportMap& map, const uint8_t* report, uint16_t len
     Signals signals = {};
     for (uint8_t i = 0; i < k.modifier_count; ++i) {
         if (!report_button_read(k.modifier[i], report, len)) continue;
-        const uint8_t usage = k.modifier_usage[i];
-        if (usage == 0xe0u || usage == 0xe4u) signals.ctrl = true;
-        if (usage == 0xe2u || usage == 0xe6u) signals.alt = true;
-        if (usage == 0xe3u || usage == 0xe7u) signals.gui = true;
-        if (usage == kUsageLeftShift) {
-            shifted = true;
-            continue;
-        }
-        press_modifier(rows, usage);
+        apply_modifier(rows, signals, shifted, k.modifier_usage[i]);
     }
 
-    bool any = false;
+    bool any    = false;
+    uint8_t joy = 0;
     for (uint8_t slot = 0; slot < k.slot_count; ++slot) {
         uint8_t code = 0;
         if (!report_key_read(k, slot, report, len, code)) continue;
         any = true;
-        note_signal(signals, code);
-        // Тройка полного сброса в матрицу не идёт: Delete сам по себе
-        // нужен, а в тройке он часть сигнала.
-        if (code == kCodeDelete && signals.ctrl && signals.alt) continue;
-        if (!press_code(rows, code, shifted)) return true; // переполнение: отчёт пропускаем
+        if (!apply_key_code(rows, signals, joy, code, shifted)) return true; // переполнение: отчёт пропускаем
     }
     // Ни один слот не прочитался - отчёт не этого устройства.
     if (!any) return true;
 
-    fire_signals(signals);
-    finish_shift(rows, shifted);
-    keyboard_set_rows(rows);
+    finish_report(rows, signals, joy, shifted);
     return true;
 }
 
@@ -396,6 +549,7 @@ bool keyboard_from_map(const ReportMap& map, const uint8_t* report, uint16_t len
 
 void usb_map_keyboard(const ReportMap& map, const uint8_t* report, uint16_t len) {
     if (report == nullptr) return;
+    capture_report_begin();
     if (keyboard_from_map(map, report, len)) return;
 
     // Дескриптор не разобрался: остаётся загрузочная раскладка - байт
@@ -407,31 +561,43 @@ void usb_map_keyboard(const ReportMap& map, const uint8_t* report, uint16_t len)
         r = 0xff;
     }
 
+    // Байт модификаторов - в назначения: разбор тот же, что у дескриптора.
     const uint8_t mods = report[0];
-    const bool shifted = (mods & kModLeftShift) != 0u;
-    if ((mods & kModRightShift) != 0u) press_role(rows, s_roles.right_shift);
-    if ((mods & kModLeftCtrl) != 0u) press_role(rows, s_roles.left_ctrl);
-    if ((mods & kModRightCtrl) != 0u) press_role(rows, s_roles.right_ctrl);
-    if ((mods & kModLeftAlt) != 0u) press_role(rows, s_roles.left_alt);
-    if ((mods & kModRightAlt) != 0u) press_role(rows, s_roles.right_alt);
-
-    Signals signals = {};
-    signals.ctrl    = (mods & (kModLeftCtrl | kModRightCtrl)) != 0u;
-    signals.alt     = (mods & (kModLeftAlt | kModRightAlt)) != 0u;
-    signals.gui     = (mods & (kModLeftGui | kModRightGui)) != 0u;
-    for (uint16_t i = 2; i < 8; ++i) {
-        note_signal(signals, report[i]);
-        if (report[i] == kCodeDelete && signals.ctrl && signals.alt) continue;
-        if (!press_code(rows, report[i], shifted)) return;
+    bool shifted       = false;
+    Signals signals    = {};
+    for (uint8_t i = 0; i < kBootModifierCount; ++i) {
+        if ((mods & (1u << i)) != 0u) apply_modifier(rows, signals, shifted, static_cast<uint8_t>(kUsageLeftCtrl + i));
     }
 
-    fire_signals(signals);
-    finish_shift(rows, shifted);
-    keyboard_set_rows(rows);
+    uint8_t joy = 0;
+    for (uint16_t i = 2; i < 8; ++i) {
+        if (!apply_key_code(rows, signals, joy, report[i], shifted)) return;
+    }
+
+    finish_report(rows, signals, joy, shifted);
 }
 
 ModifierRoles usb_map_default_modifiers() {
     return ModifierRoles{};
+}
+
+void usb_map_capture_arm() {
+    s_capture = Capture::WaitRelease;
+}
+
+void usb_map_capture_cancel() {
+    s_capture = Capture::Off;
+}
+
+bool usb_map_capture_take(uint8_t& code) {
+    if (s_capture != Capture::Done) return false;
+    code      = s_capture_code;
+    s_capture = Capture::Off;
+    return true;
+}
+
+void usb_map_set_joy_keys(const uint8_t (&keys)[kJoyKeyActions][kJoyKeySlots]) {
+    std::memcpy(s_joy_keys, keys, sizeof(s_joy_keys));
 }
 
 void usb_map_set_modifiers(const ModifierRoles& roles) {
@@ -441,8 +607,14 @@ void usb_map_set_modifiers(const ModifierRoles& roles) {
 void usb_map_set_mouse(const MouseTuning& t) {
     s_mouse = t;
     if (s_mouse.speed == 0) s_mouse.speed = 1;
-    s_mouse_rem_x = 0;
-    s_mouse_rem_y = 0;
+    s_mouse_rem_x   = 0;
+    s_mouse_rem_y   = 0;
+    s_both_held     = false;
+    s_autoswap_done = false;
+}
+
+bool usb_map_mouse_swapped() {
+    return s_mouse.swap_buttons;
 }
 
 ModifierRoles usb_map_modifiers() {
@@ -453,11 +625,21 @@ uint32_t usb_map_unmapped_presses() {
     return s_unmapped;
 }
 
+KeyMode usb_map_key_mode() {
+    return s_key_mode;
+}
+
+void usb_map_set_key_mode(KeyMode mode) {
+    set_key_mode(mode);
+}
+
 void usb_map_keyboard_release_all() {
     // Устройство отключено: состояние сигнальных клавиш снимается, а
     // подать сигнал снова сможет только отпускание.
     s_signals       = Signals{};
     s_signals_armed = false;
+    // Зажатое направление иначе осталось бы висеть на джойстике.
+    joystick_set_keys(0);
     keyboard_reset();
 }
 
@@ -465,25 +647,28 @@ void SOUNDSINTH_HOT_PATH(usb_map_mouse)(const ReportMap& map, const uint8_t* rep
     if (report == nullptr) return;
 
     // Кнопки по карте: порядок HID - левая, правая, средняя.
-    const uint8_t first  = s_mouse.swap_buttons ? kMouseButtonRight : kMouseButtonLeft;
-    const uint8_t second = s_mouse.swap_buttons ? kMouseButtonLeft : kMouseButtonRight;
-    uint8_t zx_buttons   = kMouseButtonsIdle;
-    if (map.button_count > 0 && report_button_read(map.button[0], report, len)) {
-        zx_buttons &= static_cast<uint8_t>(~first);
-    }
-    if (map.button_count > 1 && report_button_read(map.button[1], report, len)) {
-        zx_buttons &= static_cast<uint8_t>(~second);
-    }
-    if (map.button_count > 2 && report_button_read(map.button[2], report, len)) {
-        zx_buttons &= static_cast<uint8_t>(~kMouseButtonMiddle);
-    }
+    const bool down_0 = map.button_count > 0 && report_button_read(map.button[0], report, len);
+    const bool down_1 = map.button_count > 1 && report_button_read(map.button[1], report, len);
+    const bool down_2 = map.button_count > 2 && report_button_read(map.button[2], report, len);
 
     int32_t dx       = 0;
     int32_t dy       = 0;
-    const bool got_x = report_field_read(map.axis[static_cast<uint8_t>(Axis::X)], report, len, dx);
-    const bool got_y = report_field_read(map.axis[static_cast<uint8_t>(Axis::Y)], report, len, dy);
-    // Отчёт не того номера: он не про мышь, состояние не трогаем.
+    const bool got_x = report_field_read(map.field(Axis::X), report, len, dx);
+    const bool got_y = report_field_read(map.field(Axis::Y), report, len, dy);
+    // Отчёт не того номера: он не про мышь, состояние не трогаем. Жест тоже:
+    // чужой отчёт не значит, что кнопки отпустили.
     if (!got_x && !got_y) return;
+
+    // Жест смотрит нажатое на самом деле, до обмена: иначе он опознавался бы
+    // по тому, что сам и меняет.
+    note_both_buttons(down_0 && down_1);
+
+    const uint8_t first  = s_mouse.swap_buttons ? kMouseButtonRight : kMouseButtonLeft;
+    const uint8_t second = s_mouse.swap_buttons ? kMouseButtonLeft : kMouseButtonRight;
+    uint8_t zx_buttons   = kMouseButtonsIdle;
+    if (down_0) zx_buttons &= static_cast<uint8_t>(~first);
+    if (down_1) zx_buttons &= static_cast<uint8_t>(~second);
+    if (down_2) zx_buttons &= static_cast<uint8_t>(~kMouseButtonMiddle);
 
     mouse_set_buttons(zx_buttons);
     // Y у Kempston растёт вверх, у USB вниз. Приращение обрезается байтом:
@@ -494,7 +679,7 @@ void SOUNDSINTH_HOT_PATH(usb_map_mouse)(const ReportMap& map, const uint8_t* rep
 
     // Колесо - в старшую половину порта кнопок.
     int32_t wheel = 0;
-    if (report_field_read(map.axis[static_cast<uint8_t>(Axis::Wheel)], report, len, wheel)) {
+    if (report_field_read(map.field(Axis::Wheel), report, len, wheel)) {
         mouse_wheel(clamp_i8(wheel));
     }
 }
@@ -546,8 +731,8 @@ void usb_map_gamepad(const ReportMap& map, const uint8_t* report, uint16_t len) 
     uint8_t bits = 0;
     bool seen    = false;
 
-    const Field& fx = map.axis[static_cast<uint8_t>(Axis::X)];
-    const Field& fy = map.axis[static_cast<uint8_t>(Axis::Y)];
+    const Field& fx = map.field(Axis::X);
+    const Field& fy = map.field(Axis::Y);
     int32_t v       = 0;
     if (report_field_read(fx, report, len, v)) {
         bits |= axis_bits(fx, v, kJoyLeft, kJoyRight);
@@ -572,11 +757,11 @@ void usb_map_gamepad(const ReportMap& map, const uint8_t* report, uint16_t len) 
 
     // Отчёт не того номера: ни одно поле не прочиталось, состояние прежнее.
     if (!seen) return;
-    joystick_set(bits);
+    joystick_set_pad(bits);
 }
 
 void usb_map_gamepad_release_all() {
-    joystick_set(0);
+    joystick_set_pad(0);
 }
 
 } // namespace devices::hid

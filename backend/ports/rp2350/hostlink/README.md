@@ -2,8 +2,8 @@
 
 Модуль отвечает хосту по шине Z80, принимает от него файл частями и
 отдаёт телеметрию. Ядро связи (bus, host_protocol, hostlink) о музыке и
-PSRAM не знает: потребитель получает байты и решает сам. gs_bridge пишет
-в PSRAM и зовёт загрузчик трека, divmmc - эмулятор SD.
+PSRAM не знает: потребитель получает байты и решает сам. Эмуляция GS
+живёт в плеере и зовёт загрузчик трека, divmmc - эмулятор SD.
 
 ## Файлы
 
@@ -14,11 +14,13 @@ hostlink/
   bus_setup.*       монтаж: раздача автоматов PIO, загрузка программ, DMA, IRQ
   ports.pio         автоматы цикла ввода-вывода (IORQ) и rom_serve
   memory.pio        автоматы цикла памяти (MREQ) и трапы
+  trap_join.pio     склейщики трапов DivMMC
+  trdos.pio         триггер TR-DOS (DOS_N)
   divmmc.*          DivMMC: своё ПЗУ и ОЗУ в окне 0x0000-0x3FFF
-  gs_bridge.*       General Sound: привязка протокола GS к портам
 
   rom_images/
     rom_image_divmmc.h  прошивка DivMMC, сгенерированный массив
+    rom_image_config.h  ПЗУ конфигуратора, сгенерированный массив
 ```
 
 Пути включений прописаны в CMakeLists, подкаталог в `#include` писать не
@@ -61,8 +63,8 @@ const uint8_t* window = g_protocol.data_buffer();          // len байт, 0 - 
 
 ## Перенос в другой проект
 
-Скопировать этот каталог (без gs_bridge; divmmc нужен bus.cpp и тянет
-эмулятор SD из `backend/devices/sd`) плюс:
+Скопировать этот каталог (divmmc нужен bus.cpp и тянет эмулятор SD из
+`backend/devices/sd`) плюс:
 
 - `backend/ports/rp2350/hw_config.h` - карта ресурсов PIO, DMA, IRQ
 - `backend/player/protocol/host_protocol.{h,cpp}` и `host_frame.h`
@@ -77,6 +79,8 @@ const uint8_t* window = g_protocol.data_buffer();          // len байт, 0 - 
 ```cmake
 pico_generate_pio_header(my_target ${CMAKE_CURRENT_LIST_DIR}/hostlink/ports.pio)
 pico_generate_pio_header(my_target ${CMAKE_CURRENT_LIST_DIR}/hostlink/memory.pio)
+pico_generate_pio_header(my_target ${CMAKE_CURRENT_LIST_DIR}/hostlink/trap_join.pio)
+pico_generate_pio_header(my_target ${CMAKE_CURRENT_LIST_DIR}/hostlink/trdos.pio)
 ```
 
 ## Ограничения
@@ -97,14 +101,14 @@ pico_generate_pio_header(my_target ${CMAKE_CURRENT_LIST_DIR}/hostlink/memory.pio
 Флеш и PSRAM делят один QMI, промах XIP-кэша ждёт освобождения
 контроллера - до 6760 нс в обработчике против обычных 300.
 
-**Подстановка DivMMC меняется со следующего цикла памяти.** Трап будит
-ядро посреди выборки команды по своему адресу. Смена варианта таблицы и
-блокировки ПЗУ машины (ROM_BLK) в том же цикле гасит ПЗУ, пока Z80 читает
-из неё код (вход по 0x0038 и другим точкам), или включает её навстречу
-нашему байту (выход по 1FF8-1FFF). Поэтому `apply_mapping` сначала ждёт,
-пока поднимутся MREQ или RD (`wait_memory_read_end`). Без ожидания esxDOS
-грузится с мусором на экране и встаёт. Окно 3D00-3DFF - исключение: там
-вход немедленный, ПЗУ гасится сразу в обработчике трапа.
+**Подстановка DivMMC меняется со следующего цикла памяти.** Трап (цепочка
+DMA, без ядра) меняет вариант посреди выборки команды по своему адресу.
+Смена варианта таблицы и блокировки ПЗУ машины (ROM_BLK) в том же цикле
+гасит ПЗУ, пока Z80 читает из неё код (вход по 0x0038 и другим точкам),
+или включает её навстречу нашему байту (выход по 1FF8-1FFF). Поэтому
+`apply_mapping` сначала ждёт, пока поднимутся MREQ или RD
+(`wait_memory_read_end`). Без ожидания esxDOS грузится с мусором на экране
+и встаёт. В окне 3D00-3DFF вход немедленный: ПЗУ гасится в том же цикле.
 
 **Скорость обработчиков шины - часть их поведения.** Задержка, которую
 даёт вызов на этом пути, может держать правильный порядок сигналов.
@@ -117,11 +121,6 @@ pico_generate_pio_header(my_target ${CMAKE_CURRENT_LIST_DIR}/hostlink/memory.pio
 
 ## Проверка
 
-Нагрузочный самотест шины на железе (identify x4000, края файла, длины на
-границах, невыровненные смещения, 1 МБ подряд; вхолостую и под нагрузкой)
-расхождений не нашёл; из прошивки удалён 2026-09-10.
-
 В штатной работе `service()` печатает переполнения WR FIFO при
-изменении и раз в 10 с - число команд и байтов данных плагина: в
-плагинном режиме с пиком WR FIFO, в режиме DivMMC с ответами портов
-плагина и serve_late.
+изменении и раз в 10 с - число байтов команд и данных, ответы портов
+команд и данных и serve_late.

@@ -13,7 +13,9 @@
 #include "hardware/gpio.h"
 #include "pico/time.h"
 
-#include "player/protocol/host_protocol.h"
+namespace player::protocol {
+class HostProtocol;
+} // namespace player::protocol
 
 namespace bus {
 
@@ -29,18 +31,6 @@ constexpr uint PIN_A0        = 8;  // A0..A7 = GPIO 8..15
 constexpr uint PIN_D0        = 24; // D0..D7 = GPIO 24..31
 constexpr uint ADDR_LINES    = 16; // A0..A15
 constexpr uint DATA_LINES    = 8;  // D0..D7
-
-// Поля снимка порта ввода (gpio_get_all, слово bus_wr): адрес A0..A15, его
-// младший байт (номер порта) и данные D0..D7.
-__force_inline uint16_t addr_of(uint32_t gpio) {
-    return static_cast<uint16_t>((gpio >> PIN_A0) & 0xFFFFu);
-}
-__force_inline uint8_t port_of(uint32_t gpio) {
-    return static_cast<uint8_t>((gpio >> PIN_A0) & 0xFFu);
-}
-__force_inline uint8_t data_of(uint32_t gpio) {
-    return static_cast<uint8_t>((gpio >> PIN_D0) & 0xFFu);
-}
 
 // Резерв: разведены, ни к чему не привязаны, с загрузки - входы. Не входят
 // GPIO0 (PSRAM CS, XIP_CS1: gpio_init отнимет его у контроллера памяти,
@@ -66,22 +56,6 @@ inline void release_host_rom() {
     gpio_put(PIN_ROM_BLK_N, 1);
 }
 
-// Дождаться конца идущего цикла чтения памяти (MREQ_N и RD_N оба низкие).
-// Смена подстановки DivMMC - вариант таблицы и ROM_BLK - действует со
-// следующего цикла: трап будит ядро посреди выборки по своему адресу, и
-// переключение в том же цикле гасит ПЗУ машины, пока Z80 читает из неё
-// (вход по 0x0038), или включает её навстречу нашему байту (выход по
-// 1FF8). Без ожидания esxDOS грузится с мусором на экране и встаёт.
-//
-// Предел - 128 проходов по 6 тактов, 2.5 мкс: цикл M1 держит RD 430 нс,
-// дольше чтение не бывает.
-static __force_inline void wait_memory_read_end() {
-    constexpr uint32_t kReadMask = (1u << PIN_MREQ_N) | (1u << PIN_RD_N);
-    for (uint32_t n = 0; n < 128u && (gpio_get_all() & kReadMask) == 0u; ++n) {
-        tight_loop_contents();
-    }
-}
-
 constexpr uint PIN_NMI_N   = 35;
 constexpr uint PIN_RESET_N = 47;
 
@@ -105,19 +79,33 @@ inline void release_host_trdos() {
     gpio_put(PIN_DOS_N, 1);
 }
 
-// Включить или выключить DivMMC. Ставится один раз при загрузке, из
-// настроек, до всех, кто спрашивает режим: менять раскладку PIO и таблицу
-// страниц у работающей машины незачем и опасно.
-void divmmc_set_enabled(bool on);
-// true - DivMMC работает: подставляет память и держит ПЗУ машины.
-bool divmmc_enabled();
+// Включить или выключить эмуляцию ПЗУ: DivMMC или конфигуратор настроек.
+// Ставится один раз при загрузке, из настроек, до всех, кто спрашивает
+// режим: менять раскладку PIO и таблицу страниц у работающей машины
+// незачем и опасно.
+void rom_emu_set_enabled(bool on);
+// true - эмуляция ПЗУ поднята: подставляет память и держит ПЗУ машины.
+bool rom_emu_enabled();
 
 // Включить или выключить триггер TR-DOS. Ставится там же и тогда же, что
 // и DivMMC: дисковая система одна, и автоматы у них общие.
 void trdos_set_enabled(bool on);
 bool trdos_enabled();
 
-// Режим конфигуратора настроек. Ставится до divmmc_set_enabled и вместе с
+// Слежение за сбросом машины: нет выборки M1 дольше 50 тактов Z80 на 3.5 МГц -
+// машина в сбросе. Всегда, кроме режима DivMMC (pio0 занят эмуляцией ПЗУ).
+// Ставится там же и тогда же, что режим шины.
+void reset_watch_set_enabled(bool on);
+bool reset_watch_enabled();
+// Сколько сбросов машины замечено с загрузки.
+uint32_t machine_resets_seen();
+
+// Снять ПЗУ TR-DOS по сбросу машины. С триггером TR-DOS вывод у автомата:
+// "снять" уходит в очередь выдатчика, а детектор переходит в released -
+// запись в SIO до вывода не доходит. Без триггера - уровень через SIO.
+void trdos_release();
+
+// Режим конфигуратора настроек. Ставится до rom_emu_set_enabled и вместе с
 // ним: механизм подстановки тот же, меняются образ ПЗУ и начальное
 // состояние - CONMEM держится с первой выборки, чтобы машина стартовала
 // прямо в наше ПЗУ.
@@ -165,18 +153,17 @@ using PortWriteFn = void (*)(uint8_t port, uint8_t data);
 
 // Обработчик записи в порт. Вызывается из ISR: короткий и в SRAM
 // (__not_in_flash_func).
-void z80_bus_pio_register_wr(uint8_t port, PortWriteFn fn);
+void port_on_write(uint8_t port, PortWriteFn fn);
 
-// Что ответить на следующее чтение порта. Без DivMMC - одна 32-битная
-// запись, с ним ещё ячейка и разрешение (значение раньше
-// разрешения).
-void z80_bus_pio_set_rd(uint8_t port, uint8_t value);
+// Что ответить на следующее чтение порта. Значение ложится тем же путём,
+// что у port_answer.
+void port_set_read(uint8_t port, uint8_t value);
 
 // Хук после состоявшегося чтения: здесь готовят ответ на следующее.
 // Вызывается из ISR чтения - самого горячего места шины: только то, что
 // укладывается в единицы микросекунд.
 using PortReadFn = void (*)(uint8_t port);
-void z80_bus_pio_register_rd_done(uint8_t port, PortReadFn fn);
+void port_on_read_done(uint8_t port, PortReadFn fn);
 
 // Счётчики с загрузки. Команды и данные считает dispatch_port_write, очередь
 // записи - bus_wr_isr (оба режима). В ISR чтения счётчиков
@@ -198,7 +185,7 @@ struct PioStats {
 };
 
 // Копия счётчиков, накопительных с загрузки.
-PioStats z80_bus_pio_get_stats();
+PioStats bus_stats();
 
 // --- Эмуляция ПЗУ и памяти ---
 // Путь, которым прошивка подставляет машине байты из своих страниц:
@@ -210,68 +197,15 @@ PioStats z80_bus_pio_get_stats();
 // отпускать после.
 void rom_emu_init();
 
-// Варианты таблицы страниц: подстановка и банк, 16 банков ОЗУ DivMMC на
-// три группы (раскладка - у variant_of). Номер варианта - младший разряд
-// базы в X детектора, он же ROM_BLK_N: подстановка - чётные номера, без неё -
-// нечётные. Групп три, номеров вчетверо больше банков: нечётных на
-// шестнадцать больше нужного.
-inline constexpr uint32_t PAGE_TAB_BANKS    = 16;
-inline constexpr uint32_t PAGE_TAB_VARIANTS = 4 * PAGE_TAB_BANKS;
-
-// Заполнить регион в заданном варианте таблицы. Варианты заготовлены,
-// чтобы переключение подстановки стоило одной записи регистра.
-void rom_emu_fill_pages(uint32_t variant, uint32_t region, const void* page);
-
-// Одна 256-байтовая страница в половине "выборка команды": для окна BDI
-// 0x3D00-0x3DFF, у которого вход немедленный, а чтение данных остаётся
-// машине ради знакогенератора.
-void rom_emu_set_fetch_page(uint32_t variant, uint32_t page, const void* mem);
-
-// Выбрать вариант таблицы страниц 0..PAGE_TAB_VARIANTS-1.
-void rom_emu_select_pages(uint32_t variant);
-// То же без сверки с запомненным вариантом: слово в очередь детектора
-// кладётся всегда.
-// Для повтора после трапа, вклинившегося в смену варианта.
-void rom_emu_force_pages(uint32_t variant);
-
-// Трапы DivMMC - без ядра, цепочкой DMA по карте: ниже 0x2000 по адресу,
-// 0x2000-0x3FFF по странице 256 байт. Сработавший трап кладёт в очередь
-// детектора слово варианта "войти" или "выйти"; действует со следующего
-// чтения памяти.
-// Карта трапов по адресу (0x0000-0x1FFF).
-inline constexpr uint32_t kTrapAddrMapEntries = 0x2000u;
-// Карта по адресам - 32 КБ с выравниванием на 32 КБ: склейщик собирает адрес
-// склейкой "база | A << 2". Лежит обычным объектом в .bss
-// (s_trap_addr_map_storage) - так её тридцать два килобайта видны линкеру
-// и size, а арена newlib их больше не накрывает.
-enum class TrapKind : uint8_t { Enter = 0, Exit = 1 };
-void rom_emu_trap_clear();
-// addr ниже 0x2000 - точка; 0x2000-0x3FFF - вся страница адреса.
-void rom_emu_trap_set(uint16_t addr, TrapKind kind);
-// Варианты, которые кладут трапы: ставить при каждой смене банка, MAPRAM,
-// CONMEM - до того, как класть вариант самому.
-void rom_emu_trap_variants(uint32_t enter_variant, uint32_t exit_variant);
-// Последний сработавший трап - вход (подстановка по трапу стоит).
-bool rom_emu_trap_entered();
-// Без трапа: как после выхода.
-void rom_emu_trap_reset_state();
-
-// Наибольшее число записей, разобранных обработчиком записей за один
-// вызов (очередь PIO - 8 слов). Близко к восьми - обработчик держат.
-uint32_t bus_wr_peak();
-
-// Порты плагина через путь портов эмуляции ПЗУ: в режиме DivMMC плагинные
-// автоматы класть некуда.
-void dispatch_port_write(uint8_t port, uint8_t data);
-void dispatch_port_read_done(uint8_t port);
 // Время последнего чтения порта состояния (time_us_32): клиент хоста читает
 // его в своём цикле без перерыва, пока он в плеере.
 uint32_t host_status_read_us();
-// Сколько байтов rom_serve не выставил на шину, потому что цикл чтения уже
-// кончился (опоздание по цепочке DMA или лишний байт). Забирает отметки
-// автомата rom_serve; звать часто - в FIFO их помещается четыре, лишние
-// теряются. Зовёт log_task (Core0), счёт печатает print_bus_health.
-void rom_emu_serve_late_poll();
+// Опрос очередей шины с Core0: отметки опоздания rom_serve (сколько байтов
+// он не выставил на шину, потому что цикл чтения уже кончился - опоздание
+// по цепочке DMA или лишний байт) и потери в очередях трапов (RXSTALL).
+// Звать часто - в FIFO отметок помещается четыре, лишние теряются. Зовёт
+// log_task (Core0), счёт печатает print_bus_health.
+void bus_queues_poll();
 
 // Порты плагина через путь портов эмуляции ПЗУ (режим DivMMC): что сейчас
 // отвечается по портам команд и данных и сколько байтов rom_serve не
@@ -284,30 +218,50 @@ struct GenericPortsState {
     uint32_t serve_late = 0;
 };
 GenericPortsState generic_ports_state();
-// Адрес записи таблицы страниц, прочитанной последней: последнее чтение
-// памяти ниже 0x4000, выборка или данные. Меняется, пока Z80 что-то
-// исполняет; не меняется - встал.
-uint32_t last_memory_read_ptr();
 
-// Замеры шины.
+// Замеры шины, которые снимает Core0 (bus_queues_poll).
 //   serve_late_full - опрос застал очередь отметок опоздания полной: число
 //                     опозданий выдачи байта занижено.
+//   *_lost          - потерянные слова в очередях трапов с push noblock:
+//                     rom_trap (pio0), первый уровень и путь страницы
+//                     (склейщик, pio2), маршрут и второй уровень (pio2).
+//                     Потеря здесь - несработавший вход или выход DivMMC,
+//                     то есть машина исполняет чужую память; по остальным
+//                     счётчикам это неотличимо от нормы.
+// Очереди трапов и TR-DOS: числа - опросов, заставших флаг потери (флаги
+// липкие, опрос раз в 1-10 мс), а не слов.
 struct BusMeasurements {
     uint32_t serve_late_full;
+    uint32_t trap_lost;   // rom_trap: push noblock в полную RX
+    uint32_t join_lost;   // TXOVER склейщика: DMA писал в полную TX
+    uint32_t route_lost;  // TXOVER trap_route
+    uint32_t detect_lost; // TXOVER детектора: слово варианта от трапа
+    uint32_t join_stall;  // RXSTALL склейщика: стоял, слово ушло позже
+    uint32_t route_stall;
+    bool trdos;            // детектор TR-DOS заведён
+    uint32_t trdos_lost;   // отметка смены DOS_N выброшена (push noblock)
+    uint32_t trdos_desync; // вывод DOS_N не по состоянию автомата два опроса
+    uint8_t trdos_level;
+    bool trdos_asserted;
 };
 BusMeasurements bus_measurements();
 
-// Ответ на чтение порта в режиме эмуляции ПЗУ. Значение заранее лежит в
-// таблице, процессор в цикле шины не участвует. Порт, для которого set не
-// вызывали (или вызвали clear), не обслуживается: отвечает машина.
-void rom_emu_set_port(uint8_t port, uint8_t value);
+// Ответ на чтение порта, путь один на оба режима. Значение заранее лежит в
+// таблице, процессор в цикле шины не участвует. Порт, которому ответ не
+// ставили (или сняли port_release), не обслуживается: отвечает машина.
+void port_answer(uint8_t port, uint8_t value);
 
 // Страница ответов на 256 байт: байт выбирает старшая половина адреса.
 // Выравнивание страницы - 256 байт, иначе отказ при установке. Страницу
 // ведёт устройство; здесь запоминается только её адрес, поэтому
 // перезаписывать её можно в любой момент - следующее чтение возьмёт новое.
-void rom_emu_set_port_page(uint8_t port, const uint8_t* page);
+void port_answer_page(uint8_t port, const uint8_t* page);
 
-void rom_emu_clear_port(uint8_t port);
+void port_release(uint8_t port);
+// Что порт отвечает сейчас, для журнала: байт ячейки 0..255, или снят
+// (kPortReleased - отвечает машина), или страница (kPortPaged).
+inline constexpr int32_t kPortReleased = -1;
+inline constexpr int32_t kPortPaged    = -2;
+int32_t port_answer_state(uint8_t port);
 
 } // namespace bus

@@ -2,37 +2,40 @@
 // Логика плеера на Core1: сессии хоста, загрузка трека по фазам, позиция.
 
 #include "player/session.h"
-#include "player/live/session.h"
 
 #include <cinttypes>
 #include <cstdio>
 #include <cstring>
 #include <new> // размещающий new источника сессии
 
+#include "platform/boot_mode.h"
 #include "platform/compiler.h"
+#include "platform/config_flash.h"
+#include "platform/hot_path.h"
 #include "platform/log.h"
 #include "platform/log_rings.h"
-#include "platform/hot_path.h"
-#include "platform/boot_mode.h"
 #include "platform/mono_time.h"
 #include "platform/usb_host.h"
 
-#include "core/config/config_page.h"
-#include "core/engine/engine_defs.h"
 #include "core/codec/pack_file_pcm.h"
+#include "core/config/config_page.h"
+#include "core/config/config_store.h"
+#include "core/engine/engine_defs.h"
 #include "core/engine/song_duration.h"
 #include "core/formats/load_stats.h"
 #include "core/formats/midi.h"
 
+#include "devices/config/config_service.h" // нужен ли USB-хост
+#include "devices/hid/usb_map.h"           // захват клавиши для привязки
 #include "devices/sd/card_protocol.h"      // sd_card_set_wait_service
 #include "devices/sd/spi_emu.h"            // sd_spi_task
 #include "devices/storage/storage.h"       // storage_set_host_yield
-#include "devices/config/config_service.h" // нужен ли USB-хост
 
+#include "player/config.h"
 #include "player/gs/bridge.h"
 #include "player/hal/host_link.h"
+#include "player/live/session.h"
 #include "player/shared_state.h"
-#include "player/config.h"
 
 namespace player {
 
@@ -87,9 +90,9 @@ SOUNDSINTH_NOINLINE void report_load_failure(SessionOrchestrator& orch) {
     char buf[640];
     const int cap = static_cast<int>(sizeof(buf));
     int off       = std::snprintf(buf, static_cast<size_t>(cap), "LAST FAILURE #%" PRIu32 " at %" PRIu32 " ms: len=%" PRIu32 " error=%s\n", s_load_failures,
-                                  platform::mono_us() / 1000u, orch.pending_file_length, orch.load_result.error ? orch.load_result.error : "(null)");
+                                  platform::mono_ms(), orch.pending_file_length, orch.load_result.error ? orch.load_result.error : "(null)");
     // Причина каждого загрузчика, а не только последнего: иначе на .it
-    // с сигнатурой IMPM в логе "неизвестная сигнатура MOD".
+    // с сигнатурой IMPM в логе "unknown or unsupported MOD signature".
     for (uint8_t i = 0; i < player::load::kLoaderCount; ++i) {
         if (off < cap) {
             const char* why = orch.load_result.attempt_errors[i];
@@ -105,10 +108,11 @@ SOUNDSINTH_NOINLINE void report_load_failure(SessionOrchestrator& orch) {
     // а сбои прошлых треков причиной не выглядят.
     if (off < cap) {
         const player::protocol::HostProtocol::Counters c = orch.protocol.session_counters();
-        const int n                                      = std::snprintf(buf + off, static_cast<size_t>(cap - off),
-                                                                         "  protocol (session): not understood %" PRIu32 ", gave up %" PRIu32 ", unknown %" PRIu32 ", lost byte %" PRIu32
-                                                                         ", short done %" PRIu32 ", arg/data/done overflows %" PRIu32 "/%" PRIu32 "/%" PRIu32 "\n",
-                                                                         c.naks, c.nak_giveups, c.unknown, c.data_short, c.short_done, c.arg_overflow, c.data_overflow, c.done_overflow);
+
+        const int n = std::snprintf(buf + off, static_cast<size_t>(cap - off),
+                                    "  protocol (session): not understood %" PRIu32 ", gave up %" PRIu32 ", unknown %" PRIu32 ", lost byte %" PRIu32
+                                    ", short done %" PRIu32 ", arg/data/done overflows %" PRIu32 "/%" PRIu32 "/%" PRIu32 "\n",
+                                    c.naks, c.nak_giveups, c.unknown, c.data_short, c.short_done, c.arg_overflow, c.data_overflow, c.done_overflow);
         if (n >= cap - off) truncated = true;
     }
     // Пометка - на место хвоста: дописывать некуда, буфер уже полон.
@@ -123,7 +127,8 @@ SOUNDSINTH_NOINLINE void report_load_failure(SessionOrchestrator& orch) {
 // сброса. on_reset больше некуда передавать, фоновая догрузка
 // останавливается (иначе следующий track_memory_reset_for_new_track
 // разрушит то, во что она пишет).
-void close_session_source(SessionOrchestrator& orch) {
+// Разовая, на смену трека: во флеше, а не встроенной пятью копиями в цикл.
+SOUNDSINTH_NOINLINE void close_session_source(SessionOrchestrator& orch) {
     if (orch.current_bus_source != nullptr) {
         orch.current_bus_source->~BusByteSource();
         orch.current_bus_source = nullptr;
@@ -131,6 +136,7 @@ void close_session_source(SessionOrchestrator& orch) {
     orch.plan                = player::load::ProgressiveLoader{};
     orch.longest_step_us     = 0;
     orch.longest_step_sample = 0;
+    orch.last_rescan_us      = 0;
     orch.load_result         = player::load::SessionLoadResult{};
 }
 
@@ -160,7 +166,7 @@ bool load_planned_sample(void* user, uint16_t idx, const char** reason_out) {
 
 // Провал - не ошибка трека (кончилась PSRAM, каталог, файл обрезан), но в
 // логе должен быть: иначе незагруженный сэмпл виден только по молчащей
-// ноте. Числа, а не слова: "PSRAM кончилась" при тысячах свободных страниц
+// ноте. Числа, а не слова: "PSRAM exhausted" при тысячах свободных страниц
 // - другая причина, чем при нуле.
 SOUNDSINTH_NOINLINE void log_load_failure(const SessionOrchestrator& orch, uint16_t idx, const char* reason) {
     const uint32_t slots_used = soundsinth::memory::sample_cache_used_count(shared::g_track_memory.sample_cache);
@@ -208,8 +214,9 @@ SOUNDSINTH_NOINLINE void log_unplanned_failures(const UnplannedFailures& f, uint
 SOUNDSINTH_NOINLINE void log_evictions(const SessionOrchestrator& orch, uint16_t pos) {
     char m[160];
     const soundsinth::memory::PsramStore& psram = shared::g_track_memory.psram;
-    std::snprintf(m, sizeof(m), "evict: total %u at order pos %u, past the map cap %u, pages free %" PRIu32 "%s\n", orch.plan.evicted, pos,
-                  orch.plan.evict_capped, soundsinth::memory::psram_free_page_count(psram), psram.free_list_broken ? ", FREE LIST CORRUPTED" : "");
+    std::snprintf(m, sizeof(m), "evict: total %u at order pos %u, reloaded %u, past the map cap %u, pages free %" PRIu32 "%s\n", orch.plan.evicted, pos,
+                  orch.plan.reloaded, orch.plan.evict_capped, soundsinth::memory::psram_free_page_count(psram),
+                  psram.free_list_broken ? ", FREE LIST CORRUPTED" : "");
     debug_log(m);
 }
 
@@ -331,7 +338,7 @@ SOUNDSINTH_NOINLINE void finish_plan(SessionOrchestrator& orch) {
                   " ms (sample %u), t=%" PRIu32 " ms\n",
                   orch.plan.plan_count, orch.plan.plan_failed, orch.plan.evicted, soundsinth::memory::psram_free_page_count(psram),
                   soundsinth::memory::psram_sample_page_count(psram), psram.free_list_broken ? ", FREE LIST CORRUPTED" : "", orch.longest_step_us / 1000u,
-                  orch.longest_step_sample, (platform::mono_us() / 1000u));
+                  orch.longest_step_sample, platform::mono_ms());
     debug_log(m);
 }
 
@@ -345,20 +352,38 @@ SOUNDSINTH_NOINLINE void log_host_presence(bool here) {
     debug_log(here ? "prefetch: host is back, running\n" : "prefetch: waiting for the host (host outside the player)\n");
 }
 
+// Шаг повторного прохода по плану - не чаще: 4 записи плана за шаг, план
+// до 810 записей - полный круг не дольше 4 с, а упреждение у .mid 10 с.
+constexpr uint32_t kRescanIntervalUs = 20000;
+
 // Шаг фоновой догрузки (логика в ядре). false - ждать позицию, план кончился
 // или источник закрыт: на false выходит цикл префетча.
 // Упреждение только у .mid: замер на 114499 файлах при 200 КБ/с - девяти из
 // десяти хватает секунды упреждения и около мегабайта памяти.
-bool SOUNDSINTH_HOT_PATH(load_next_planned_sample)(SessionOrchestrator& orch) {
+// prefetch - фаза C, звука ещё нет: вытеснения нет никогда. Кадры
+// g_playback_frames в это время - прошлого трека (обнуляет их публикация
+// нового), и запрет по ним зависел бы от длины предыдущей песни.
+bool SOUNDSINTH_HOT_PATH(load_next_planned_sample)(SessionOrchestrator& orch, bool prefetch = false) {
     player::load::ProgressiveLoader& pl = orch.plan;
-    if (pl.plan_next >= pl.plan_count || orch.current_bus_source == nullptr) return false;
+    if (pl.plan_count == 0 || orch.current_bus_source == nullptr) return false;
     if (orch.aborted || orch.current_bus_source->aborted()) return false;
+    // Очередь пройдена - дальше только повторный проход. Не было ни
+    // вытеснения, ни отказа - возвращать нечего, и шаг кончается здесь, в
+    // SRAM, без захода в загрузчик во флеше. Иначе - не чаще раза в
+    // kRescanIntervalUs: на витке Core1 шаг иначе крутился бы постоянно.
+    if (pl.plan_next >= pl.plan_count) {
+        if (pl.evicted == 0 && pl.plan_failed == 0) return false;
+        const uint32_t now_us = platform::mono_us();
+        if (now_us - orch.last_rescan_us < kRescanIntervalUs) return false;
+        orch.last_rescan_us = now_us;
+    }
 
     const uint16_t pos = shared::g_order_pos.load(std::memory_order_acquire);
-    pl.no_eviction     = player::load::progressive_eviction_blocked(orch.load_result.duration.position_goes_back, orch.load_result.total_frames,
-                                                                    shared::g_playback_frames.load(std::memory_order_relaxed));
+    pl.no_eviction     = prefetch || player::load::progressive_eviction_blocked(orch.load_result.duration.position_goes_back, orch.load_result.total_frames,
+                                                                                shared::g_playback_frames.load(std::memory_order_relaxed));
     const player::load::SamplesInUse in_use{shared::g_samples_in_use, shared::kSamplesInUseBits};
     const uint16_t evicted_before  = pl.evicted;
+    const bool queue_open          = pl.plan_next < pl.plan_count;
     uint16_t idx                   = 0;
     const char* reason             = nullptr;
     const uint32_t step_started_us = platform::mono_us();
@@ -380,9 +405,9 @@ bool SOUNDSINTH_HOT_PATH(load_next_planned_sample)(SessionOrchestrator& orch) {
         log_evictions(orch, pos);
     }
     if (step == player::load::ProgressiveStep::Failed) log_load_failure(orch, idx, reason);
-    // Переход к концу плана - на шаге Loaded/Failed, один раз: после него
-    // этот вызов выходит раньше, по plan_next.
-    if (pl.plan_next >= pl.plan_count) finish_plan(orch);
+    // Конец очереди плана - один раз, на шаге, который взял её последнюю
+    // запись. Дальше шаги - повторный проход.
+    if (queue_open && pl.plan_next >= pl.plan_count) finish_plan(orch);
     return true;
 }
 
@@ -448,10 +473,10 @@ void SOUNDSINTH_HOT_PATH(serve_bus_while_card_waits)(void*) {
     player::hal::host_service();
 }
 
-// Ожидания внутри USB-стека: к шине добавляется цикл эмулятора
-// карты. Пауза перечисления - около 500 мс по замеру платы, и всё это время
-// заказ сектора от машины никто не брал: esxDOS ждал токен сорок тысяч
-// опросов и срывался.
+// Ожидания внутри USB-стека - обмен с флешкой, при отказе устройства до
+// 2 с: к шине добавляется цикл эмулятора карты. Без него заказ сектора от
+// машины в это время не берёт никто, и esxDOS, прождав токен сорок тысяч
+// опросов, срывается.
 //
 // Только для USB. Ожиданию самой карты этого давать нельзя: цикл
 // эмулятора сам ходит к носителю, и вышла бы рекурсия в драйвер карты.
@@ -510,24 +535,31 @@ namespace {
 // session_orchestrator_run лежит под run_session_load, самым глубоким путём
 // стека Core1, и буферам печати в нём не место.
 
-// Трек платы снят командой загрузки модуля GS: хост о закрытии не узнаёт (Ended не уходит) -
-// без строки это в журнале не отличить от залипания.
-SOUNDSINTH_NOINLINE void log_track_taken_by_gs(const SessionOrchestrator& orch) {
-    debug_logf("session: board track dropped by the GS player (#30), loaded %u of %u, t=%" PRIu32 " ms\n", orch.plan.plan_next, orch.plan.plan_count,
-               (platform::mono_us() / 1000u));
+// Трек платы снят плеером GS или живым MIDI: план и фоновая догрузка
+// закрываются, хост о закрытии не узнаёт (Ended не уходит) - без строки это
+// в журнале не отличить от залипания. who - кто снял.
+SOUNDSINTH_NOINLINE void drop_track(SessionOrchestrator& orch, const char* who) {
+    debug_logf("session: board track dropped by %s, loaded %u of %u, t=%" PRIu32 " ms\n", who, orch.plan.plan_next, orch.plan.plan_count, platform::mono_ms());
+    close_session_source(orch);
+    orch.playing = false;
 }
 
-SOUNDSINTH_NOINLINE void log_track_taken_by_live(const SessionOrchestrator& orch) {
-    debug_logf("session: board track dropped by live MIDI, loaded %u of %u, t=%" PRIu32 " ms\n", orch.plan.plan_next, orch.plan.plan_count,
-               (platform::mono_us() / 1000u));
-}
-
-// Почему кончился - с числами. "Загрузился и сразу уехал на следующий"
-// одинаково выглядит для двух причин: секвенсор объявил файл вырожденным,
-// или длительность посчиталась нулём и played >= total сработало сразу.
-SOUNDSINTH_NOINLINE void log_track_ended(const SessionOrchestrator& orch, uint32_t played, bool song_ended) {
+// Конец трека: Ended хосту и строка журнала. Почему кончился - с числами.
+// "Загрузился и сразу уехал на следующий" одинаково выглядит для двух
+// причин: секвенсор объявил файл вырожденным, или длительность посчиталась
+// нулём и played >= total сработало сразу.
+SOUNDSINTH_NOINLINE void notify_ended(SessionOrchestrator& orch, uint32_t played, bool song_ended) {
+    const MinSec t = to_min_sec(played);
+    orch.protocol.set_position(t.minutes, t.seconds, player::protocol::PlaybackState::Ended);
     debug_logf("track ended: %s, played %" PRIu32 " s of %" PRIu32 " s, t=%" PRIu32 " ms\n", song_ended ? "sequencer declared the end" : "full duration played",
-               played / kSampleRateHz, orch.load_result.total_frames / kSampleRateHz, (platform::mono_us() / 1000u));
+               played / kSampleRateHz, orch.load_result.total_frames / kSampleRateHz, platform::mono_ms());
+    // Итог догрузки за трек: строка evict: идёт только на каждом 64-м
+    // вытеснении.
+    const player::load::ProgressiveLoader& pl = orch.plan;
+    if (pl.plan_count != 0) {
+        debug_logf("plan: evicted %u, reloaded %u, rescan failed %u, failed %u, capped %u\n", pl.evicted, pl.reloaded, pl.rescan_failed, pl.plan_failed,
+                   pl.evict_capped);
+    }
 }
 
 SOUNDSINTH_NOINLINE void log_duration(const SessionOrchestrator& orch, uint32_t phase_a_ms) {
@@ -576,8 +608,12 @@ struct PrefetchReport {
 };
 
 SOUNDSINTH_NOINLINE void log_prefetch(const SessionOrchestrator& orch, const PrefetchReport& r) {
-    debug_logf("prefetch: %u of %u samples, %u order pos, %" PRIu32 " ms, failed %d, teardown waited %" PRIu32 " ms, plan %" PRIu32 " ms, t=%" PRIu32 " ms\n",
-               r.samples, orch.plan.plan_count, r.positions, r.prefetch_ms, r.failed, r.teardown_ms, r.plan_ms, (platform::mono_us() / 1000u));
+    // map - байт карты позиций; 0 - карты нет, вытеснение по last_use.
+    const player::load::UseMap& m = orch.plan.use_map;
+    debug_logf("prefetch: %u of %u samples, %u order pos, %" PRIu32 " ms, failed %d, teardown waited %" PRIu32 " ms, plan %" PRIu32 " ms, map %" PRIu32
+               " B, t=%" PRIu32 " ms\n",
+               r.samples, orch.plan.plan_count, r.positions, r.prefetch_ms, r.failed, r.teardown_ms, r.plan_ms,
+               m.words != nullptr ? player::load::use_map_bytes(m) : 0u, platform::mono_ms());
 }
 
 SOUNDSINTH_NOINLINE void log_plan_disabled(uint16_t samples) {
@@ -585,7 +621,7 @@ SOUNDSINTH_NOINLINE void log_plan_disabled(uint16_t samples) {
 }
 
 // Сброс от хоста посреди чтения закрывает источник, загрузчик получает
-// короткое чтение и говорит "файл обрезан", хотя файл целый.
+// короткое чтение и говорит "file truncated", хотя файл целый.
 SOUNDSINTH_NOINLINE void log_load_aborted(const SessionOrchestrator& orch) {
     debug_logf("load interrupted by a track change (len=%" PRIu32 ") - not a failure\n", orch.pending_file_length);
 }
@@ -622,7 +658,7 @@ void update_engine_load(SessionOrchestrator& orch, EngineLoadWatch& w, uint32_t 
 
     // Квадратичное среднее с округлением вверх: хватит ли ядра, решает
     // всплеск, а обычное среднее его почти не замечает. Корень целочисленный,
-    // перебором: до SOUNDSINTH_MAX_VOICES итераций раз в две секунды.
+    // перебором: до SOUNDSINTH_MAX_VOICES итераций за период.
     const uint32_t mean_sq = (d_ticks > 0) ? (d_sq / d_ticks) : 0u;
     uint32_t typical       = 0;
     while ((typical + 1u) * (typical + 1u) <= mean_sq) {
@@ -640,7 +676,9 @@ void update_engine_load(SessionOrchestrator& orch, EngineLoadWatch& w, uint32_t 
 // Новая сессия хоста: снос прошлого трека, фазы A-D. true - трек играет.
 // Кадр этой функции и цикла лежит под run_session_load: буферы печати - в
 // функциях строк.
-bool run_session(SessionOrchestrator& orch) {
+// Раз на трек и сама зовёт только флеш (разбор, загрузчик, снос движка):
+// во флеше, а не встроенной в цикл Core1.
+SOUNDSINTH_NOINLINE bool run_session(SessionOrchestrator& orch) {
     orch.session_pending = false;
     orch.aborted         = false;
     // Прошлую сессию сменили до конца её плана (next/prev, ESC, прерванная
@@ -668,13 +706,12 @@ bool run_session(SessionOrchestrator& orch) {
     // следующего сброса.
     if (orch.aborted) orch.current_bus_source->on_reset();
 
-    // Фаза A - метаданные без PCM. Массивы плана отдаются ей же: план
-    // собирается проходом длительности, и второго обхода песни не нужно.
-    // Буфер загрузчика к этому моменту свободен - разбор кончился.
+    // Фаза A - метаданные без PCM и план. Буфер загрузчика к этому моменту
+    // свободен.
     player::load::progressive_attach_plan(orch.plan, reinterpret_cast<uint16_t*>(shared::g_track_memory.loader_scratch_buffer));
     const uint32_t phase_a_started_us = platform::mono_us();
     bool ok = player::load::run_session_load(orch.current_bus_source->as_byte_source(), shared::g_track_memory, shared::g_song, orch.load_result,
-                                             /*metadata_only=*/true, orch.plan.plan_indices, player::load::kProgressiveMaxSamples);
+                                             /*metadata_only=*/true, player::load::plan_arrays_of(orch.plan), &orch.plan.use_map);
     if (ok) {
         publish_file_info(orch.load_result.total_frames, shared::g_song);
         log_duration(orch, (platform::mono_us() - phase_a_started_us) / 1000u);
@@ -729,7 +766,7 @@ bool run_session(SessionOrchestrator& orch) {
             // Фаза C - префетч: сэмплы первых позиций, остальное фоном под звук.
             const uint32_t prefetch_started_us = platform::mono_us();
             const uint16_t failed_before       = orch.plan.plan_failed;
-            while (orch.plan.plan_next < prefetch_count && load_next_planned_sample(orch)) {
+            while (orch.plan.plan_next < prefetch_count && load_next_planned_sample(orch, /*prefetch=*/true)) {
             }
             log_prefetch(orch, PrefetchReport{prefetch_count, prefetch_positions, (platform::mono_us() - prefetch_started_us) / 1000u,
                                               orch.plan.plan_failed - failed_before, teardown_wait_ms, plan_ms});
@@ -793,38 +830,90 @@ bool run_session(SessionOrchestrator& orch) {
 // Конфигуратор настроек: ПЗУ правит значения прямо в странице, а правила
 // считает плата. Пересчёт и выход разбираются здесь, а не в прерывании:
 // оба трогают настройки целиком.
-void serve_configurator(SessionOrchestrator& orch) {
-    uint8_t* const page = platform::config_rom_page();
-    if (page == nullptr) return;
-    const uint32_t cap = platform::config_rom_page_bytes();
-
-    if (orch.protocol.take_config_refresh()) {
-        soundsinth::config::Settings draft = devices::config::settings();
-        const bool ok                      = soundsinth::config::config_page_apply(page, cap, draft);
-        if (ok) {
-            devices::config::settings_set(draft);
-            soundsinth::config::config_page_refresh(draft, page, cap);
-        }
-        orch.protocol.arm_config_done(ok);
+// Ветки конфигуратора исполняются по просьбе машины, считанные разы: во
+// флеше. В цикле Core1 остаются только проверки.
+SOUNDSINTH_NOINLINE void apply_config_refresh(SessionOrchestrator& orch, uint8_t* page) {
+    const uint32_t cap                 = platform::config_rom_page_bytes();
+    soundsinth::config::Settings draft = devices::config::settings();
+    const bool ok                      = soundsinth::config::config_page_apply(page, cap, draft);
+    if (ok) {
+        devices::config::settings_set(draft);
+        soundsinth::config::config_page_refresh(draft, page, cap);
     }
+    orch.protocol.arm_config_done(ok);
+}
 
-    const player::protocol::ConfigExit exit = orch.protocol.take_config_exit();
-    if (exit == player::protocol::ConfigExit::None) return;
-
-    // Выход - это перезагрузка платы: записывать флеш и карту отсюда
-    // нельзя, на время стирания пропадает окно XIP. Запрос исполнит
-    // загрузка.
+SOUNDSINTH_NOINLINE void reboot_from_configurator(player::protocol::ConfigExit exit) {
     platform::BootRequest req;
     req.configurator = exit == player::protocol::ConfigExit::Reenter;
-    req.save         = exit == player::protocol::ConfigExit::Save;
     // Приглашение с карты снимает любой осознанный выход; простой сброс
     // запроса не оставляет, и машина попадёт в конфигуратор снова.
     req.drop_open_gui = true;
-    req.settings      = devices::config::settings();
     debug_logf("config: exit %u, reboot\n", static_cast<unsigned>(exit));
     // Машину в сброс: после перезагрузки платы шины для неё нет.
     player::hal::host_hold_for_reboot();
+    uint8_t* const page = platform::config_rom_page();
+    if (exit == player::protocol::ConfigExit::Save && page != nullptr && platform::config_rom_page_bytes() >= soundsinth::config::kPageBytes) {
+        // Блок собирается в странице конфигуратора: машина в сбросе и её
+        // уже не читает.
+        const soundsinth::config::NextWrite next = soundsinth::config::store_next(platform::config_flash_view(0), platform::config_flash_view(1));
+        soundsinth::config::page_build(page, devices::config::settings(), next.counter);
+        platform::boot_reboot_saving(req, static_cast<uint32_t>(next.slot), page, soundsinth::config::kPageBytes);
+    }
     platform::boot_reboot(req);
+}
+
+// Управление от хоста: прерывание его только накопило. Встроено в виток:
+// опрос идёт на каждом проходе.
+SOUNDSINTH_ALWAYS_INLINE void serve_transport(SessionOrchestrator& orch) {
+    switch (orch.protocol.take_transport_request()) {
+        case player::protocol::TransportOp::PauseToggle: {
+            const bool on = !shared::g_playback_paused.load(std::memory_order_relaxed);
+            shared::g_playback_paused.store(on, std::memory_order_relaxed);
+            debug_logf("transport: pause %s\n", on ? "on" : "off");
+            break;
+        }
+        case player::protocol::TransportOp::SeekForward:
+            // Копится: нажали дважды - уехали вдвое дальше. Исполняет
+            // Core0, когда выход погаснет.
+            if (orch.playing) {
+                shared::g_seek_frames.fetch_add(kSeekStepFrames, std::memory_order_relaxed);
+            }
+            break;
+        // Назад движок не умеет: секвенсор к нулю не возвращается.
+        default:
+            break;
+    }
+}
+
+// Захват клавиши для привязки: ПЗУ взводит ячейку и ждёт, плата ловит
+// следующее нажатие USB и кладёт код. Код пишется раньше состояния: ПЗУ
+// читает их в обратном порядке.
+SOUNDSINTH_NOINLINE void serve_key_capture(volatile uint8_t* cell, bool& armed) {
+    const bool want = cell[0] == soundsinth::config::kCaptureArmed;
+    if (want && !armed) devices::hid::usb_map_capture_arm();
+    if (!want && armed) devices::hid::usb_map_capture_cancel();
+    armed        = want;
+    uint8_t code = 0;
+    if (armed && devices::hid::usb_map_capture_take(code)) {
+        cell[1] = code;
+        cell[0] = soundsinth::config::kCaptureDone;
+        armed   = false;
+    }
+}
+
+void serve_configurator(SessionOrchestrator& orch) {
+    uint8_t* const page = platform::config_rom_page();
+    if (page == nullptr) return;
+    // Ячейку ставит сборка страницы, и машина её не двигает: смещение
+    // берётся один раз.
+    static volatile uint8_t* s_capture = nullptr;
+    static bool s_capture_armed        = false;
+    if (s_capture == nullptr) s_capture = soundsinth::config::config_page_capture(page, platform::config_rom_page_bytes());
+    if (s_capture != nullptr) serve_key_capture(s_capture, s_capture_armed);
+    if (orch.protocol.take_config_refresh()) apply_config_refresh(orch, page);
+    const player::protocol::ConfigExit exit = orch.protocol.take_config_exit();
+    if (exit != player::protocol::ConfigExit::None) reboot_from_configurator(exit);
 }
 
 } // namespace
@@ -868,9 +957,7 @@ void SOUNDSINTH_HOT_PATH(session_orchestrator_run)(SessionOrchestrator& orch) {
         // трека закрываются, иначе они вытесняли бы и грузили по чужому плану
         // поверх модуля.
         if ((orch.playing || orch.plan.plan_count != 0) && gs::bridge_wants_track_memory()) {
-            log_track_taken_by_gs(orch);
-            close_session_source(orch);
-            orch.playing = false;
+            drop_track(orch, "the GS player (#30)");
         }
         // Живой режим просит память трека: режет её begin() на Core0, а
         // наполняет фоновая догрузка здесь. Пока сеанс не закрыт и план не
@@ -878,11 +965,8 @@ void SOUNDSINTH_HOT_PATH(session_orchestrator_run)(SessionOrchestrator& orch) {
         // пересобирался бы под чужой рукой. Подтверждение - разрешение
         // входить.
         if (player::live::wants_track_memory() && !player::live::track_memory_granted()) {
-            if (orch.playing) {
-                log_track_taken_by_live(orch);
-                close_session_source(orch);
-                orch.playing = false;
-            }
+            if (orch.playing) drop_track(orch, "live MIDI");
+            gs::bridge_track_memory_taken();
             player::live::grant_track_memory();
         }
         // То же при входе в живой режим: он снял файловый трек, и тот не
@@ -891,12 +975,9 @@ void SOUNDSINTH_HOT_PATH(session_orchestrator_run)(SessionOrchestrator& orch) {
         // значении живого движка, и конец либо не наступает никогда, либо
         // приходит с чужим временем.
         if (orch.playing && player::live::session_active()) {
-            const uint32_t played = shared::g_playback_frames.load(std::memory_order_relaxed);
             if (!ended_notified) {
-                const MinSec t = to_min_sec(played);
-                orch.protocol.set_position(t.minutes, t.seconds, player::protocol::PlaybackState::Ended);
+                notify_ended(orch, shared::g_playback_frames.load(std::memory_order_relaxed), false);
                 ended_notified = true;
-                log_track_ended(orch, played, false);
             }
             orch.playing                  = false;
             orch.load_result.total_frames = 0;
@@ -921,25 +1002,7 @@ void SOUNDSINTH_HOT_PATH(session_orchestrator_run)(SessionOrchestrator& orch) {
         // разбирает уже принятое и возвращается; на ПК это пустышка.
         shared::g_core1_step.store(shared::Core1Step::UsbTask, std::memory_order_relaxed);
         platform::usb_host_task();
-        // Управление от хоста: прерывание его только накопило.
-        switch (orch.protocol.take_transport_request()) {
-            case player::protocol::TransportOp::PauseToggle: {
-                const bool on = !shared::g_playback_paused.load(std::memory_order_relaxed);
-                shared::g_playback_paused.store(on, std::memory_order_relaxed);
-                debug_logf("transport: pause %s\n", on ? "on" : "off");
-                break;
-            }
-            case player::protocol::TransportOp::SeekForward:
-                // Копится: нажали дважды - уехали вдвое дальше. Исполняет
-                // Core0, когда выход погаснет.
-                if (orch.playing) {
-                    shared::g_seek_frames.fetch_add(kSeekStepFrames, std::memory_order_relaxed);
-                }
-                break;
-            // Назад движок не умеет: секвенсор к нулю не возвращается.
-            default:
-                break;
-        }
+        serve_transport(orch);
         // Конфигуратор настроек: правка значений и выход. Здесь, а не в
         // прерывании - пересчёт трогает настройки целиком.
         serve_configurator(orch);
@@ -964,10 +1027,8 @@ void SOUNDSINTH_HOT_PATH(session_orchestrator_run)(SessionOrchestrator& orch) {
                 // затихающего конца, пока хост не закроется.
                 shared::g_playback_finished.store(true, std::memory_order_relaxed);
                 if (!ended_notified) {
-                    const MinSec t = to_min_sec(played);
-                    orch.protocol.set_position(t.minutes, t.seconds, player::protocol::PlaybackState::Ended);
+                    notify_ended(orch, played, song_ended);
                     ended_notified = true;
-                    log_track_ended(orch, played, song_ended);
                 }
             } else if (now - last_position_us >= kPositionIntervalUs) {
                 const MinSec t = to_min_sec(shared::g_playback_frames.load(std::memory_order_relaxed));

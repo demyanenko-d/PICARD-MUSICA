@@ -24,6 +24,11 @@
 #ifndef SOUNDSINTH_SEQUENCER_TASK_STACK_WORDS
 #define SOUNDSINTH_SEQUENCER_TASK_STACK_WORDS 768u
 #endif
+// 1 - тик движка прямо в рендере, задача тика не будится. Только для
+// замера цены задачи: звук тот же побайтно, рендер считает и тик.
+#ifndef SOUNDSINTH_TICK_IN_RENDER
+#define SOUNDSINTH_TICK_IN_RENDER 0
+#endif
 
 // Приоритет задачи рендера (player::audio::RenderTask) относительно
 // IDLE (platform::os_task_create).

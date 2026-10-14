@@ -34,6 +34,20 @@ struct ModifierRoles {
 ModifierRoles usb_map_default_modifiers();
 
 void usb_map_set_modifiers(const ModifierRoles& roles);
+
+// Клавиши действий джойстика в режиме Win+F2: строка на разряд порта
+// Kempston, коды HID, ноль - клавиши нет.
+inline constexpr uint32_t kJoyKeyActions = 8;
+inline constexpr uint32_t kJoyKeySlots   = 2;
+// Захват клавиши для привязки в конфигураторе: после взвода ждётся отчёт
+// без клавиш, затем берётся первый код следующего. Клавиша, которой
+// взводили (Enter), так в захват не попадает.
+void usb_map_capture_arm();
+void usb_map_capture_cancel();
+// true - клавиша поймана, code - её код HID; захват снят.
+bool usb_map_capture_take(uint8_t& code);
+
+void usb_map_set_joy_keys(const uint8_t (&keys)[kJoyKeyActions][kJoyKeySlots]);
 ModifierRoles usb_map_modifiers();
 
 // Нажатий по кодам, которых нет в раскладке (F1..F10, Pause, PrintScreen,
@@ -54,16 +68,36 @@ void usb_map_keyboard(const ReportMap& map, const uint8_t* report, uint16_t len)
 struct MouseTuning {
     uint8_t speed     = 4;
     bool swap_buttons = false;
+    // Разрешение жеста: обе кнопки, зажатые полсекунды, меняют левую и
+    // правую местами, без настроек и перезагрузки. Выключен: обе кнопки
+    // разом нажимают и в играх.
+    bool autoswap = false;
 };
 void usb_map_set_mouse(const MouseTuning& t);
+
+// Переставлены ли кнопки сейчас: жест переключает это на ходу, в настройках
+// остаётся то, с чего машина поднимается.
+bool usb_map_mouse_swapped();
 
 // Мышь: приращения X и Y и кнопки по карте.
 void usb_map_mouse(const ReportMap& map, const uint8_t* report, uint16_t len);
 
-// Джойстик: направления от осей X и Y, а если их нет - от шляпки. Огонь -
-// любая кнопка. Мёртвая зона берётся долей логического диапазона, поэтому
-// не зависит от разрядности осей.
+// Джойстик: направления от осей X и Y и от шляпки, огонь - любая кнопка.
+// Мёртвая зона - доля логического диапазона, от разрядности осей не зависит.
 void usb_map_gamepad(const ReportMap& map, const uint8_t* report, uint16_t len);
+
+// --- Быстрый режим управления ---
+//
+// Win+F1 - обычный: стрелки, Enter и пробел идут в матрицу, как всегда.
+// Win+F2 - стрелки становятся направлениями Kempston, Enter и пробел -
+// огнём; в матрицу они при этом не идут вовсе.
+//
+// Переключается с клавиатуры и живёт до выключения: в настройках поля нет,
+// машина поднимается в обычном режиме.
+enum class KeyMode : uint8_t { Normal, KempstonArrows };
+
+KeyMode usb_map_key_mode();
+void usb_map_set_key_mode(KeyMode mode);
 
 // Нет устройства - отпустить всё, иначе зажатое останется висеть.
 void usb_map_keyboard_release_all();

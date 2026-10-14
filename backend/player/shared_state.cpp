@@ -23,6 +23,9 @@ std::atomic<bool> g_playback_paused{false};
 std::atomic<uint32_t> g_seek_frames{0};
 std::atomic<uint16_t> g_order_pos{0};
 std::atomic<uint16_t> g_row_pos{0};
+std::atomic<uint8_t> g_channel_note[kTelemetryChannels]{};
+std::atomic<uint8_t> g_channel_volume[kTelemetryChannels]{};
+std::atomic<uint8_t> g_speed{0};
 std::atomic<bool> g_engine_alive{false};
 std::atomic<bool> g_load_in_progress{false};
 std::atomic<bool> g_background_loading{false};
@@ -47,9 +50,9 @@ bool try_mark_engine_alive() {
     return false;
 }
 
-void track_load_begin(void (*pump)(void*), void* user) {
+void track_load_begin(void (*service)(void*), void* user) {
     while (!try_stop_engine_for_load()) {
-        if (pump) pump(user);
+        if (service) service(user);
     }
     // Движок снят и не соберётся, пока загрузка идёт. Просьба о сносе,
     // поставленная в цикле после того, как Core0 уже снял движок, живому
@@ -67,6 +70,11 @@ void track_load_begin(void (*pump)(void*), void* user) {
     }
     g_order_pos.store(0, std::memory_order_relaxed);
     g_row_pos.store(0, std::memory_order_relaxed);
+    for (uint8_t c = 0; c < kTelemetryChannels; ++c) {
+        g_channel_note[c].store(0, std::memory_order_relaxed);
+        g_channel_volume[c].store(0, std::memory_order_relaxed);
+    }
+    g_speed.store(0, std::memory_order_relaxed);
     // Конец прошлого трека. Здесь, а не в начале сессии: старый движок уже
     // снят и не допишет g_song_ended поверх сброса, и сброс получает и
     // модуль плеера GS - иначе после доигравшего трека платы он играл бы в

@@ -6,6 +6,7 @@
 #include <new>
 
 #include "platform/clock.h"
+#include "platform/log.h"
 #include "platform/hot_path.h"
 #include "core/engine/engine_defs.h"
 #include "core/engine/envelope_gain.h"
@@ -29,11 +30,13 @@ constexpr uint32_t kVol128ToQ16 = kQ16One / 128; // 0..128
 // Сглаживание загрузки рендера: новому замеру - 1/8.
 constexpr uint32_t kLoadEwmaShift = 3;
 
-// Жилец Scratch::Play: ревербератор и за ним его шина. Смещение шины
+// Жилец Scratch::Play: ревербератор и хорус, за ними их шины. Смещения
 // считает компилятор.
 struct PlayScratch {
     Reverb reverb;
+    Chorus chorus;
     int32_t bus[SOUNDSINTH_AUDIO_BUFFER_FRAMES];
+    int32_t chorus_bus[SOUNDSINTH_AUDIO_BUFFER_FRAMES];
 };
 static_assert(alignof(PlayScratch) <= 8, "the scratch buffer is aligned to 8");
 static_assert(sizeof(PlayScratch) <= memory::kPlayScratchBytes, "the reverb with its bus does not fit its scratch");
@@ -154,10 +157,10 @@ void update_render_load(uint32_t& load_ewma_q8, uint32_t render_t0_us, uint32_t 
 
 } // namespace
 
-TrackerEngine::TrackerEngine(const soundsinth::model::Song& song, memory::TrackMemory& mem)
+TrackerEngine::TrackerEngine(const soundsinth::model::Song& song, memory::TrackMemory& mem, uint8_t mod_pan_percent)
     : song_(song)
     , mem_(mem)
-    , channel_count_(song.channel_count > SOUNDSINTH_MAX_VOICES ? SOUNDSINTH_MAX_VOICES : song.channel_count) {
+    , channel_count_(song.channel_count > SOUNDSINTH_MAX_CHANNELS ? SOUNDSINTH_MAX_CHANNELS : song.channel_count) {
     ramp_samples_ = song.volume_ramp_samples ? song.volume_ramp_samples : static_cast<uint32_t>(SOUNDSINTH_VOLUME_RAMP_SAMPLES);
     if (ramp_samples_ > kMaxRampSamples) ramp_samples_ = kMaxRampSamples;
     // Волновое гашение включает только формат, который сам задал длину
@@ -169,18 +172,31 @@ TrackerEngine::TrackerEngine(const soundsinth::model::Song& song, memory::TrackM
     // Линии ревербератора - в буфере сценариев: от сборки движка до его
     // сноса туда никто не пишет (загрузка ждёт сноса, сэмплы .mid идут из
     // банка мимо него). Трекерным форматам 13.3 КБ SRAM не нужны вовсе.
-    if (song.reverb_enabled) {
+    if (song.reverb_enabled || song.chorus_enabled) {
         // Не влезло - трек играет без ревербератора: тишина хуже, чем сухой
         // звук, а место кончилось не по его вине.
         uint8_t* buf = memory::scratch_take(mem.scratch, memory::Scratch::Play, memory::kPlayScratchBytes);
         if (buf != nullptr) {
-            auto* ps    = new (buf) PlayScratch{};
-            reverb_     = &ps->reverb;
-            reverb_bus_ = ps->bus;
+            auto* ps = new (buf) PlayScratch{};
+            if (song.reverb_enabled) {
+                reverb_     = &ps->reverb;
+                reverb_bus_ = ps->bus;
+            }
+            if (song.chorus_enabled) {
+                chorus_     = &ps->chorus;
+                chorus_bus_ = ps->chorus_bus;
+            }
+        } else {
+            // Сухой трек на слух от замысла автора не отличить: в журнал
+            // спрос и остаток арены.
+            platform::debug_logf("engine: no room for the reverb, the track plays dry (needs %u B, arena has %u of %u free)\n",
+                                 static_cast<unsigned>(memory::kPlayScratchBytes), static_cast<unsigned>(memory::arena_free(mem.resident)),
+                                 static_cast<unsigned>(memory::kResidentMetadataBytes));
         }
     }
     mixer_.ramp_samples = ramp_samples_;
     mixer_.reverb_bus   = reverb_bus_;
+    mixer_.chorus_bus   = chorus_bus_;
     link_.init(&mixer_, &mem_.psram);
     arbiter_.init(channels_, &link_, channel_count_, wave_tail_, envelope_db_);
     iface_.self       = this;
@@ -189,6 +205,8 @@ TrackerEngine::TrackerEngine(const soundsinth::model::Song& song, memory::TrackM
     dispatch_ctx_.channels            = channels_;
     dispatch_ctx_.song                = &song_;
     dispatch_ctx_.ps                  = &ps_;
+    dispatch_ctx_.chorus_send         = chorus_send_;
+    dispatch_ctx_.fx_params           = fx_params_;
     dispatch_ctx_.nna_user            = this;
     dispatch_ctx_.on_note_trigger_nna = &TrackerEngine::on_note_trigger_nna;
 
@@ -200,7 +218,7 @@ TrackerEngine::TrackerEngine(const soundsinth::model::Song& song, memory::TrackM
     voice_reset_debug_counters();
     // Начальные панорама и громкость каналов (заголовок файла, разводка Paula) -
     // до sequencer_init: он отыгрывает строку 0.
-    channels_init(song_, channels_);
+    channels_init(song_, channels_, mod_pan_percent);
     sequencer_init(song_, mem_.psram, ps_, &TrackerEngine::row_callback, this);
 
     // Сведение ModPlug Tracker (Song::mix_levels): поверх обычной цепочки -
@@ -300,7 +318,8 @@ SOUNDSINTH_ALWAYS_INLINE void TrackerEngine::sync_voice_pitch() {
 void TrackerEngine::run_tick() {
     const uint32_t t0_us = platform::time_us();
     advance_tick();
-    const uint32_t dt_us = platform::time_us() - t0_us;
+    const uint32_t dt_us  = platform::time_us() - t0_us;
+    tick_total_us_       += dt_us;
     if (dt_us > max_tick_duration_us_) {
         max_tick_duration_us_    = dt_us;
         worst_tick_active_count_ = voice_count_; // после rebuild_active_indices() внутри advance_tick()
@@ -394,6 +413,10 @@ void TrackerEngine::advance_tick() {
 SOUNDSINTH_ALWAYS_INLINE void TrackerEngine::update_voice_mix(uint8_t idx, uint32_t global_vol_q24) {
     int32_t gain_l = 0, gain_r = 0;
     compute_mix_gains(channels_[idx], global_vol_q24, song_.pan_law, envelope_db_, &gain_l, &gain_r);
+    if (channel_muted(idx)) {
+        gain_l = 0;
+        gain_r = 0;
+    }
     link_.set_gains_ramp(idx, gain_l, gain_r);
 
     // Коэффициенты фильтра - раз в тик, рядом с громкостями: входы (срез,
@@ -450,6 +473,10 @@ void TrackerEngine::rebuild_active_indices() {
     arbiter_.list_tails([&](uint8_t idx) {
         int32_t gain_l = 0, gain_r = 0;
         compute_mix_gains(channels_[idx], global_vol_q24, song_.pan_law, envelope_db_, &gain_l, &gain_r);
+        if (channel_muted(idx)) {
+            gain_l = 0;
+            gain_r = 0;
+        }
         link_.set_gains(idx, gain_l, gain_r);
     });
 
@@ -506,7 +533,8 @@ void TrackerEngine::update_voice_routes() {
         const uint8_t origin       = is_live_channel ? idx : arbiter_.origin_channel(static_cast<uint8_t>(idx - channel_count_));
         const bool to_discard      = solo_channel_ >= 0 && origin != static_cast<uint8_t>(solo_channel_);
         // Посыл только при заведённых линиях: без них шины нет, и голосу некуда писать.
-        link_.set_route(idx, to_discard, (reverb_bus_ != nullptr && !to_discard) ? channels_[origin].reverb_send : 0);
+        link_.set_route(idx, to_discard, (reverb_bus_ != nullptr && !to_discard) ? channels_[origin].reverb_send : 0,
+                        (chorus_bus_ != nullptr && !to_discard) ? chorus_send_[origin] : 0);
     }
 }
 
@@ -542,7 +570,7 @@ void TrackerEngine::trigger_voice(uint8_t ch, uint32_t start_offset, bool note) 
 }
 
 void TrackerEngine::sync_voices_after_dispatch() {
-    const uint8_t limit = channel_count_ < SOUNDSINTH_MAX_VOICES ? channel_count_ : SOUNDSINTH_MAX_VOICES;
+    const uint8_t limit = channel_count_ < SOUNDSINTH_MAX_CHANNELS ? channel_count_ : SOUNDSINTH_MAX_CHANNELS;
     for (uint8_t ch = 0; ch < limit; ++ch) {
         ChannelState& cs = channels_[ch];
         if (cs.triggered_this_row) {
@@ -680,10 +708,10 @@ void TrackerEngine::render_add(void* self_ptr, int32_t* mix_l, int32_t* mix_r, u
     // Признак - заведённые линии, а не запрос формата: места под них могло
     // не хватить, и трек тогда играет сухим.
     const bool want_reverb = self->reverb_bus_ != nullptr;
-    if (want_reverb) {
-        const uint32_t clear = n_frames < SOUNDSINTH_AUDIO_BUFFER_FRAMES ? n_frames : SOUNDSINTH_AUDIO_BUFFER_FRAMES;
-        std::memset(self->reverb_bus_, 0, clear * sizeof(int32_t));
-    }
+    const bool want_chorus = self->chorus_bus_ != nullptr;
+    const uint32_t clear   = n_frames < SOUNDSINTH_AUDIO_BUFFER_FRAMES ? n_frames : SOUNDSINTH_AUDIO_BUFFER_FRAMES;
+    if (want_reverb) std::memset(self->reverb_bus_, 0, clear * sizeof(int32_t));
+    if (want_chorus) std::memset(self->chorus_bus_, 0, clear * sizeof(int32_t));
     const uint32_t render_t0_us = platform::time_us();
     // Шина рассчитана на один блок; тесты зовут render_add напрямую с
     // произвольным n_frames, выходить за буфер нельзя.
@@ -725,11 +753,37 @@ void TrackerEngine::render_add(void* self_ptr, int32_t* mix_l, int32_t* mix_r, u
         i                          += batch;
     }
 
+    // Параметры эффектов из SysEx - до обработки блока; без SysEx они
+    // остаются умолчаниями, и расчёт не идёт.
+    {
+        using soundsinth::model::FxParam;
+        const uint8_t* p           = self->fx_params_;
+        uint8_t* a                 = self->fx_applied_;
+        constexpr uint32_t kLevel  = static_cast<uint32_t>(FxParam::ReverbLevel);
+        constexpr uint32_t kTime   = static_cast<uint32_t>(FxParam::ReverbTime);
+        constexpr uint32_t kChorus = static_cast<uint32_t>(FxParam::ChorusLevel);
+        if (want_reverb && (p[kLevel] != a[kLevel] || p[kTime] != a[kTime])) {
+            self->reverb_->wet_q15      = reverb_wet_for_level(p[kLevel]);
+            self->reverb_->feedback_q15 = reverb_feedback_for_time(p[kTime]);
+            a[kLevel]                   = p[kLevel];
+            a[kTime]                    = p[kTime];
+        }
+        if (want_chorus && p[kChorus] != a[kChorus]) {
+            self->chorus_->wet_q15 = chorus_wet_for_level(p[kChorus]);
+            a[kChorus]             = p[kChorus];
+        }
+    }
+
     // Реверберация - после всех голосов, одним проходом на блок: ревербератор
     // один на движок.
     if (want_reverb) {
         reverb_process(*self->reverb_, self->reverb_bus_, mix_l, mix_r, reverb_frames);
     }
+    if (want_chorus) {
+        chorus_process(*self->chorus_, self->chorus_bus_, mix_l, mix_r, reverb_frames);
+    }
+
+    self->render_total_us_ += platform::time_us() - render_t0_us;
 
     // Без часов (ПК) загрузку задаёт тест через set_overload_hint_pct, пересчёт
     // её бы затёр.

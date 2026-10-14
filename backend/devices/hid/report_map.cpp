@@ -18,48 +18,45 @@ constexpr uint16_t kUsageX     = 0x30;
 constexpr uint16_t kUsageWheel = 0x38; // колесо мыши - последняя ось
 constexpr uint16_t kUsageHat   = 0x39;
 
+// Индекс оси - назначение минус kUsageX: перечисление Axis повторяет
+// порядок назначений 0x30..0x38.
+static_assert(static_cast<uint16_t>(Axis::Wheel) == kUsageWheel - kUsageX, "Axis follows Generic Desktop usages 0x30..0x38");
+static_assert(static_cast<uint16_t>(Axis::Count) == kUsageWheel - kUsageX + 1u, "Axis ends at the wheel");
+constexpr Axis axis_of_usage(uint16_t usage) {
+    return static_cast<Axis>(usage - kUsageX);
+}
+
 // Таблица предметов разборщика. Одна на всех: устройства подключаются по
 // очереди, из цикла Core1.
 //
-// Места в ней ровно на один предмет (HID_MAX_REPORTITEMS 1): предметы
-// разбираются на лету, в отборе, и в таблице не остаются. Разборщик
-// заполняет предмет целиком до вызова отбора, так что отбору доступно
-// всё, что нам нужно, а счётчик принятых не растёт - значит и потолок
-// таблицы не достигается никогда. Заодно снят прежний отказ: пульт с
-// двумя десятками кнопок давал больше тридцати двух предметов, и
-// дескриптор не разбирался целиком.
+// Места в ней на один предмет: отбор разбирает предмет на лету и в таблицу
+// не кладёт, потолок таблицы не достигается при любом числе кнопок.
 HID_ReportInfo_t s_parsed;
 
 // Карта, которую наполняет отбор. Живёт только на время одного
 // report_map_build; разбор идёт из цикла Core1, вторым его не начать.
 ReportMap* s_out = nullptr;
 
-// Код отказа разборщика LUFA от последнего разбора: причин семь, и по
-// одному false потолок предметов не отличить от незнакомой страницы
-// назначений. Потолки невелики - 32 предмета, 8 номеров отчёта.
+// Код отказа разборщика LUFA от последнего разбора: по одному false потолок
+// номеров отчёта (8) не отличить от незнакомой страницы назначений.
 uint8_t s_last_error = 0;
 
-// Знак у границ разборщик не расширяет - кладёт разряды как пришли. Поле
-// знаковое, когда минимум больше максимума как беззнаковые.
+// Знак значения поля - по его ширине: в отчёте поле лежит своими разрядами.
 int32_t sign_extend(uint32_t value, uint8_t bits) {
     if (bits == 0 || bits >= 32) return static_cast<int32_t>(value);
     const uint32_t sign = 1u << (bits - 1);
     return static_cast<int32_t>((value ^ sign) - sign);
 }
 
+// Знак у границ разборщик расширяет сам, по размеру данных предмета: у
+// поля в 12 разрядов минимум -2047 приходит двумя байтами 01 F8, и
+// расширение по ширине поля дало бы 59393.
 void fill(Field& f, const HID_ReportItem_t& it) {
-    f.report_id       = it.ReportID;
-    f.bit_size        = it.Attributes.BitSize;
-    f.bit_offset      = it.BitOffset;
-    const uint32_t lo = it.Attributes.Logical.Minimum;
-    const uint32_t hi = it.Attributes.Logical.Maximum;
-    if (lo > hi) {
-        f.logical_min = sign_extend(lo, it.Attributes.BitSize);
-        f.logical_max = sign_extend(hi, it.Attributes.BitSize);
-    } else {
-        f.logical_min = static_cast<int32_t>(lo);
-        f.logical_max = static_cast<int32_t>(hi);
-    }
+    f.report_id   = it.ReportID;
+    f.bit_size    = it.Attributes.BitSize;
+    f.bit_offset  = it.BitOffset;
+    f.logical_min = static_cast<int32_t>(it.Attributes.Logical.Minimum);
+    f.logical_max = static_cast<int32_t>(it.Attributes.Logical.Maximum);
 }
 
 // Разряды поля из отчёта, младшим вперёд, без расширения знака.
@@ -153,7 +150,7 @@ void consider_item(const HID_ReportItem_t& it) {
         return;
     }
     if (usage < kUsageX || usage > kUsageWheel) return;
-    Field& f = out.axis[usage - kUsageX];
+    Field& f = out.field(axis_of_usage(usage));
     // Первое вхождение и выигрывает: у геймпадов ту же ось иногда
     // объявляют второй раз в другом отчёте.
     if (!f.present()) fill(f, it);
@@ -185,8 +182,8 @@ void report_map_boot_mouse(ReportMap& out) {
     for (uint8_t i = 0; i < 3; ++i) {
         out.button[i].bit_offset = i;
     }
-    Field& x      = out.axis[static_cast<uint8_t>(Axis::X)];
-    Field& y      = out.axis[static_cast<uint8_t>(Axis::Y)];
+    Field& x      = out.field(Axis::X);
+    Field& y      = out.field(Axis::Y);
     x.bit_size    = 8;
     x.bit_offset  = 8;
     x.logical_min = -127;
@@ -237,8 +234,14 @@ bool report_button_read(const ButtonBit& b, const uint8_t* report, uint16_t len)
 extern "C" bool CALLBACK_HIDParser_FilterHIDReportItem(HID_ReportItem_t* const item) {
     const uint16_t page  = item->Attributes.Usage.Page;
     const uint16_t usage = item->Attributes.Usage.Usage;
-    const bool ours      = page == 0x09 || page == 0x07 ||                                   // кнопки и клавиши
-                      (page == 0x01 && ((usage >= 0x30 && usage <= 0x38) || usage == 0x39)); // оси, колесо, шляпка
+    using devices::hid::kPageButton;
+    using devices::hid::kPageDesktop;
+    using devices::hid::kPageKeyboard;
+    using devices::hid::kUsageHat;
+    using devices::hid::kUsageWheel;
+    using devices::hid::kUsageX;
+    const bool ours = page == kPageButton || page == kPageKeyboard ||                                               // кнопки и клавиши
+                      (page == kPageDesktop && ((usage >= kUsageX && usage <= kUsageWheel) || usage == kUsageHat)); // оси, колесо, шляпка
     if (ours) devices::hid::consider_item(*item);
     return false;
 }

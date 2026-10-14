@@ -74,6 +74,14 @@ uint32_t psram_free_list_length(const PsramStore& store) {
 uint32_t psram_freeze_pattern_zone(PsramStore& store) {
     // Вверх до страницы: хвост блока раздаётся страницами.
     const uint32_t kept = align_up(store.pattern_bump_offset, kPsramPageBytes) / kPsramPageBytes;
+#if !PICO_ON_DEVICE
+    // На ПК отдаваемое временное заливается: читатель временного после
+    // заморозки (карты конвертера .mid под сэмплами) иначе ловится только
+    // чужим тембром на слух.
+    if (store.track.pages > kept) {
+        poison_words(store.base + psram_track_byte_base(store) + kept * kPsramPageBytes, (store.track.pages - kept) * kPsramPageBytes);
+    }
+#endif
     psram_alloc_shrink(store.alloc, store.track, static_cast<uint16_t>(kept));
     store.temp_floor = store.track.bytes(); // временное загрузчика - сэмплам
     return psram_alloc_free_pages(store.alloc);

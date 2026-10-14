@@ -143,6 +143,12 @@ struct EventSource {
                     c.has_head = true;
                     return;
                 }
+                uint8_t fx_param = 0, fx_value = 0;
+                if (sysex_effect_param(body, slen, fx_param, fx_value)) {
+                    c.head     = Event{c.tick > lead ? c.tick - lead : 0, kEffectParamStatus, fx_param, fx_value, 0};
+                    c.has_head = true;
+                    return;
+                }
                 continue;
             }
             const uint8_t kind = status >> 4;
@@ -158,7 +164,7 @@ struct EventSource {
             // мёртвым кодом молча.
             const bool wanted = kind == 0x9 || kind == 0x8 || kind == 0xc || kind == 0xd || kind == 0xe ||
                                 (kind == 0xb && (d1 == 0 || d1 == 1 || d1 == 6 || d1 == 7 || d1 == 10 || d1 == 11 || d1 == 64 || d1 == 100 || d1 == 101 ||
-                                                 d1 == 120 || d1 == 121 || d1 == 123 || d1 == 5 || d1 == 65 || d1 == 91 || d1 == 98 || d1 == 99));
+                                                 d1 == 120 || d1 == 121 || d1 == 123 || d1 == 5 || d1 == 65 || d1 == 91 || d1 == 93 || d1 == 98 || d1 == 99));
             if (hooks != nullptr && hooks->channel != nullptr) {
                 hooks->channel(hooks->user, c.tick, kind, d2, wanted);
             }
@@ -760,26 +766,27 @@ bool load(formats::ByteSource src, uint32_t file_length, memory::TrackMemory& me
     const uint32_t ticks_per_second_rounded = (2u * tracker_tempo + 2u) / 5u;
 
     // --- Служебные карты в PSRAM ---
-    // Во временном PSRAM, не в SRAM (у GeneralUser GS около 26 КБ): инструмент
-    // банка -> инструмент песни, сэмпл банка -> сэмпл песни, held [канал
-    // MIDI][нота][слой] -> канал трекера (0xff - нет), pending. Заморозка зоны
-    // паттернов отдаёт это место сэмплам.
+    // В PSRAM, не в SRAM (у GeneralUser GS около 26 КБ): инструмент банка ->
+    // инструмент песни, сэмпл банка -> сэмпл песни, held [канал MIDI][нота]
+    // [слой] -> канал трекера (0xff - нет), pending, кэш слоёв. Резидентно:
+    // конвертер читает их при каждой выдаче строк по ходу игры, а временное
+    // заморозка отдаёт страницам сэмплов.
     //
     // Инструмент песни - на инструмент банка, а не на слой: слои одного
     // инструмента банка различаются только полосой velocity для выбора, а
     // Instrument, огибающие и keymap у них одни.
     constexpr uint32_t kHeldBytes    = 16u * 128u * kMaxLayers;
     constexpr uint32_t kPendingBytes = 16u * 128u;
-    uint16_t* song_inst_of           = memory::psram_temp_new<uint16_t>(mem.psram, bank.header->instrument_count);
-    uint16_t* bank_to_song_sample    = memory::psram_temp_new<uint16_t>(mem.psram, bank.header->sample_count);
-    uint8_t* held                    = memory::psram_temp_new<uint8_t>(mem.psram, kHeldBytes);
+    uint16_t* song_inst_of           = memory::psram_resident_new<uint16_t>(mem.psram, bank.header->instrument_count);
+    uint16_t* bank_to_song_sample    = memory::psram_resident_new<uint16_t>(mem.psram, bank.header->sample_count);
+    uint8_t* held                    = memory::psram_resident_new<uint8_t>(mem.psram, kHeldBytes);
     // "Нота отпущена, но держится педалью" - отдельным флагом, а не меткой
     // внутри held: там номера каналов, и метка путалась бы с номером.
-    uint8_t* pending = memory::psram_temp_new<uint8_t>(mem.psram, kPendingBytes);
+    uint8_t* pending = memory::psram_resident_new<uint8_t>(mem.psram, kPendingBytes);
     // Кэш выбора слоёв: ключ - пресет, клавиша и полоса силы удара. Прямое
-    // отображение, 24 КБ временного PSRAM; ключ 0 невозможен (полоса силы
+    // отображение, 24 КБ PSRAM; ключ 0 невозможен (полоса силы
     // удара с нуля не начинается), поэтому нулевая память - пустой кэш.
-    LayerCacheEntry* layer_cache = memory::psram_temp_new<LayerCacheEntry>(mem.psram, kLayerCacheSlots);
+    LayerCacheEntry* layer_cache = memory::psram_resident_new<LayerCacheEntry>(mem.psram, kLayerCacheSlots);
     if (!song_inst_of || !bank_to_song_sample || !held || !pending || !layer_cache) {
         return fail("helper maps do not fit PSRAM");
     }
@@ -921,6 +928,7 @@ bool load(formats::ByteSource src, uint32_t file_length, memory::TrackMemory& me
     // Ревербератор включает конвертер: посыл выписывается на строке, а флаг
     // песни читает движок при создании.
     if (cv.reverb_used) out.reverb_enabled = true;
+    if (cv.chorus_used) out.chorus_enabled = true;
 
     // Состояние для повторной выдачи строк. Само оно уже в PSRAM, здесь
     // только слепок указателей и курсоров - чтобы играть трек из файла, а не

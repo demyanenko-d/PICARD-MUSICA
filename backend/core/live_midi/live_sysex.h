@@ -28,6 +28,7 @@ public:
         }
         drum_changes_   = 0;
         volume_changes_ = 0;
+        effect_changes_ = 0;
     }
 
     // Тело сообщения (без F0 и F7); len - полная длина, даже если сохранено
@@ -49,16 +50,23 @@ public:
             stream.push(at_ms, formats::midi::kMasterVolumeStatus, vol, 0);
             ++volume_changes_;
         }
+        uint8_t fx_param = 0, fx_value = 0;
+        if (formats::midi::sysex_effect_param(body, len, fx_param, fx_value)) {
+            stream.push(at_ms, formats::midi::kEffectParamStatus, fx_param, fx_value);
+            ++effect_changes_;
+        }
     }
 
     bool drum_channel(uint8_t channel) const { return channel < 16 && drums_[channel]; }
     uint32_t drum_changes() const { return drum_changes_; }
     uint32_t volume_changes() const { return volume_changes_; }
+    uint32_t effect_changes() const { return effect_changes_; }
 
 private:
     bool drums_[16]          = {};
     uint32_t drum_changes_   = 0;
     uint32_t volume_changes_ = 0;
+    uint32_t effect_changes_ = 0;
 };
 
 } // namespace soundsinth::midi_in

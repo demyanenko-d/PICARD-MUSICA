@@ -2,6 +2,7 @@
 #include "devices/hid/keyboard.h"
 
 #include "devices/hal/z80_ports.h"
+#include "platform/compiler.h"
 
 namespace devices::hid {
 namespace {
@@ -12,7 +13,7 @@ uint8_t s_rows[kKeyboardRows] = {0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff}
 
 // Нули значат "нажато всё", поэтому страницу заполняет keyboard_reset и
 // каждая смена состояния.
-alignas(256) uint8_t s_page[256];
+alignas(256) SOUNDSINTH_BSS_SECTION("hid_kbd_page") uint8_t s_page[256];
 
 // Клавиатура подключена; порт занимается только под нажатой клавишей.
 bool s_present = false;
@@ -79,7 +80,7 @@ void keyboard_set_key(uint8_t row, uint8_t key, bool pressed) {
 void keyboard_set_rows(const uint8_t rows[kKeyboardRows]) {
     bool changed = false;
     for (uint32_t r = 0; r < kKeyboardRows; ++r) {
-        const uint8_t next = static_cast<uint8_t>(rows[r] | kKeyboardIdleBits);
+        const uint8_t next = static_cast<uint8_t>(rows[r] | kKeyboardIdleMask);
         if (next == s_rows[r]) continue;
         s_rows[r] = next;
         changed   = true;

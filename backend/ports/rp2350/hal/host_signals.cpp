@@ -7,16 +7,18 @@
 
 #include "devices/hal/host_signals.h"
 
+#include "devices/hid/usb_map.h"
+
 #include "hardware/gpio.h"
 #include "hardware/watchdog.h"
 
 #include "platform/boot_mode.h"
-
-#include "bus.h"
-#include "hal/host_signals.h"
 #include "platform/hot_path.h"
 #include "platform/log.h"
 #include "platform/mono_time.h"
+
+#include "bus.h"
+#include "hal/host_signals.h"
 
 namespace {
 
@@ -67,7 +69,7 @@ void devices::hal::host_reset_request() {
     // Интерфейс Beta после сброса стоит в исходном, ПЗУ TR-DOS не
     // страничено: признак обязан совпасть, иначе машина стартует с чужим
     // окном памяти.
-    bus::release_host_trdos();
+    bus::trdos_release();
     // Уровень читается ПОСЛЕ снятия: в режиме DISKSYS=TRDOS вывод отдан
     // автомату trdos_drive, и запись в регистр SIO до пада не доходит -
     // единица здесь означает, что признак действительно снят.
@@ -90,8 +92,9 @@ void devices::hal::host_hard_reset_request() {
     s_hard_armed = true;
     s_hard_at    = platform::mono_us() + kHardResetDelayUs;
     // Машину держим с этой секунды: до перезапуска платы она иначе успеет
-    // обратиться к эмуляторам, которых сейчас не станет. Запрещён сброс -
-    // перезапускается только плата, машина об этом не узнает.
+    // обратиться к эмуляторам, которых сейчас не станет. Запрещён сброс
+    // (RESET_SIGNAL=0) - перезапускается только плата: линию сброса не
+    // трогает ни этот запрос, ни загрузка платы (boot_holds_host).
     if (s_reset_allowed) {
         s_reset_held  = true;
         s_reset_until = platform::mono_us() + kHardResetDelayUs + kResetHoldUs;
@@ -135,6 +138,14 @@ void SOUNDSINTH_HOT_PATH(host_signals_tick)() {
     if (s_reset_held && expired(s_reset_until)) {
         bus::release_host_reset();
         s_reset_held = false;
+    }
+    // Сброс машины по тишине на M1 (кнопка машины или свой): режим
+    // клавиатуры - обычный, как после сброса с клавиатуры. ПЗУ TR-DOS уже
+    // снято в bus_queues_poll.
+    static uint32_t s_resets_handled = 0;
+    if (const uint32_t seen = bus::machine_resets_seen(); seen != s_resets_handled) {
+        s_resets_handled = seen;
+        devices::hid::usb_map_set_key_mode(devices::hid::KeyMode::Normal);
     }
     if (s_nmi_held && expired(s_nmi_until)) {
         gpio_set_dir(bus::PIN_NMI_N, GPIO_IN);

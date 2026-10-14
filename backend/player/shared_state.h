@@ -90,6 +90,47 @@ enum class Core1Step : uint8_t {
     RunSession,
 };
 extern std::atomic<Core1Step> g_core1_step;
+
+// Имена фазы и шага для журнала - одни на все строки.
+inline const char* core1_phase_name(Core1Phase phase) {
+    switch (phase) {
+        case Core1Phase::Loop:
+            return "loop";
+        case Core1Phase::Load:
+            return "load";
+        case Core1Phase::TeardownWait:
+            return "engine teardown";
+        case Core1Phase::GsModule:
+            return "GS module";
+    }
+    return "?";
+}
+
+inline const char* core1_step_name(Core1Step step) {
+    switch (step) {
+        case Core1Step::GsPoll:
+            return "gs";
+        case Core1Step::Watch:
+            return "watchdogs";
+        case Core1Step::HostService:
+            return "host";
+        case Core1Step::SdTask:
+            return "card";
+        case Core1Step::UsbTask:
+            return "usb";
+        case Core1Step::Transport:
+            return "remote";
+        case Core1Step::LiveServe:
+            return "live";
+        case Core1Step::PlanLoad:
+            return "plan";
+        case Core1Step::IdleWait:
+            return "wait";
+        case Core1Step::RunSession:
+            return "session";
+    }
+    return "?";
+}
 extern std::atomic<uint32_t> g_core1_loops;
 extern std::atomic<Core1Phase> g_core1_phase;
 // Кадр конца трека для затухания шины (0 - нет). Пишет Core1 до
@@ -140,13 +181,21 @@ extern std::atomic<uint32_t> g_seek_frames;
 // (publish_tick_state). Нужно для вытеснения сэмплов из PSRAM
 // под играющий звук.
 
-// Текущая позиция в order-листе. Вместе с last_use_order_pos
-// планировщика отвечает, отыграл ли сэмпл.
+// Текущая позиция в order-листе: по ней вытеснение решает, когда сэмпл
+// понадобится.
 extern std::atomic<uint16_t> g_order_pos;
 
 // Текущая строка паттерна, для команд #61/#62 эмуляции General Sound.
 // Гонка безобидна: опоздание на тик софт не различит.
 extern std::atomic<uint16_t> g_row_pos;
+
+// Поканальная телеметрия: нота и громкость первых четырёх каналов плюс
+// тиков на строку - то, что показывают экраны плееров. Источник один на
+// всех потребителей. Гонка безобидна по той же причине, что и у строки.
+inline constexpr uint8_t kTelemetryChannels = 4;
+extern std::atomic<uint8_t> g_channel_note[kTelemetryChannels];
+extern std::atomic<uint8_t> g_channel_volume[kTelemetryChannels];
+extern std::atomic<uint8_t> g_speed;
 
 // Жив ли движок: взводится до создания TrackerEngine, снимается после
 // его сноса. По нему загрузка ждёт сноса (track_load_begin): сброс с шины
@@ -165,7 +214,7 @@ extern std::atomic<bool> g_engine_alive;
 extern std::atomic<bool> g_load_in_progress;
 
 // Начать загрузку трека в память, которую читает движок: запретить сборку
-// нового и дождаться сноса текущего. pump зовётся на каждом круге
+// нового и дождаться сноса текущего. service зовётся на каждом круге
 // ожидания - обслуживать шину, пока Core0 снимает движок (может быть
 // nullptr). Снять запрет - track_load_end(), и после отказа тоже; движок
 // соберётся по следующей смене поколения.
@@ -175,7 +224,7 @@ extern std::atomic<bool> g_load_in_progress;
 // g_engine_alive, потом чтение g_load_in_progress. Либо Core0 увидит
 // запрет и не соберёт движок, либо здесь увидим живой движок и дождёмся
 // сноса.
-void track_load_begin(void (*pump)(void*), void* user);
+void track_load_begin(void (*service)(void*), void* user);
 void track_load_end();
 
 // Один шаг того же рукопожатия, без ожидания: запретить сборку и, если

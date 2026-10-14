@@ -20,9 +20,16 @@ using namespace devices::hid;
 
 // Счётчики подставной таблицы ответов (test_sd_spi_emu.cpp): страницы
 // ставятся и снимаются там, а проверяет их тест клавиатуры.
+// Что плата отдаёт на чтение порта. 0xFF - не отвечает.
+uint8_t test_z80_port_read_value(uint8_t port);
+
 extern uint32_t g_port_page_sets[256];
 extern uint32_t g_port_clears[256];
 extern const uint8_t* g_port_last_page;
+
+// Часы теста: их двигает сам тест, иначе правила по времени (полсекунды
+// на обмен кнопок) не проверить.
+extern uint32_t g_test_time_us;
 
 // Линий сброса и NMI на ПК нет, поэтому контракт закрывается счётчиками:
 // проверяется, что сигнал уходит на нажатие и не повторяется, пока
@@ -74,7 +81,7 @@ void keyboard_tests() {
 
     // Разряды 5..7 не гаснут ни при какой нажатой клавише.
     keyboard_set_key(0, 4, true);
-    CHECK_EQ(static_cast<uint8_t>(kbd_read(0xFE) & kKeyboardIdleBits), kKeyboardIdleBits);
+    CHECK_EQ(static_cast<uint8_t>(kbd_read(0xFE) & kKeyboardIdleMask), kKeyboardIdleMask);
     CHECK_EQ(kbd_read(0xFE), 0xEE);
 
     // Объединение: клавиши из разных полустрок складываются И.
@@ -165,13 +172,13 @@ void joystick_tests() {
     joystick_reset();
     CHECK_EQ(joystick_state(), 0);
 
-    joystick_set(kJoyUp | kJoyFire);
+    joystick_set_pad(kJoyUp | kJoyFire);
     CHECK_EQ(joystick_state(), static_cast<uint8_t>(kJoyUp | kJoyFire));
 
     // Противоположные направления разом не отдаются.
-    joystick_set(kJoyLeft | kJoyRight);
+    joystick_set_pad(kJoyLeft | kJoyRight);
     CHECK_EQ(joystick_state(), 0);
-    joystick_set(kJoyUp | kJoyDown | kJoyFire);
+    joystick_set_pad(kJoyUp | kJoyDown | kJoyFire);
     CHECK_EQ(joystick_state(), kJoyFire);
 
     joystick_reset();
@@ -279,6 +286,54 @@ void usb_map_tests() {
     CHECK_EQ(keyboard_page()[0x00], 0xFF);
 }
 
+// Стрелки джойстиком занимают порт 0x1F. На машине со своим Kempston два
+// отвечающих на одном чтении - это мусор под чтением, поэтому режим
+// спрашивает настройку, а не включается сам по себе.
+void key_mode_takes_port_without_gamepad() {
+    keyboard_reset();
+    joystick_reset();
+    usb_map_keyboard_release_all();
+    usb_map_set_key_mode(KeyMode::Normal);
+    kbd_report(0);
+
+    // Пульт выключен настройкой: Win+F2 всё равно отдаёт стрелки портом
+    // Kempston - режим для того и нужен, когда пульта нет.
+    joystick_set_allowed(false);
+    kbd_report(0x08, 0x3B); // Win+F2
+    kbd_report(0);
+    CHECK(usb_map_key_mode() == KeyMode::KempstonArrows);
+    kbd_report(0, 0x52); // стрелка вверх
+    CHECK_EQ(test_z80_port_read_value(kJoystickPort), kJoyUp);
+    kbd_report(0, 0x28); // Enter - огонь
+    CHECK_EQ(test_z80_port_read_value(kJoystickPort), kJoyFire);
+    kbd_report(0);
+
+    // Обычный режим - порт отпускается, пульта нет.
+    usb_map_set_key_mode(KeyMode::Normal);
+    CHECK_EQ(test_z80_port_read_value(kJoystickPort), 0xFF);
+    joystick_set_allowed(true);
+    joystick_reset();
+}
+
+// Любой сброс снимает быстрый режим: F12, Ctrl+Alt+Del, Win+F12.
+void key_mode_drops_on_any_reset() {
+    keyboard_reset();
+    joystick_reset();
+    usb_map_keyboard_release_all();
+    usb_map_set_key_mode(KeyMode::Normal);
+    kbd_report(0);
+    const uint8_t combos[3][2] = {{0x00, 0x45}, {0x05, 0x4C}, {0x08, 0x45}}; // F12, Ctrl+Alt+Del, Win+F12
+    for (const auto& c : combos) {
+        kbd_report(0x08, 0x3B); // Win+F2
+        kbd_report(0);
+        CHECK(usb_map_key_mode() == KeyMode::KempstonArrows);
+        kbd_report(c[0], c[1]);
+        kbd_report(0);
+        CHECK(usb_map_key_mode() == KeyMode::Normal);
+    }
+    joystick_reset();
+}
+
 void mouse_boot_tests() {
     // Загрузочная мышь приходит такой же картой, как разобранная, - жёстких
     // раскладок в переводе не осталось ни одной.
@@ -353,6 +408,68 @@ void mouse_tuning_tests() {
     const uint8_t middle[4] = {0x04, 0, 0, 0};
     usb_map_mouse(map, middle, sizeof(middle));
     CHECK_EQ(mouse_page()[kMouseHiButtons], static_cast<uint8_t>(0xFF & ~kMouseButtonMiddle));
+
+    usb_map_set_mouse(MouseTuning{});
+}
+
+// Обмен кнопок жестом: обе зажаты полсекунды. Движение в отчёте нулевое -
+// проверяется ровно срок и ровно кнопки.
+void mouse_autoswap_tests() {
+    ReportMap map;
+    report_map_boot_mouse(map);
+    const uint8_t both[4] = {0x03, 0, 0, 0};
+    const uint8_t none[4] = {0x00, 0, 0, 0};
+    const uint8_t left[4] = {0x01, 0, 0, 0};
+
+    // Умолчание - выключено: обе кнопки разом нажимают и в играх.
+    CHECK(!MouseTuning{}.autoswap);
+
+    MouseTuning t;
+    t.autoswap = true;
+    usb_map_set_mouse(t);
+    mouse_reset();
+    CHECK(!usb_map_mouse_swapped());
+
+    // Коротко зажатые обе кнопки ничего не меняют: в играх так делают.
+    usb_map_mouse(map, both, sizeof(both));
+    g_test_time_us += 499999;
+    usb_map_mouse(map, both, sizeof(both));
+    CHECK(!usb_map_mouse_swapped());
+
+    // Полсекунды - обмен, и ровно один раз, сколько бы отчётов ни пришло.
+    g_test_time_us += 1;
+    usb_map_mouse(map, both, sizeof(both));
+    CHECK(usb_map_mouse_swapped());
+    g_test_time_us += 2000000;
+    usb_map_mouse(map, both, sizeof(both));
+    CHECK(usb_map_mouse_swapped());
+
+    // Обмен виден машине: нажата левая - гаснет правая.
+    usb_map_mouse(map, none, sizeof(none));
+    usb_map_mouse(map, left, sizeof(left));
+    CHECK_EQ(mouse_page()[kMouseHiButtons], static_cast<uint8_t>(0xFF & ~kMouseButtonRight));
+
+    // Отпустили и зажали снова - обмен обратно.
+    usb_map_mouse(map, none, sizeof(none));
+    usb_map_mouse(map, both, sizeof(both));
+    g_test_time_us += 500000;
+    usb_map_mouse(map, both, sizeof(both));
+    CHECK(!usb_map_mouse_swapped());
+
+    // Срок считается заново от нажатия, а не от прошлого жеста: иначе
+    // следующее касание обеих кнопок щёлкнуло бы сразу.
+    usb_map_mouse(map, none, sizeof(none));
+    g_test_time_us += 2000000;
+    usb_map_mouse(map, both, sizeof(both));
+    CHECK(!usb_map_mouse_swapped());
+
+    // Запрет в настройках: жест не работает вовсе.
+    t.autoswap = false;
+    usb_map_set_mouse(t);
+    usb_map_mouse(map, both, sizeof(both));
+    g_test_time_us += 2000000;
+    usb_map_mouse(map, both, sizeof(both));
+    CHECK(!usb_map_mouse_swapped());
 
     usb_map_set_mouse(MouseTuning{});
 }
@@ -566,6 +683,153 @@ void modifier_role_tests() {
     usb_map_set_modifiers(usb_map_default_modifiers());
     kbd_report(0);
     CHECK_EQ(kbd_read(0xFE), 0xFF);
+}
+
+// Быстрый режим управления: Win+F1 обычный, Win+F2 - стрелки, Enter и
+// пробел уходят в Kempston, а не в матрицу.
+void key_mode_tests() {
+    keyboard_reset();
+    joystick_reset();
+    usb_map_keyboard_release_all();
+    usb_map_set_key_mode(KeyMode::Normal);
+    kbd_report(0); // взвести сигналы: после подключения нужен отпуск
+
+    // Обычный режим: стрелка вверх - это CAPS SHIFT и "7".
+    kbd_report(0, 0x52);
+    CHECK_EQ(kbd_read(0xFE), 0xFE); // CAPS SHIFT
+    CHECK_EQ(kbd_read(0xEF), 0xF7); // "7"
+    CHECK_EQ(joystick_state(), 0);
+    kbd_report(0);
+
+    // Win+F2 - переключились.
+    kbd_report(0x08, 0x3B);
+    CHECK(usb_map_key_mode() == KeyMode::KempstonArrows);
+    kbd_report(0);
+
+    // Теперь стрелка вверх - только джойстик, в матрице тихо.
+    kbd_report(0, 0x52);
+    CHECK_EQ(joystick_state(), kJoyUp);
+    CHECK_EQ(kbd_read(0xFE), 0xFF);
+    CHECK_EQ(kbd_read(0xEF), 0xFF);
+
+    // Enter и пробел - огонь, и тоже мимо матрицы. Вместе со стрелкой:
+    // направление и огонь разом игры и ждут.
+    kbd_report(0, 0x50, 0x28);
+    CHECK_EQ(joystick_state(), static_cast<uint8_t>(kJoyLeft | kJoyFire));
+    CHECK_EQ(kbd_read(0xBF), 0xFF); // ENTER
+    kbd_report(0, 0x2C);
+    CHECK_EQ(joystick_state(), kJoyFire);
+    CHECK_EQ(kbd_read(0x7F), 0xFF); // пробел
+
+    // Прочие клавиши в этом режиме работают как всегда.
+    kbd_report(0, 0x04); // "A"
+    CHECK_EQ(kbd_read(0xFD), 0xFE);
+    CHECK_EQ(joystick_state(), 0);
+
+    // NMI (F11), как и сброс, возвращает обычный режим: после него машина
+    // ждёт обычную клавиатуру.
+    const int nmi0 = s_nmi_requests;
+    kbd_report(0);
+    kbd_report(0, 0x44); // F11
+    CHECK_EQ(s_nmi_requests - nmi0, 1);
+    CHECK(usb_map_key_mode() == KeyMode::Normal);
+    kbd_report(0);
+
+    // Снова Win+F2, затем Win+F1 - обратно, и стрелка снова клавиша.
+    kbd_report(0x08, 0x3B);
+    CHECK(usb_map_key_mode() == KeyMode::KempstonArrows);
+    kbd_report(0);
+    kbd_report(0x08, 0x3A);
+    CHECK(usb_map_key_mode() == KeyMode::Normal);
+    kbd_report(0);
+    kbd_report(0, 0x52);
+    CHECK_EQ(kbd_read(0xFE), 0xFE);
+    CHECK_EQ(joystick_state(), 0);
+    kbd_report(0);
+
+    // Одиночные F1 и F2 режим не трогают: без Win это обычные клавиши,
+    // которых в матрице нет.
+    kbd_report(0, 0x3B);
+    CHECK(usb_map_key_mode() == KeyMode::Normal);
+    kbd_report(0);
+
+    // Геймпад и клавиатура складываются, а не гасят друг друга.
+    usb_map_set_key_mode(KeyMode::KempstonArrows);
+    joystick_set_pad(kJoyFire);
+    kbd_report(0, 0x4F); // стрелка вправо
+    CHECK_EQ(joystick_state(), static_cast<uint8_t>(kJoyRight | kJoyFire));
+    kbd_report(0);
+    CHECK_EQ(joystick_state(), kJoyFire); // отпустили стрелку - огонь остался
+    joystick_set_pad(0);
+
+    // Устройство выдернули - зажатое направление не висит.
+    kbd_report(0, 0x51);
+    CHECK_EQ(joystick_state(), kJoyDown);
+    usb_map_keyboard_release_all();
+    CHECK_EQ(joystick_state(), 0);
+
+    // Своя привязка: Q вверх вторым к стрелке, Z на второй огонь. Q
+    // уходит из матрицы, а стрелка вверх остаётся джойстиком.
+    uint8_t keys[kJoyKeyActions][kJoyKeySlots] = {
+        {0x4f, 0}, {0x50, 0}, {0x51, 0}, {0x52, 0x14}, {0x2c, 0}, {0x1d, 0}, {0, 0}, {0, 0},
+    };
+    usb_map_set_joy_keys(keys);
+    kbd_report(0, 0x14); // Q
+    CHECK_EQ(joystick_state(), kJoyUp);
+    CHECK_EQ(kbd_read(0xFB), 0xFF);
+    kbd_report(0, 0x28); // Enter больше не огонь - он клавиша
+    CHECK_EQ(joystick_state(), 0);
+    CHECK_EQ(kbd_read(0xBF), 0xFE);
+    // Пятиразрядный Kempston второй огонь не отдаёт, восьмиразрядный -
+    // разрядом 5.
+    kbd_report(0, 0x1d); // Z
+    CHECK_EQ(joystick_state(), 0);
+    joystick_set_wide(true);
+    CHECK_EQ(joystick_state(), kJoyFire2);
+    joystick_set_wide(false);
+    CHECK_EQ(joystick_state(), 0);
+    kbd_report(0);
+    const uint8_t defaults[kJoyKeyActions][kJoyKeySlots] = {
+        {0x4f, 0}, {0x50, 0}, {0x51, 0}, {0x52, 0}, {0x2c, 0x28}, {0, 0}, {0, 0}, {0, 0},
+    };
+    usb_map_set_joy_keys(defaults);
+
+    usb_map_set_key_mode(KeyMode::Normal);
+    joystick_reset();
+}
+
+// Захват клавиши для привязки: клавиша, которой взводили, не ловится;
+// ловится первая после отпускания всех.
+void key_capture_tests() {
+    keyboard_reset();
+    usb_map_keyboard_release_all();
+    kbd_report(0);
+    uint8_t code = 0;
+
+    kbd_report(0, 0x28); // Enter зажат при взводе
+    usb_map_capture_arm();
+    kbd_report(0, 0x28);
+    CHECK(!usb_map_capture_take(code));
+    kbd_report(0, 0x28, 0x14); // к Enter добавили Q - всё ещё не отпускали
+    CHECK(!usb_map_capture_take(code));
+    kbd_report(0);
+    CHECK(!usb_map_capture_take(code));
+    kbd_report(0, 0x14);
+    CHECK(usb_map_capture_take(code));
+    CHECK_EQ(code, 0x14);
+    // Захват снят: следующее нажатие не ловится.
+    kbd_report(0);
+    kbd_report(0, 0x1d);
+    CHECK(!usb_map_capture_take(code));
+
+    // Отмена: взвели и сняли - нажатие не ловится.
+    kbd_report(0);
+    usb_map_capture_arm();
+    kbd_report(0);
+    usb_map_capture_cancel();
+    kbd_report(0, 0x1d);
+    CHECK(!usb_map_capture_take(code));
+    kbd_report(0);
 }
 
 // F11 и F12 стоят выше раскладки: в матрицу не попадают, а дёргают линии
@@ -829,8 +1093,13 @@ void run_hid_tests() {
     keyboard_hold_tests();
     modifier_role_tests();
     signal_key_tests();
+    key_mode_tests();
+    key_capture_tests();
+    key_mode_takes_port_without_gamepad();
+    key_mode_drops_on_any_reset();
     mouse_boot_tests();
     mouse_tuning_tests();
+    mouse_autoswap_tests();
     mouse_report_id_tests();
     gamepad_tests();
     keyboard_descriptor_tests();

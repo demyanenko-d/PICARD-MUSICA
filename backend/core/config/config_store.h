@@ -35,6 +35,21 @@ static_assert(sizeof(PageHeader) == 16, "the block header is fixed by the format
 
 inline constexpr uint32_t kPayloadOffset = sizeof(PageHeader);
 
+// Расширение - следом за неподвижной частью: записи "номер, длина,
+// данные" под своей суммой. В заголовок блока оно не входит: прошивка,
+// которая его не знает, читает только неподвижную часть.
+//
+// SSX1 младшим байтом вперёд.
+inline constexpr uint32_t kExtMagic = 0x31585353u;
+
+struct ExtHeader {
+    uint32_t magic;
+    uint16_t bytes; // длина записей следом
+    uint16_t reserved;
+    uint32_t crc; // по записям
+};
+static_assert(sizeof(ExtHeader) == 12, "the extension header is frozen");
+
 // Что удалось понять про блок.
 struct PageInfo {
     bool valid       = false;

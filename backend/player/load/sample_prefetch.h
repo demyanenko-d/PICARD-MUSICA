@@ -68,9 +68,7 @@ struct PlaybackPlan {
 // массива и потолка на число сэмплов нет): последняя позиция order, на
 // которой сэмпл ещё звучит, или kSampleNeverUsed. Считается по позициям,
 // а не по номерам паттернов: паттерн может стоять в order много раз, и
-// его сэмплы свободны только после последнего вхождения. Вытеснение
-// освобождает сэмпл, когда позиция воспроизведения ушла дальше его
-// последней позиции.
+// его сэмплы свободны только после последнего вхождения.
 //
 // out_first_use_order_pos - необязательный, той же длины и индексации
 // по номеру сэмпла: позиция order, на которой сэмпл звучит впервые, или
@@ -81,12 +79,36 @@ PlaybackPlan plan_playback_order(const soundsinth::model::Song& song, soundsinth
                                  uint16_t* out_last_use_order_pos, LoadOrder order = LoadOrder::ByFile, uint16_t prefetch_positions = kPrefetchOrderPositions,
                                  uint16_t* out_first_use_order_pos = nullptr);
 
+// Карта позиций: на каких позициях order звучит сэмпл, бит на корзину.
+// Корзина - 1 << shift соседних позиций, корзин не больше kUseMapBuckets
+// (у .mid позиций бывает больше 256). По ней вытеснение выбирает сэмпл с
+// самым дальним следующим использованием. Память даёт вызывающий,
+// use_map_bytes байт, обнулённых.
+inline constexpr uint16_t kUseMapBuckets = 256;
+inline constexpr uint16_t kUseMapNever   = 0xffff; // сэмпл не звучит вовсе
+struct UseMap {
+    uint32_t* words          = nullptr;
+    uint16_t sample_count    = 0;
+    uint16_t buckets         = 0;
+    uint8_t words_per_sample = 0;
+    uint8_t shift            = 0;
+};
+
+// Раскладка под песню, words не задаётся. buckets 0 - позиций нет.
+UseMap use_map_layout(uint16_t sample_count, uint16_t order_count);
+inline uint32_t use_map_bytes(const UseMap& m) {
+    return static_cast<uint32_t>(m.sample_count) * m.words_per_sample * sizeof(uint32_t);
+}
+void use_map_mark(UseMap& m, uint16_t sample, uint16_t order_pos);
+// Через сколько корзин от корзины order_pos сэмпл прозвучит: 0 - в ней же.
+// После последней отметки счёт идёт с начала песни - так играет повтор.
+// kUseMapNever - не звучит вовсе или карты нет.
+uint16_t use_map_distance(const UseMap& m, uint16_t sample, uint16_t order_pos);
+
 // --- Тот же план, но проходом длительности ---
 //
-// До первой ноты песня обходилась дважды: проход длительности и отдельный
-// обход плана читали одни и те же строки. У трекерного файла второй обход -
-// повторная распаковка из PSRAM, у .mid - весь трек через конвертер заново,
-// потому что строк в памяти нет и их выдаёт источник.
+// План собирается тем же проходом, что длительность: второй обход -
+// повторная распаковка строк, у .mid - весь трек через конвертер.
 //
 // Сборщик цепляется наблюдателем к проходу длительности и заполняет те же
 // три массива. Отличие от линейного обхода в составе: проход идёт по
@@ -97,28 +119,23 @@ PlaybackPlan plan_playback_order(const soundsinth::model::Song& song, soundsinth
 // Живёт на стеке вызывающего: инструмент канала переносится между
 // паттернами, и это состояние прохода, а не песни.
 struct PlanCollector {
-    const soundsinth::model::Song* song                              = nullptr;
-    uint16_t* indices                                                = nullptr;
-    uint16_t* last_use                                               = nullptr;
-    uint16_t* first_use                                              = nullptr;
-    uint16_t capacity                                                = 0;
-    uint16_t count                                                   = 0;
-    uint16_t prefetch_positions                                      = 0;
-    uint16_t prefetch_count                                          = 0;
-    uint16_t positions_seen                                          = 0;
-    uint16_t prev_order_pos                                          = 0xffffu;
+    const soundsinth::model::Song* song = nullptr;
+    uint16_t* indices                   = nullptr;
+    uint16_t* last_use                  = nullptr;
+    uint16_t* first_use                 = nullptr;
+    uint16_t capacity                   = 0;
+    uint16_t count                      = 0;
+
     uint16_t last_instrument[soundsinth::model::kMaxPatternChannels] = {};
+
+    UseMap* use_map = nullptr; // nullptr - не собирать
 };
 
 void plan_collect_begin(PlanCollector& pc, const soundsinth::model::Song& song, uint16_t* out_indices, uint16_t capacity, uint16_t* out_last_use_order_pos,
-                        uint16_t* out_first_use_order_pos, uint16_t prefetch_positions);
+                        uint16_t* out_first_use_order_pos);
 
 // Ставится RowObserver'ом в compute_song_total_frames, user - сборщик.
 void plan_collect_row(void* user, const soundsinth::model::PatternCell* cells, uint8_t channel_count, uint16_t order_pos);
-
-// Досортировать по стратегии и отдать результат. Проход кончился неполным
-// (упёрся в пределы или буфера не было) - план неполон, брать его нельзя.
-PlaybackPlan plan_collect_finish(PlanCollector& pc, LoadOrder order);
 
 // Разделить собранный план на префетч и хвост по первой позиции сэмпла и
 // отсортировать части по стратегии. Граница префетча известна только

@@ -24,6 +24,8 @@
 .define public Z80_WR_N_GPIO 4
 .define public Z80_RD_N_GPIO 5
 .define public Z80_MREQ_N_GPIO 7
+; IN_BASE детектора чтения - A8. Сборка сверяет с номером пина.
+.define public A8_GPIO 16
 
 ; Таблица страниц выровнена на 1 << PAGE_TABLE_BASE_SHIFT (вариант): X = база
 ; >> сдвиг, адрес записи - in x, (32 - сдвиг) / in y, 1 / in pins, 6 /
@@ -93,12 +95,13 @@ confirm:
     ;
     ; Пин условного перехода занят под RD_N, M1 берётся через OSR: mov osr,
     ; pins поворачивает входы так, что разряд 0 - пин IN_BASE. IN_BASE = A8
-    ; (GPIO 16), значит M1_N (GPIO 3) в разряде (3 - 16) mod 32 = 19.
+    ; (GPIO 16), значит M1_N (GPIO 3) в разряде (3 - 16) mod 32 = 19; восемь
+    ; разрядов A8..A15 уже сняты выше.
     mov osr, pins
     out null, 6                 ; пропустить A8..A13
     out y, 2                    ; Y = A14,A15 (GPIO 22,23 -> разряды 6,7)
     jmp y--, nofetch            ; не ноль: адрес выше 0x3FFF, не наш
-    out null, 11                ; до разряда 19
+    out null, (Z80_M1_N_GPIO + 32 - A8_GPIO - 8) ; до разряда M1_N
     out y, 1                    ; Y = M1_N
 
     ; ISR = pagetab_base | (M1_N << 8) | (страница << 2). ISR не чистится:

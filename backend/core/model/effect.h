@@ -94,6 +94,14 @@ enum class Effect : uint8_t {
     // ревербератор, а не эффект на канал.
     SetReverbSend,
 
+    // Посыл канала в общий хорус, 0..127 в param. Только из конвертера MIDI
+    // (CC93), как SetReverbSend.
+    SetChorusSend,
+
+    // Параметр общего эффекта: номер FxParam в rate, значение 0..127 в param
+    // (64 - умолчание GS и XG). Только из конвертера MIDI (SysEx GS и XG).
+    SetEffectParam,
+
     Count // только для static_assert на ширину битового поля, в EffectCommand не хранится
 };
 
@@ -111,6 +119,16 @@ enum class SlideRate : uint8_t {
     ExtraFine,   // один раз, шаг мельче (S3M/IT, XM X1x/X2x)
     Widest,      // только SetPitchOffset: самый грубый шаг бенда (x64)
 };
+
+// Параметры общих эффектов для SetEffectParam - номер в поле rate.
+enum class FxParam : uint8_t {
+    ReverbLevel = 0, // громкость возврата ревербератора
+    ReverbTime,      // время хвоста
+    ChorusLevel,     // громкость возврата хоруса
+    Count
+};
+inline constexpr uint8_t kFxParamDefault = 64;
+static_assert(static_cast<uint32_t>(FxParam::Count) <= 4, "FxParam does not fit the two-bit rate field");
 
 // type и rate - один байт (6 + 2 бита), причина - у enum Effect.
 inline constexpr uint32_t kEffectTypeBits = 6;

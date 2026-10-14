@@ -3,11 +3,12 @@
 
 #include "devices/zcontroller/zcontroller.h"
 
+#include "platform/hot_path.h"
+
 #include "devices/hal/z80_ports.h"
 #include "devices/sd/sd_protocol.h"
 #include "devices/sd/spi_emu.h"
 #include "devices/storage/storage.h"
-#include "platform/hot_path.h"
 
 namespace devices::zcontroller {
 namespace {
@@ -31,8 +32,17 @@ constexpr uint8_t kCtrlSselBit = 0x02;
 //
 // Лишний обмен на чтении ломает разбор: команда - шесть записей подряд, и
 // она превращается в CMD0 с аргументом 0xFF00FF00.
+//
+// Ячейку пишут оба обработчика. Вытесненный между обменом и записью
+// положил бы свой, более ранний ответ поверх свежего: запись повторяется,
+// пока ячейка не совпадёт с ответом последнего исполненного обмена.
 void SOUNDSINTH_HOT_PATH(latch)(uint8_t value) {
-    hal::z80_port_set_read(kPortData, value);
+    for (;;) {
+        hal::z80_port_set_read(kPortData, value);
+        const uint8_t now = sd::sd_spi_latch(sd::SdOwner::ZController);
+        if (now == value) return;
+        value = now;
+    }
 }
 
 // --- Обработчики ---
@@ -68,9 +78,9 @@ void SOUNDSINTH_HOT_PATH(port_read_data_done)(uint8_t) {
 
 } // namespace
 
-void zcontroller_init(bool emulator_up) {
+void zcontroller_init() {
     // Эмулятор карты поднимает только первый хозяин.
-    if (!emulator_up) sd::sd_spi_emu_init();
+    sd::sd_spi_emu_ensure_up();
 
     hal::z80_port_on_write(kPortData, &port_write_data);
     hal::z80_port_on_write(kPortCtrl, &port_write_ctrl);
@@ -78,7 +88,7 @@ void zcontroller_init(bool emulator_up) {
 
     // Состояние карты в порту управления: драйвер WC смотрит только бит 1,
     // но чужой софт может смотреть и остальные.
-    publish_presence(devices::storage::storage_emulator_present(static_cast<uint8_t>(sd::SdOwner::ZController)));
+    publish_presence(devices::storage::storage_emulator_present(sd::SdOwner::ZController));
 
     // До первого обмена защёлка пуста - отдаётся то же, что невыбранная
     // карта.
@@ -91,7 +101,7 @@ void SOUNDSINTH_HOT_PATH(zcontroller_tick)() {
     // Опрос, а не событие: обе проверки читают готовый признак драйвера, ни
     // одного обращения к носителю здесь нет. Публикация - запись байта в
     // таблицу ответов, шину она не задерживает.
-    publish_presence(devices::storage::storage_emulator_present(static_cast<uint8_t>(sd::SdOwner::ZController)));
+    publish_presence(devices::storage::storage_emulator_present(sd::SdOwner::ZController));
 }
 
 } // namespace devices::zcontroller

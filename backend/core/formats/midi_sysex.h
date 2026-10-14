@@ -67,6 +67,106 @@ inline bool sysex_master_volume(const uint8_t* s, uint32_t len, uint8_t& vol) {
     return false;
 }
 
+// Параметр общего эффекта из SysEx: номер FxParam в param, значение 0..127
+// в value. Одно сообщение - не больше одного параметра.
+//
+// GS (41 dev 42 12 40 01 aa vv): 30 - макрос реверберации, переводится во
+// время хвоста; 33 - уровень реверберации; 34 - время; 3A - уровень
+// хоруса.
+//
+// XG (43 1n 4C 02 01 aa ...): 00 - тип реверберации (MSB), переводится во
+// время хвоста, тип 0 - эффект выключен, уровень 0; 0C - возврат
+// реверберации; 20 - тип хоруса, тип 0 - уровень хоруса 0; 2C - возврат
+// хоруса.
+//
+// Время по макросу и типу - приближение по названию зала: у GS и XG своя
+// модель ревербератора, здесь меняется только длина хвоста.
+inline bool sysex_effect_param(const uint8_t* s, uint32_t len, uint8_t& param, uint8_t& value) {
+    constexpr uint8_t kLevel = 0, kTime = 1, kChorus = 2; // как model::FxParam
+    if (len >= 8 && s[0] == 0x41 && s[2] == 0x42 && s[3] == 0x12 && s[4] == 0x40 && s[5] == 0x01) {
+        const uint8_t v = static_cast<uint8_t>(s[7] & 0x7fu);
+        switch (s[6]) {
+            case 0x30: {
+                // Room 1..3, Hall 1..2, Plate, Delay, Panning Delay.
+                constexpr uint8_t kMacroTime[8] = {32, 40, 48, 64, 72, 56, 48, 48};
+                param                           = kTime;
+                value                           = kMacroTime[v & 7u];
+                return true;
+            }
+            case 0x33:
+                param = kLevel;
+                value = v;
+                return true;
+            case 0x34:
+                param = kTime;
+                value = v;
+                return true;
+            case 0x3A:
+                param = kChorus;
+                value = v;
+                return true;
+            default:
+                return false;
+        }
+    }
+    if (len >= 7 && s[0] == 0x43 && (s[1] & 0xf0u) == 0x10 && s[2] == 0x4c && s[3] == 0x02 && s[4] == 0x01) {
+        const uint8_t v = static_cast<uint8_t>(s[6] & 0x7fu);
+        switch (s[5]) {
+            case 0x00:
+                if (v == 0) {
+                    param = kLevel;
+                    value = 0;
+                    return true;
+                }
+                param = kTime;
+                // Hall, Room, Stage, Plate; 10..13 - White Room, Tunnel, Canyon, Basement.
+                switch (v) {
+                    case 0x02:
+                        value = 40;
+                        break;
+                    case 0x03:
+                        value = 56;
+                        break;
+                    case 0x04:
+                        value = 56;
+                        break;
+                    case 0x10:
+                        value = 36;
+                        break;
+                    case 0x11:
+                        value = 96;
+                        break;
+                    case 0x12:
+                        value = 110;
+                        break;
+                    case 0x13:
+                        value = 44;
+                        break;
+                    default:
+                        value = 64;
+                        break;
+                }
+                return true;
+            case 0x0C:
+                param = kLevel;
+                value = v;
+                return true;
+            case 0x20:
+                if (v != 0) return false;
+                param = kChorus;
+                value = 0;
+                return true;
+            case 0x2C:
+                param = kChorus;
+                value = v;
+                return true;
+            default:
+                return false;
+        }
+    }
+    return false;
+}
+
 // Сколько байт тела читают разборы выше: столько живому потоку и нужно
 // держать, остальное сообщение пропускается.
 inline constexpr uint32_t kSysexPrefix = 8;

@@ -8,12 +8,13 @@
 // Приоритет равен приоритету рендера: обе задачи звуковые, и отдавать одной
 // предпочтение не за что, пока они ходят по очереди.
 //
-// Задача ОС заводится один раз на всю работу прошивки и между треками стоит
-// на семафоре: объект живёт трек, задача - дольше.
+// Задача ОС - ParkedTask: заводится один раз на всю работу прошивки и между
+// треками стоит на семафоре.
 
 #include <cstdint>
 
 #include "platform/os.h"
+#include "player/audio/parked_task.h"
 #include "core/engine/tracker_engine.h"
 
 namespace player::audio {
@@ -33,7 +34,6 @@ public:
     // Блокирует вызывающего до полной остановки задачи. Звать после остановки
     // рендера: иначе он повиснет в ожидании тика, которого уже никто не
     // сделает.
-    static constexpr uint32_t kStopWaitPortionMs = 500;
     void stop(void (*on_slow)(uint32_t waited_ms) = nullptr);
 
     // Сколько байт стека задачи не тронуто за её жизнь; верно после stop().
@@ -42,7 +42,7 @@ public:
     uint32_t ticks() const { return ticks_; }
 
 private:
-    static void task_fn(void* unused);
+    friend class ParkedTask;
     void run();
 
     soundsinth::engine::TrackerEngine& engine_;

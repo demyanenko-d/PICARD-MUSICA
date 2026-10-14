@@ -32,7 +32,7 @@ inline constexpr uint8_t kKeyboardKeysPerRow = 5;
 
 // Разряды 5..7 ответа: 5 не используется, 6 - вход магнитофона, 7 не
 // используется. Магнитофона нет, поэтому все три единицы.
-inline constexpr uint8_t kKeyboardIdleBits = 0xe0;
+inline constexpr uint8_t kKeyboardIdleMask = 0xe0;
 
 // Состояние матрицы: разряды 0..4 каждой строки, ноль - нажата.
 void keyboard_reset();

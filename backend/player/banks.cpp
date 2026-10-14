@@ -16,7 +16,7 @@
 
 namespace player {
 
-void open_banks(const uint8_t* flash_blob, uint32_t flash_bytes, void (*pump)()) {
+void banks_open(const uint8_t* flash_blob, uint32_t flash_bytes) {
     const char* bank_err = nullptr;
     // Флеш-банк - всегда: живой MIDI подгружает сэмплы только из него.
     // bank_open проверяет сигнатуру, версию и CRC таблиц, PCM - нет.
@@ -32,7 +32,7 @@ void open_banks(const uint8_t* flash_blob, uint32_t flash_bytes, void (*pump)())
         debug_logf("boot: no bank in flash (%s)\n", bank_err ? bank_err : "reason not given");
     }
     bank_err = nullptr;
-    if (bank_sd_open(shared::g_bank, pump)) {
+    if (bank_sd_open(shared::g_bank)) {
         player::load::session_loader_set_bank(&shared::g_bank);
         // Таблицы банка лежат в конце чипа (kBankTableOffset): хранилище
         // трека ужимается ниже них. Пока трек не загружен, это безопасно:

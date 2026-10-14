@@ -7,8 +7,11 @@
 
 #include "bus_setup.h"
 
+#include <cinttypes>
+
 #include <cstring>
 
+#include "hardware/clocks.h"
 #include "hardware/dma.h"
 #include <iterator> // std::size
 
@@ -16,7 +19,7 @@
 #include "hardware/irq.h"
 #include "hardware/pio.h"
 #include "hardware/structs/bus_ctrl.h"
-#include "pico/platform.h"
+#include "pico.h"
 
 #include "platform/log.h"
 #include "divmmc.h"
@@ -25,15 +28,44 @@
 #include "ports.pio.h"
 #include "memory.pio.h"
 #include "trap_join.pio.h"
+#include "reset_watch.pio.h"
 #include "trdos.pio.h"
+// Только для счёта команд ниже: программа звука грузится в i2s_sink.
+#include "i2s_pio.pio.h"
 
 namespace bus {
+
+// Память команд PIO - 32 на блок. Лишняя команда даёт panic в
+// pio_add_program, и не на загрузке: i2s_out грузится последним, на
+// первом треке, и только в части режимов. Счёт - по режимам и блокам.
+template <size_t... N>
+constexpr size_t pio_words([[maybe_unused]] const uint16_t (&... p)[N]) {
+    return (N + ... + 0u);
+}
+inline constexpr size_t kPioWords = 32;
+// DivMMC: pio0 - сборка адреса ПЗУ и трапы; pio1 - захват записей, детектор
+// портов, ответчик; pio2 - склейщики трапов и портов и звук.
+static_assert(pio_words(rom_detect_program_instructions, rom_join_program_instructions, rom_trap_program_instructions) <= kPioWords,
+              "PIO0 instruction memory overflows in the DivMMC mode");
+static_assert(pio_words(bus_wr_program_instructions, port_detect_program_instructions, rom_serve_program_instructions) <= kPioWords,
+              "PIO1 instruction memory overflows");
+static_assert(pio_words(trap_join_program_instructions, trap_route_program_instructions, port_join_program_instructions, i2s_out_program_instructions) <=
+                  kPioWords,
+              "PIO2 instruction memory overflows in the DivMMC mode");
+// Без DivMMC: pio0 - триггер TR-DOS; pio2 - склейщик портов, привод TR-DOS и
+// звук.
+static_assert(pio_words(trdos_detect_program_instructions, reset_watch_program_instructions) <= kPioWords,
+              "PIO0 instruction memory overflows in the TR-DOS mode");
+static_assert(pio_words(port_join_program_instructions, trdos_drive_program_instructions, i2s_out_program_instructions) <= kPioWords,
+              "PIO2 instruction memory overflows in the TR-DOS mode");
 
 // Номера управляющих линий зашиты в wait gpio программ PIO: смена пина
 // должна ломать сборку, а не шину.
 static_assert(PIN_M1_N == Z80_M1_N_GPIO && PIN_WR_N == Z80_WR_N_GPIO && PIN_RD_N == Z80_RD_N_GPIO && PIN_IORQ_N == Z80_IORQ_N_GPIO &&
                   PIN_MREQ_N == Z80_MREQ_N_GPIO,
               "the Z80 line numbers disagree with the wait gpio in ports.pio and memory.pio");
+// Сдвиги снимков пинов в rom_detect и bus_wr считаются от A0 и A8.
+static_assert(PIN_A0 == A0_GPIO && PIN_A8 == A8_GPIO, "the address pins disagree with A0_GPIO and A8_GPIO in ports.pio and memory.pio");
 // Окно выводов блока, который ведёт DOS_N, - 16..47.
 static_assert(PIN_DOS_N >= 16u && PIN_DOS_N <= 47u, "DOS_N is outside the pin window of the audio block");
 
@@ -90,7 +122,7 @@ void data_pins_to_pio(PIO pio) {
 // 3. Только теперь пин передаётся PIO: уровень из шага 1 без глитча.
 void oe_handoff(PIO pio, uint sm, uint side_set) {
     pio_sm_exec_wait_blocking(pio, sm, pio_encode_nop() | side_set);
-    pio_sm_set_pindirs_with_mask(pio, sm, (1u << PIN_BUFF_OE_N), (1u << PIN_BUFF_OE_N) | (0xFFu << PIN_D0));
+    pio_sm_set_pindirs_with_mask(pio, sm, (1u << PIN_BUFF_OE_N), (1u << PIN_BUFF_OE_N) | (0xffu << PIN_D0));
     pio_gpio_init(pio, PIN_BUFF_OE_N);
 }
 
@@ -155,13 +187,19 @@ void dma_over_cores() {
 
 // --- Эмуляция ПЗУ ---
 
-// ports_only - без эмуляции памяти (DivMMC выключен снята): подтяжки линий цикла
-// порта, как у прежних плагинных автоматов.
-void setup_gpio(bool ports_only) {
+// Последовательность подъёма шины. Шину поднимает одна из двух, и от неё
+// же зависят подтяжки, ветка памяти захвата записи и хозяин канала выдачи
+// байта:
+//   RomEmulation - эмуляция ПЗУ (DivMMC или конфигуратор), rom_emu_init;
+//   PortsOnly    - только порты, без эмуляции памяти (plugin_ports_init).
+enum class BringUp : uint8_t { RomEmulation, PortsOnly };
+
+// PortsOnly - ещё подтяжки линий цикла порта.
+void setup_gpio(BringUp mode) {
     bus_inputs_to_sio();
 
     gpio_pull_up(PIN_RD_N);
-    if (ports_only) {
+    if (mode == BringUp::PortsOnly) {
         gpio_pull_up(PIN_IORQ_N);
         gpio_pull_up(PIN_WR_N);
     } else {
@@ -181,15 +219,15 @@ void setup_gpio(bool ports_only) {
 
 namespace {
 
-// with_memory - ловить и записи в память ниже 0x4000 (эмуляция DivMMC).
-// Без неё ветка памяти заменяется переходом к концу цикла: записи в ОЗУ
-// машины прерывания не будят.
-void setup_bus_wr(bool with_memory) {
+// RomEmulation - ловить и записи в память ниже 0x4000. PortsOnly - ветка
+// памяти заменяется переходом к концу цикла: записи в ОЗУ машины
+// прерывания не будят.
+void setup_bus_wr(BringUp mode) {
     uint16_t code[sizeof(bus_wr_program_instructions) / sizeof(bus_wr_program_instructions[0])];
     for (uint32_t k = 0; k < std::size(code); ++k) {
         code[k] = bus_wr_program_instructions[k];
     }
-    if (!with_memory) code[bus_wr_offset_mem] = static_cast<uint16_t>(pio_encode_jmp(bus_wr_offset_done));
+    if (mode == BringUp::PortsOnly) code[bus_wr_offset_mem] = static_cast<uint16_t>(pio_encode_jmp(bus_wr_offset_done));
     pio_program_t prog = bus_wr_program;
     prog.instructions  = code;
     const uint off     = pio_add_program(PIO_WATCH, &prog);
@@ -199,9 +237,8 @@ void setup_bus_wr(bool with_memory) {
     const uint irq = pio_get_irq_num(PIO_WATCH, 0);
     pio_set_irq0_source_enabled(PIO_WATCH, pis_interrupt0, true);
     irq_set_exclusive_handler(irq, bus_wr_isr);
-    // 0x40: ниже трапов, выше чтения портов. Запись должна успеть до чтения того
-    // же байта, около 1.7 мкс: ПЗУ DivMMC проверяет ОЗУ (inc (hl) / cp (hl) по
-    // 0x3D00). Выше трапов она вытесняет трап, и вход по 0x0066 не срабатывает.
+    // 0x40: выше чтения портов. Запись должна успеть до чтения того же байта,
+    // около 1.7 мкс: ПЗУ DivMMC проверяет ОЗУ (inc (hl) / cp (hl) по 0x3D00).
     irq_set_priority(irq, IRQ_PRIO_BUS_WR);
     irq_set_enabled(irq, true);
 
@@ -215,17 +252,27 @@ void setup_trap() {
     pio_sm_claim(PIO_DETECT, SM_ROM_TRAP);
     rom_trap_program_init(PIO_DETECT, SM_ROM_TRAP, off, PIN_A0);
 
-    // Склейщик в блоке звука: пины шины ему нужны только A8..A13 (база GPIO
-    // 16 стоит с загрузки платы).
+    // Оба склейщика в блоке звука: пины шины им нужны только A8..A13 (база
+    // GPIO 16 стоит с загрузки платы). Места там хватает именно в режиме
+    // DivMMC: trdos_drive заводится только без него - дисковая система одна.
     const uint off_join = pio_add_program(PIO_AUDIO, &trap_join_program);
-    s_sm_trap_join      = pio_claim_unused_sm(PIO_AUDIO, true);
+    s_sm_trap_join      = static_cast<int>(pio_claim_unused_sm(PIO_AUDIO, true));
     const auto join_sm  = static_cast<uint>(s_sm_trap_join);
-    trap_join_program_init(PIO_AUDIO, join_sm, off_join, PIN_A8, PIN_A8 + 5u, reinterpret_cast<uintptr_t>(s_trap_addr_map),
-                           reinterpret_cast<uintptr_t>(s_trap_page_map));
+    trap_join_program_init(PIO_AUDIO, join_sm, off_join, PIN_A8, PIN_A8 + 5u, reinterpret_cast<uintptr_t>(s_trap_lo),
+                           reinterpret_cast<uintptr_t>(trap_page_map()));
+
+    // Разборщик маршрута и второй уровень: читает запись первого уровня и
+    // либо дописывает её старшими битами адреса, либо отдаёт как есть.
+    const uint off_route = pio_add_program(PIO_AUDIO, &trap_route_program);
+    s_sm_trap_route      = static_cast<int>(pio_claim_unused_sm(PIO_AUDIO, true));
+    const auto route_sm  = static_cast<uint>(s_sm_trap_route);
+    trap_route_program_init(PIO_AUDIO, route_sm, off_route, PIN_A8);
 
     s_dma_trap_in      = dma_claim_unused_channel(true);
     s_dma_trap_addr    = dma_claim_unused_channel(true);
     s_dma_trap_entry   = dma_claim_unused_channel(true);
+    s_dma_trap_addr2   = dma_claim_unused_channel(true);
+    s_dma_trap_entry2  = dma_claim_unused_channel(true);
     s_dma_trap_word    = dma_claim_unused_channel(true);
     s_dma_trap_note    = dma_claim_unused_channel(true);
     const auto ch_in   = static_cast<uint>(s_dma_trap_in);
@@ -245,24 +292,25 @@ void setup_trap() {
         channel_config_set_chain_to(&wc, ch_note);
         dma_channel_set_config(ch_word, &wc, false);
     }
-    // Адрес записи карты -> запись -> триггер канала слова (ноль - стоп).
-    setup_chain(static_cast<uint>(s_dma_trap_addr), static_cast<uint>(s_dma_trap_entry), &PIO_AUDIO->rxf[join_sm], &dma_hw->ch[ch_word].al3_read_addr_trig,
+    // Второй уровень: разборщик -> указатель на слово -> триггер канала
+    // слова (ноль - стоп). Ставится раньше первого: первый кладёт в очередь
+    // разборщика, и к тому времени тот должен быть обслужен.
+    setup_chain(static_cast<uint>(s_dma_trap_addr2), static_cast<uint>(s_dma_trap_entry2), &PIO_AUDIO->rxf[route_sm], &dma_hw->ch[ch_word].al3_read_addr_trig,
+                pio_get_dreq(PIO_AUDIO, route_sm, false), DMA_SIZE_32);
+    // Первый уровень: склейщик -> запись карты -> очередь разборщика.
+    setup_chain(static_cast<uint>(s_dma_trap_addr), static_cast<uint>(s_dma_trap_entry), &PIO_AUDIO->rxf[join_sm], &PIO_AUDIO->txf[route_sm],
                 pio_get_dreq(PIO_AUDIO, join_sm, false), DMA_SIZE_32);
-    // Адрес выборки: rom_trap -> склейщик. Сам перевзводится, как адресный
-    // канал цепочки.
-    dma_channel_config_t dc = dma_channel_get_default_config(ch_in);
-    channel_config_set_dreq(&dc, pio_get_dreq(PIO_DETECT, SM_ROM_TRAP, false));
-    channel_config_set_high_priority(&dc, true);
-    channel_config_set_read_increment(&dc, false);
-    channel_config_set_write_increment(&dc, false);
-    channel_config_set_transfer_data_size(&dc, DMA_SIZE_32);
-    dma_channel_configure(ch_in, &dc, &PIO_AUDIO->txf[join_sm], &PIO_DETECT->rxf[SM_ROM_TRAP], dma_encode_transfer_count_with_self_trigger(1), true);
+    // Адрес выборки: rom_trap -> склейщик. Устроен как адресный канал
+    // цепочки (высокий приоритет, сам перевзводится), запускается сразу.
+    setup_addr_channel(ch_in, &PIO_AUDIO->txf[join_sm], &PIO_DETECT->rxf[SM_ROM_TRAP], pio_get_dreq(PIO_DETECT, SM_ROM_TRAP, false));
+    dma_channel_start(ch_in);
 
     pio_sm_set_enabled(PIO_AUDIO, join_sm, true);
+    pio_sm_set_enabled(PIO_AUDIO, route_sm, true);
     pio_sm_set_enabled(PIO_DETECT, SM_ROM_TRAP, true);
 }
 
-void setup_ports() {
+void setup_ports(BringUp mode) {
     const uint off_det = pio_add_program(PIO_WATCH, &port_detect_program);
     pio_sm_claim(PIO_WATCH, SM_PORT_DETECT);
     port_detect_program_init(PIO_WATCH, SM_PORT_DETECT, off_det, PIN_RD_N, PIN_A0, reinterpret_cast<uintptr_t>(s_porttab));
@@ -282,8 +330,9 @@ void setup_ports() {
 
     // Канал выдачи байта - общий с чтением памяти: циклы MREQ и IORQ у Z80
     // взаимно исключены, и обе цепочки уже льют в одну очередь rom_serve.
-    // Без DivMMC чтения памяти нет, канал берётся свой.
-    if (s_dma_byte_data < 0) {
+    // С эмуляцией ПЗУ канал завёл setup_memory_read; без неё чтения памяти
+    // нет, канал берётся свой.
+    if (mode == BringUp::PortsOnly) {
         s_dma_byte_data = dma_claim_unused_channel(true);
         setup_data_channel(s_dma_byte_data, &PIO_SERVE->txf[SM_SERVE], DMA_SIZE_8);
     }
@@ -340,7 +389,7 @@ void nmi_line_to_input() {
 
 // Окно включения TR-DOS: выборка команды по адресу 0x3Dxx. Значимый только
 // старший байт, младший автомат не разбирает.
-constexpr uint8_t kTrDosWindowHi = 0x3D;
+constexpr uint8_t kTrDosWindowHi = 0x3d;
 
 // Триггер TR-DOS. Решает автомат в pio0, ведёт вывод автомат в pio2,
 // решение переносит один канал DMA из очереди в очередь.
@@ -357,7 +406,11 @@ constexpr uint8_t kTrDosWindowHi = 0x3D;
 void setup_trdos() {
     const uint off_detect = pio_add_program(PIO_DETECT, &trdos_detect_program);
     pio_sm_claim(PIO_DETECT, SM_TRDOS_DETECT);
-    trdos_detect_program_init(PIO_DETECT, SM_TRDOS_DETECT, off_detect, PIN_A0, PIN_M1_N, kTrDosWindowHi);
+    // После сброса машины ПЗУ 128: флага ПЗУ 48 нет, порт открыт.
+    pio_interrupt_clear(PIO_DETECT, IRQ_ROM48);
+    pio_interrupt_clear(PIO_DETECT, IRQ_PAGING_LOCKED);
+    trdos_detect_program_init(PIO_DETECT, SM_TRDOS_DETECT, off_detect, PIN_A0, PIN_M1_N, kTrDosWindowHi, IRQ_ROM48);
+    s_trdos_detect_offset = static_cast<int>(off_detect);
 
     // Окно выводов блока - общее с звуком, и значение у них одно.
     pio_set_gpio_base(PIO_AUDIO, 16);
@@ -371,6 +424,26 @@ void setup_trdos() {
 
     pio_sm_set_enabled(PIO_AUDIO, drive_sm, true);
     pio_sm_set_enabled(PIO_DETECT, SM_TRDOS_DETECT, true);
+}
+
+// Слежение за сбросом машины в pio0: там видны M1 (окно выводов 0..31), а с
+// выключенным DivMMC блок свободен, кроме триггера TR-DOS. Нет места -
+// строка в журнал, слежения нет.
+void setup_reset_watch() {
+    if (!pio_can_add_program(PIO_DETECT, &reset_watch_program)) {
+        debug_log("bus: no room in pio0 for the machine reset watch\n");
+        return;
+    }
+    const uint off   = pio_add_program(PIO_DETECT, &reset_watch_program);
+    s_sm_reset_watch = static_cast<int>(pio_claim_unused_sm(PIO_DETECT, true));
+    const auto sm    = static_cast<uint>(s_sm_reset_watch);
+    // 50 тактов Z80 на 3.5 МГц, проход - два такта автомата.
+    constexpr uint64_t kZ80Hz     = 3500000u;
+    constexpr uint64_t kZ80Cycles = 50u;
+    const auto passes             = static_cast<uint32_t>(static_cast<uint64_t>(clock_get_hz(clk_sys)) * kZ80Cycles / kZ80Hz / 2u);
+    reset_watch_program_init(PIO_DETECT, sm, off, PIN_M1_N, passes);
+    pio_sm_set_enabled(PIO_DETECT, sm, true);
+    debug_logf("bus: machine reset watch on, pio0 sm %u, %" PRIu32 " passes\n", sm, passes);
 }
 
 // Ответчик шины rom_serve с передачей OE_N: один на порты и память.
@@ -432,21 +505,30 @@ void setup_memory_read() {
 
 } // namespace
 
-// Выравнивание на 32 КБ обязательно: склейщик собирает адрес
-// склейкой "база или A со сдвигом на 2", а не сложением.
-alignas(kTrapAddrMapEntries * sizeof(uint32_t)) uint32_t s_trap_addr_map_storage[kTrapAddrMapEntries];
+// Выравнивания обязательны: склейщики собирают адрес склейкой "база или
+// индекс со сдвигом на 2", а не сложением.
+//
+// Первый уровень - 1024: восемь бит индекса (A0..A7) плюс два бита
+// масштаба. Подтаблицы - 128: пять бит (A8..A12) плюс два; они лежат в
+// дырах таблицы страниц, выровненных на 512, по четыре строки на дыру.
+alignas(kTrapLoEntries * sizeof(uint32_t)) uint32_t s_trap_lo_storage[kTrapLoEntries];
 
 void rom_emu_init() {
-    // Выравнивание карты держит alignas, но склейщик молча перепутал бы
+    // Выравнивание карт держит alignas, но склейщики молча перепутали бы
     // адреса, сойди оно: проверяется здесь, а не на шине.
-    if ((reinterpret_cast<uintptr_t>(s_trap_addr_map) & (kTrapAddrMapEntries * sizeof(uint32_t) - 1u)) != 0u) {
-        panic("rom_emu: trap map 0x%08x is not aligned to 32 KB", static_cast<unsigned>(reinterpret_cast<uintptr_t>(s_trap_addr_map)));
+    if ((reinterpret_cast<uintptr_t>(s_trap_lo) & (kTrapLoEntries * sizeof(uint32_t) - 1u)) != 0u) {
+        panic("rom_emu: trap level 1 at 0x%08x is not aligned to 1 KB", static_cast<unsigned>(reinterpret_cast<uintptr_t>(s_trap_lo)));
+    }
+    if ((reinterpret_cast<uintptr_t>(trap_sub(0)) & (kTrapSubEntries * sizeof(uint32_t) - 1u)) != 0u) {
+        panic("rom_emu: trap sub-tables at 0x%08x are not aligned to 128 B", static_cast<unsigned>(reinterpret_cast<uintptr_t>(trap_sub(0))));
     }
     nmi_line_to_input();
 
-    // Все записи - "не наша": и в вариантах, которые не заполняются.
-    for (auto& v : s_pagetabs) {
-        for (auto& half : v) {
+    // Все записи - "не наша": и в вариантах, которые не заполняются. Дыры
+    // не трогаются - в них карты трапов.
+    for (uint32_t vi = 0; vi < PAGE_TAB_VARIANTS; ++vi) {
+        if (pagetab_is_hole(vi)) continue;
+        for (auto& half : s_pagetabs[vi]) {
             for (uint32_t& e : half) {
                 e = kPageNotOurs;
             }
@@ -456,13 +538,12 @@ void rom_emu_init() {
     // 0x4000 - машины.
     divmmc_reset();
 
-    setup_gpio(false);
+    setup_gpio(BringUp::RomEmulation);
     setup_serve();
     setup_memory_read(); // после divmmc_reset: база детектора - выбранный им вариант
-    setup_bus_wr(true);
-    // Трапы: подстановку меняет ядро по прерыванию.
+    setup_bus_wr(BringUp::RomEmulation);
     setup_trap();
-    setup_ports();
+    setup_ports(BringUp::RomEmulation);
 
     // 0x0000-0x1FFF - ПЗУ DivMMC, 0x2000-0x3FFF - его страница ОЗУ; блокировкой
     // ПЗУ машины распоряжается divmmc вслед за подстановкой (начальное
@@ -471,6 +552,25 @@ void rom_emu_init() {
               " machine ROM blocked while mapped\n");
 }
 
+namespace {
+// Без эмуляции ПЗУ шину поднимает только путь портов - тот же, что с ней:
+// детектор, указатели с пустым триггером, общий ответчик, захват записи
+// без ветки памяти. Ответчик включается последним.
+void bring_up_ports_only() {
+    setup_gpio(BringUp::PortsOnly);
+    setup_serve();
+    dma_over_cores();
+    setup_bus_wr(BringUp::PortsOnly);
+    setup_ports(BringUp::PortsOnly);
+    pio_sm_set_enabled(PIO_SERVE, SM_SERVE, true);
+    // После эмуляции ПЗУ: там pio0 занят детектором и сборкой адреса,
+    // и триггеру в нём места нет. Вместе они и не нужны - дисковая
+    // система одна.
+    if (trdos_enabled()) setup_trdos();
+    if (reset_watch_enabled()) setup_reset_watch();
+}
+} // namespace
+
 void plugin_ports_init(player::protocol::HostProtocol& protocol) {
     s_protocol = &protocol;
 
@@ -478,28 +578,15 @@ void plugin_ports_init(player::protocol::HostProtocol& protocol) {
     // Порт команд хост и читает, и пишет (команды) - регистрируются оба
     // направления.
     s_wr_table[PORT_CMD] = port_write_cmd;
-    // Слова ответа для наших портов; остальные записи нулевые - PIO
-    // трактует ноль как "порт не наш" (jmp !y) и на шину не выходит.
+    // Ответы - в s_porttab; нулевая запись - порт не наш, склейщик её
+    // отбрасывает.
     // Вооружение отдаётся протоколу: он решает, что выставить, платформа -
     // как (кодирует слова и публикует статус последним).
     protocol.set_arm(&arm_frame, nullptr, &hide_frame);
-    z80_bus_pio_set_rd(PORT_CMD, player::protocol::HostProtocol::kStNone);
+    port_set_read(PORT_CMD, player::protocol::HostProtocol::kStNone);
 
-    // Без DivMMC шину поднимает только путь портов - тот же, что с ним:
-    // детектор, указатели с пустым триггером, общий ответчик, захват записи
-    // без ветки памяти. С DivMMC его поднял rom_emu_init.
-    if (!divmmc_enabled()) {
-        setup_gpio(true);
-        setup_serve();
-        dma_over_cores();
-        setup_bus_wr(false);
-        setup_ports();
-        pio_sm_set_enabled(PIO_SERVE, SM_SERVE, true);
-        // После эмуляции ПЗУ: там pio0 занят детектором и сборкой адреса,
-        // и триггеру в нём места нет. Вместе они и не нужны - дисковая
-        // система одна.
-        if (trdos_enabled()) setup_trdos();
-    }
+    // С эмуляцией ПЗУ путь портов поднял rom_emu_init.
+    if (!rom_emu_enabled()) bring_up_ports_only();
 }
 
 } // namespace bus

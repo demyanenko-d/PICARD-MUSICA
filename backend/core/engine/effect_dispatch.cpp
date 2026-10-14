@@ -805,13 +805,19 @@ SOUNDSINTH_NOINLINE void SOUNDSINTH_HOT_PATH(advance_envelope_and_fadeout)(Chann
     }
 }
 
-void channels_init(const Song& song, ChannelState* channels) {
+void channels_init(const Song& song, ChannelState* channels, uint8_t pan_percent) {
     const bool paula = (song.quirks & soundsinth::model::kQuirkModHardwarePanning) != 0;
+    // Отклонение от центра: при 100% это ровно половина шкалы, то есть края
+    // 0 и kPanMax, как у железа. Деление целое, с округлением к ближнему.
+    if (pan_percent > 100) pan_percent = 100;
+    const uint8_t spread = static_cast<uint8_t>((static_cast<uint32_t>(kPanCenter) * pan_percent + 50u) / 100u);
+    const uint8_t pan_l  = static_cast<uint8_t>(kPanCenter - spread);
+    const uint8_t pan_r  = static_cast<uint8_t>(kPanCenter + spread);
     for (uint8_t ch = 0; ch < song.channel_count; ++ch) {
         channels[ch] = ChannelState{};
         // Разводка Paula у MOD (каналы 0 и 3 по модулю 4 влево, 1 и 2 вправо) -
         // свойство устройства; загрузчик MOD channel_pan не заполняет.
-        channels[ch].pan            = paula ? (((ch % 4) == 0 || (ch % 4) == 3) ? 0 : kPanMax) : song.channel_pan[ch];
+        channels[ch].pan            = paula ? (((ch % 4) == 0 || (ch % 4) == 3) ? pan_l : pan_r) : song.channel_pan[ch];
         channels[ch].channel_volume = song.channel_volume[ch];
         channels[ch].surround       = ((song.channel_surround >> ch) & 1u) != 0;
     }
@@ -1270,6 +1276,16 @@ SOUNDSINTH_NOINLINE void dispatch_cell(DispatchContext* ctx, uint8_t ch, const P
                 // Разово и на весь канал, как панорама: значение держится,
                 // пока не переуказано.
                 cs.reverb_send = effect.param > 127 ? 127 : effect.param;
+                break;
+            case Effect::SetEffectParam: {
+                const uint8_t id = static_cast<uint8_t>(effect.rate);
+                if (ctx->fx_params != nullptr && id < static_cast<uint8_t>(soundsinth::model::FxParam::Count)) {
+                    ctx->fx_params[id] = effect.param > 127 ? 127 : effect.param;
+                }
+                break;
+            }
+            case Effect::SetChorusSend:
+                if (ctx->chorus_send != nullptr) ctx->chorus_send[ch] = effect.param > 127 ? 127 : effect.param;
                 break;
 
             case Effect::SetPitchOffset: {

@@ -2,20 +2,21 @@
 #pragma once
 
 #include <atomic>
-
 #include <cstdint>
 
 #include "platform/os.h"
-#include "player/audio/buffer_pool.h"
+
 #include "core/audio/mixbus.h"
+
+#include "player/audio/buffer_pool.h"
+#include "player/audio/parked_task.h"
 
 namespace player::audio {
 
 // Задача, которая рендерит bus в pool до stop().
 //
-// Сама задача ОС заводится один раз на всю работу прошивки и между треками
-// стоит на семафоре: объект живёт трек, задача - дольше. Иначе повторный
-// запуск приходился бы на ещё не снятую задачу.
+// Сама задача ОС - ParkedTask: заводится один раз на всю работу прошивки и
+// между треками стоит на семафоре.
 class RenderTask {
 public:
     // busy_us_counter - необязательный счётчик микросекунд, когда ядро считало
@@ -37,9 +38,9 @@ public:
     //
     // Возвращается только по остановке задачи: вернуть раньше - значит
     // разрушить движок под живой задачей. on_slow (может быть nullptr)
-    // зовётся раз в kStopWaitPortionMs, пока задача не остановилась, с
-    // прошедшим временем - признак жизни вместо молчаливого зависания.
-    static constexpr uint32_t kStopWaitPortionMs = 500;
+    // зовётся раз в ParkedTask::kStopWaitPortionMs, пока задача не
+    // остановилась, с прошедшим временем - признак жизни вместо
+    // молчаливого зависания.
     void stop(void (*on_slow)(uint32_t waited_ms) = nullptr);
 
     // Сколько байт стека задачи не тронуто за её жизнь; верно после stop().
@@ -61,7 +62,7 @@ public:
     uint32_t worst_gap_push_us() const { return worst_gap_push_us_.load(std::memory_order_relaxed); }
 
 private:
-    static void task_fn(void* unused);
+    friend class ParkedTask;
     void run();
 
     soundsinth::mixbus::MixBus& bus_;

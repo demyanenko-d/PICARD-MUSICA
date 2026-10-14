@@ -1077,7 +1077,99 @@ void test_overflow_is_clamped_and_counted() {
 
 } // namespace
 
+// Управление воспроизведением: kHcTransport. Команда снимается чтением,
+// решение принимает цикл сеанса, а не обработчик.
+void test_transport_request_is_taken_once() {
+    std::printf("test_transport_request_is_taken_once\n");
+
+    HostProtocol p;
+    Host h(p);
+    CHECK(p.take_transport_request() == TransportOp::None);
+
+    h.command(HostProtocol::kHcTransport, static_cast<uint8_t>(TransportOp::PauseToggle));
+    CHECK(p.take_transport_request() == TransportOp::PauseToggle);
+    // Второе чтение отдаёт None: иначе один нажатый пробел снимал бы паузу
+    // столько раз, сколько витков успеет сделать сеанс.
+    CHECK(p.take_transport_request() == TransportOp::None);
+
+    h.command(HostProtocol::kHcTransport, static_cast<uint8_t>(TransportOp::SeekForward));
+    CHECK(p.take_transport_request() == TransportOp::SeekForward);
+    h.command(HostProtocol::kHcTransport, static_cast<uint8_t>(TransportOp::SeekBackward));
+    CHECK(p.take_transport_request() == TransportOp::SeekBackward);
+}
+
+// Конфигуратор: просьба пересчитать страницу и ответ на неё.
+void test_config_refresh_and_exit() {
+    std::printf("test_config_refresh_and_exit\n");
+
+    HostProtocol p;
+    Host h(p);
+    CHECK(!p.take_config_refresh());
+
+    h.command(HostProtocol::kHcConfigRefresh);
+    CHECK(p.take_config_refresh());
+    CHECK(!p.take_config_refresh()); // снимается чтением
+
+    // Ответ конфигуратору уходит отдельным кодом.
+    p.arm_config_done(true);
+    CHECK_EQ(h.poll_status(), static_cast<uint8_t>(HostProtocol::kStConfigDone));
+    h.command(HostProtocol::kHcDone);
+
+    // Чем кончить работу: три разных исхода, и None до просьбы.
+    CHECK(p.take_config_exit() == ConfigExit::None);
+    h.command(HostProtocol::kHcConfigExit, static_cast<uint8_t>(ConfigExit::Save));
+    CHECK(p.take_config_exit() == ConfigExit::Save);
+    CHECK(p.take_config_exit() == ConfigExit::None);
+    h.command(HostProtocol::kHcConfigExit, static_cast<uint8_t>(ConfigExit::Discard));
+    CHECK(p.take_config_exit() == ConfigExit::Discard);
+    h.command(HostProtocol::kHcConfigExit, static_cast<uint8_t>(ConfigExit::Reenter));
+    CHECK(p.take_config_exit() == ConfigExit::Reenter);
+}
+
+// Признаки паузы и доступности перемотки идут поверх состояния, и хост
+// обязан брать состояние маской. Проверяется, что признаки не затирают
+// состояние и что маска его возвращает.
+void test_position_flags_do_not_overwrite_state() {
+    std::printf("test_position_flags_do_not_overwrite_state\n");
+
+    HostProtocol p;
+    Host h(p);
+    // Сессия с заказанной телеметрией позиции: без заказа плата её не шлёт.
+    h.command(HostProtocol::kHcStart, 0x00, 0x00, 0x10, 0x00, 2, HostProtocol::kTelemetryPosition);
+    uint8_t first[4];
+    CHECK_EQ(h.poll_status(), static_cast<uint8_t>(HostProtocol::kStPosition));
+    CHECK(h.read_args(first, 4));
+    h.command(HostProtocol::kHcDone);
+
+    p.set_position(1, 23, PlaybackState::Playing, static_cast<uint8_t>(kStatePaused | kStateSeekable));
+    p.poll();
+    CHECK_EQ(h.poll_status(), static_cast<uint8_t>(HostProtocol::kStPosition));
+
+    uint8_t args[4];
+    CHECK(h.read_args(args, 4));
+    h.command(HostProtocol::kHcDone);
+    // Время идёт двоично-десятичным: минуты и секунды читаются как есть
+    // на экране, без деления на десять.
+    CHECK_EQ(args[0], 0x01);
+    CHECK_EQ(args[1], 0x23);
+    const uint8_t st = args[2];
+    CHECK_EQ(static_cast<uint8_t>(st & kStateMask), static_cast<uint8_t>(PlaybackState::Playing));
+    CHECK_EQ(static_cast<uint8_t>(st & kStatePaused), static_cast<uint8_t>(kStatePaused));
+    CHECK_EQ(static_cast<uint8_t>(st & kStateSeekable), static_cast<uint8_t>(kStateSeekable));
+
+    // Без признаков в том же поле остаётся только состояние.
+    p.set_position(0, 5, PlaybackState::Ended);
+    p.poll();
+    CHECK_EQ(h.poll_status(), static_cast<uint8_t>(HostProtocol::kStPosition));
+    CHECK(h.read_args(args, 4));
+    h.command(HostProtocol::kHcDone);
+    CHECK_EQ(args[2], static_cast<uint8_t>(PlaybackState::Ended));
+}
+
 void run_host_protocol_tests() {
+    test_transport_request_is_taken_once();
+    test_config_refresh_and_exit();
+    test_position_flags_do_not_overwrite_state();
     test_overflow_is_clamped_and_counted();
     test_reset_gives_board_name();
     test_end_session_keeps_board_name_nak();

@@ -33,3 +33,12 @@
 #else
 #define SOUNDSINTH_PRINTF_FORMAT(fmt_index, first_arg) __attribute__((format(printf, fmt_index, first_arg)))
 #endif
+
+// Своя секция .bss для выровненного массива: в общей .bss объектного файла
+// он стоит набивки до своей границы. Выравнивание держит alignas, секция
+// только выносит массив отдельно. У MSVC раскладки по секциям нет.
+#if defined(_MSC_VER)
+#define SOUNDSINTH_BSS_SECTION(name)
+#else
+#define SOUNDSINTH_BSS_SECTION(name) __attribute__((section(".bss." name)))
+#endif

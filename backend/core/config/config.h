@@ -6,6 +6,7 @@
 // Платформы не касаются: разбор, сборка и выбор блока проверяются на ПК.
 // Где лежат блоки и чем они пишутся, знает порт.
 
+#include <cstddef>
 #include <cstdint>
 
 namespace soundsinth::config {
@@ -19,6 +20,9 @@ namespace soundsinth::config {
 // Расширение набора значений поля тоже не требует, пока прежние значения
 // означают прежнее.
 inline constexpr uint16_t kFormatVersion = 1;
+
+// Разведение каналов MOD, проценты от аппаратной разводки Amiga.
+inline constexpr uint8_t kModPanningMax = 100;
 
 // Носитель, с которым работает эмулятор карты.
 enum class Media : uint8_t { Sd = 0, Usb = 1 };
@@ -50,13 +54,26 @@ inline constexpr uint8_t kMouseSpeedUnit = 4;
 inline constexpr uint8_t kMouseSpeedMin  = 1;
 inline constexpr uint8_t kMouseSpeedMax  = 32;
 
+// Действия джойстика Kempston, по разряду порта: вправо, влево, вниз,
+// вверх, огонь и три кнопки восьмиразрядного варианта.
+inline constexpr uint32_t kJoyActions = 8;
+// Клавиш на действие. Код ноль - клавиши нет.
+inline constexpr uint32_t kJoyKeysPerAction = 2;
+// Esc не привязывается: в конфигураторе он отменяет действие, в том числе
+// саму привязку.
+inline constexpr uint8_t kKeyEsc = 0x29;
+// Коды HID, которые привязываются: от A до точки цифровой клавиатуры.
+inline constexpr uint8_t kKeyCodeMin = 0x04;
+inline constexpr uint8_t kKeyCodeMax = 0x63;
+
 // Умолчания - набор для TS-Config: у неё есть своя память, свой интерфейс
 // карты, своя клавиатура и мышь, и всё это плата трогать не должна.
 // Остаётся то, ради чего её ставят: синтезатор, General Sound и живой
 // MIDI. Машине с DivMMC или TR-DOS остальное включают файлом.
 //
-// Поля только добавлять в конец: переставленное или переосмысленное поле
-// требует нового kFormatVersion и стирает настройки у всех.
+// Первые kLegacyBytes байт лежат во флеше одним куском: переставленное или
+// переосмысленное поле там требует нового kFormatVersion и стирает
+// настройки у всех. Поля за ними хранятся записями по номеру.
 struct Settings {
     uint8_t disksys           = static_cast<uint8_t>(DiskSys::None);
     uint8_t disksys_media     = static_cast<uint8_t>(Media::Sd);
@@ -87,21 +104,59 @@ struct Settings {
     uint8_t log = 1;
     // Wi-Fi забирает GPIO34, 38 и 39, а с ними блок UART1 целиком.
     uint8_t wifi = 0;
+
+    // Глубина разведения каналов MOD, проценты от аппаратной разводки
+    // Amiga: каналы 0 и 3 до упора налево, 1 и 2 направо. 100 - как
+    // железо, 0 - всё по центру. Прочие форматы задают панораму в файле.
+    uint8_t mod_panning = kModPanningMax;
+
+    // Эффекты General Sound: отнимать канал у модуля, как настоящая карта
+    // (четыре канала на всё, эффект глушит игравшее в канале), или играть
+    // своими голосами. Умолчание - как у карты: игры на это рассчитаны.
+    uint8_t gs_fx_separate = 0;
+
+    // Разрешение обмена кнопок мыши жестом: обе зажаты полсекунды - левая и
+    // правая меняются местами до выключения. По умолчанию выключен: обе
+    // кнопки разом нажимают и в играх.
+    uint8_t mouse_autoswap = 0;
+
+    // Свободный байт неподвижной части.
+    uint8_t reserved_[1] = {};
+
+    // --- Записи переменной длины ---
+
+    // Kempston восьмиразрядный: разряды 5..7 - ещё три кнопки. В
+    // пятиразрядном они всегда нули, как у простого интерфейса.
+    uint8_t joy_8bit = 0;
+
+    // Клавиши действий джойстика в режиме Win+F2: коды HID, по строке на
+    // действие в порядке разрядов порта.
+    uint8_t joy_keys[kJoyActions][kJoyKeysPerAction] = {
+        {0x4f, 0}, {0x50, 0}, {0x51, 0}, {0x52, 0}, {0x2c, 0x28}, {0, 0}, {0, 0}, {0, 0},
+    };
 };
-static_assert(sizeof(Settings) == 20, "settings fields are only appended at the end");
+inline constexpr uint32_t kLegacyBytes = 24;
+static_assert(offsetof(Settings, joy_8bit) == kLegacyBytes, "the fixed part of the block keeps its 24 bytes");
 
 // Клавиатура включена, когда выбрана раскладка.
 inline bool keyboard_enabled(const Settings& s) {
     return s.keyboard_layout != static_cast<uint8_t>(Layout::None);
 }
 
-// Пользуется ли кто-нибудь USB по настройкам. Подъём стека этим больше не
-// управляет - он безусловный, иначе выключенная клавиатура закрывала бы и
-// вход в конфигуратор, то есть единственный способ её вернуть. Остаётся
-// как ответ на вопрос "зачем он поднят" в журнале и в проверках.
+// Нужен ли носитель USB: его берёт включённый эмулятор. Ключ носителя у
+// выключенного эмулятора остаётся в настройках (конфигуратор поле прячет,
+// но значение хранит) и сам по себе флешку не требует.
+inline bool usb_medium_needed(const Settings& s) {
+    return (s.disksys == static_cast<uint8_t>(DiskSys::DivMmc) && s.disksys_media == static_cast<uint8_t>(Media::Usb)) ||
+           (s.zcontroller != 0 && s.zcontroller_media == static_cast<uint8_t>(Media::Usb));
+}
+
+// Пользуется ли кто-нибудь USB по настройкам. В обычном режиме стек
+// поднимается только тогда: его обработка гасит прерывания на ядре шины. В
+// конфигураторе стек поднимается всегда - управление с клавиатуры USB
+// нужно и при выключенной в настройках клавиатуре.
 inline bool usb_host_used(const Settings& s) {
-    return keyboard_enabled(s) || s.usb_mouse != 0 || s.usb_gamepad != 0 || s.disksys_media == static_cast<uint8_t>(Media::Usb) ||
-           s.zcontroller_media == static_cast<uint8_t>(Media::Usb);
+    return keyboard_enabled(s) || s.usb_mouse != 0 || s.usb_gamepad != 0 || usb_medium_needed(s);
 }
 
 // Живой MIDI по проводу и Wi-Fi упираются в один вывод приёма: UART1

@@ -41,9 +41,11 @@
 #define CFG_TUH_HUB        1
 #define CFG_TUH_DEVICE_MAX 5 // сам концентратор адреса не занимает
 
-#define CFG_TUH_HID               4 // у клавиатуры бывает два интерфейса, у джойстика один
-#define CFG_TUH_HID_EPIN_BUFSIZE  64
-#define CFG_TUH_HID_EPOUT_BUFSIZE 64
+#define CFG_TUH_HID              4 // у клавиатуры бывает два интерфейса, у джойстика один
+#define CFG_TUH_HID_EPIN_BUFSIZE 64
+// Отчётов OUT по прерывающей точке не шлём (tuh_hid_send_report не
+// зовётся): буфер в байт. Для таких отчётов нужно 64.
+#define CFG_TUH_HID_EPOUT_BUFSIZE 1
 
 #define CFG_TUH_MSC    1
 #define CFG_TUH_CDC    0

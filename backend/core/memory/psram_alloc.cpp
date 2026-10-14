@@ -31,6 +31,18 @@ bool run_free(const PsramAlloc& a, uint16_t first, uint16_t pages) {
     return true;
 }
 
+// Отметка "пережить смену трека" держит копию блока, а не ссылку: без
+// правки копии на смене трека прирост от расширения уходит новому треку,
+// пока владелец продолжает в него писать.
+void keep_resize(PsramAlloc& a, uint16_t first, uint16_t pages) {
+    for (PsramBlock& k : a.keep) {
+        if (k.valid() && k.first == first) {
+            k.pages = pages;
+            return;
+        }
+    }
+}
+
 } // namespace
 
 void psram_alloc_reset(PsramAlloc& a, uint16_t page_count) {
@@ -49,14 +61,26 @@ PsramBlock psram_alloc(PsramAlloc& a, uint16_t pages) {
     if (pages == 0 || pages > a.free_pages) return block;
     // Первый подходящий: прогоны берутся с начала, поэтому долгоживущие
     // блоки, взятые при загрузке, ложатся с краю и не режут середину.
+    //
+    // Полностью занятое слово карты пропускается целиком: сэмплы просят по
+    // странице, и обход по разрядам стоит N(N+1)/2 проверок на N страниц.
+    // Ответ тот же, проверок в 32 раза меньше.
     uint16_t run = 0;
-    for (uint16_t p = 0; p < a.page_count; ++p) {
-        if (page_busy(a, p)) {
+    for (uint16_t p = 0; p < a.page_count;) {
+        if ((p & 31u) == 0 && static_cast<uint16_t>(p + 32u) <= a.page_count && a.busy[p >> 5] == 0xffffffffu) {
             run = 0;
+            p   = static_cast<uint16_t>(p + 32u);
             continue;
         }
+        if (page_busy(a, p)) {
+            run = 0;
+            ++p;
+            continue;
+        }
+        ++p;
         if (++run < pages) continue;
-        const uint16_t first = static_cast<uint16_t>(p + 1u - pages);
+        // p уже за последней страницей прогона.
+        const uint16_t first = static_cast<uint16_t>(p - pages);
         mark(a, first, pages, true);
         a.free_pages       = static_cast<uint16_t>(a.free_pages - pages);
         block.first        = first;
@@ -73,8 +97,9 @@ bool psram_alloc_extend(PsramAlloc& a, PsramBlock& block, uint16_t more) {
     const uint16_t next = static_cast<uint16_t>(block.first + block.pages);
     if (!run_free(a, next, more)) return false;
     mark(a, next, more, true);
-    a.free_pages        = static_cast<uint16_t>(a.free_pages - more);
-    block.pages         = static_cast<uint16_t>(block.pages + more);
+    a.free_pages = static_cast<uint16_t>(a.free_pages - more);
+    block.pages  = static_cast<uint16_t>(block.pages + more);
+    keep_resize(a, block.first, block.pages);
     const uint16_t top2 = static_cast<uint16_t>(block.first + block.pages);
     if (top2 > a.high_water) a.high_water = top2;
     return true;
@@ -136,6 +161,7 @@ void psram_alloc_shrink(PsramAlloc& a, PsramBlock& block, uint16_t pages) {
     mark(a, first_freed, freed, false);
     a.free_pages = static_cast<uint16_t>(a.free_pages + freed);
     block.pages  = pages;
+    keep_resize(a, block.first, block.pages);
 }
 
 void psram_alloc_free(PsramAlloc& a, PsramBlock& block) {

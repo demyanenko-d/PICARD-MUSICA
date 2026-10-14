@@ -18,10 +18,12 @@ uint16_t s_ring[kRing];
 std::atomic<uint32_t> s_head{0}; // пишет Core1
 std::atomic<uint32_t> s_tail{0}; // пишет Core0
 uint32_t s_lost = 0;             // пишет Core1
+uint32_t s_seen = 0;             // пишет Core1: всего записей с загрузки
 
 } // namespace
 
 void SOUNDSINTH_HOT_PATH(ay_tap_push)(uint16_t ay_write) {
+    ++s_seen;
     const uint32_t h = s_head.load(std::memory_order_relaxed);
     if (h - s_tail.load(std::memory_order_acquire) >= kRing) {
         ++s_lost;
@@ -41,6 +43,10 @@ bool ay_tap_pop(uint16_t& ay_write) {
 
 uint32_t ay_tap_lost() {
     return s_lost;
+}
+
+uint32_t ay_tap_seen() {
+    return s_seen;
 }
 
 } // namespace player::live

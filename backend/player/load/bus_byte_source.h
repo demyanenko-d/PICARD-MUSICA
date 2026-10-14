@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 #pragma once
 
-// soundsinth::formats::ByteSource поверх протокола с хостом. pump - функция вызывающего, продвигает
+// soundsinth::formats::ByteSource поверх протокола с хостом. service - функция вызывающего, продвигает
 // протокол на шаг (на плате заодно обслуживает карту); колбэки протокола
 // зовутся из неё, новый запрос куска из них делать нельзя.
 // Окно одно, 4096 байт, в буфере приёма протокола без копии: хост пишет в порт
@@ -16,15 +16,15 @@ namespace player::load {
 
 class BusByteSource {
 public:
-    using PumpFn = void (*)(void* user);
+    using ServiceFn = void (*)(void* user);
 
-    // pump/pump_user - вызывается в цикле ожидания ответа, должен продвинуть
-    // протокол хотя бы на шаг и вернуться, не блокируя.
-    BusByteSource(player::protocol::HostProtocol& protocol, uint32_t file_length, PumpFn pump, void* pump_user)
+    // service/service_user - вызывается в цикле ожидания ответа, должен
+    // продвинуть протокол хотя бы на шаг и вернуться, не блокируя.
+    BusByteSource(player::protocol::HostProtocol& protocol, uint32_t file_length, ServiceFn service, void* service_user)
         : protocol_(protocol)
         , file_length_(file_length)
-        , pump_(pump)
-        , pump_user_(pump_user) {}
+        , service_(service)
+        , service_user_(service_user) {}
 
     soundsinth::formats::ByteSource as_byte_source() { return soundsinth::formats::ByteSource{this, &read_fn, &seek_fn, &size_fn}; }
 
@@ -45,7 +45,7 @@ private:
     static bool seek_fn(void* self, uint32_t offset);
     static uint32_t size_fn(void* self);
 
-    // Запрашивает окно [offset, offset+n) и крутит pump_ до ответа или aborted_.
+    // Запрашивает окно [offset, offset+n) и крутит service_ до ответа или aborted_.
     // Повторов нет: кадр сверяет хост, данные окна не проверяются; после
     // исчерпания попыток и при сбросе - окно пустое.
     void request_window(uint32_t offset, uint32_t n);
@@ -59,13 +59,13 @@ private:
 
     player::protocol::HostProtocol& protocol_;
     uint32_t file_length_;
-    PumpFn pump_;
-    void* pump_user_;
+    ServiceFn service_;
+    void* service_user_;
 
     uint32_t pos_           = 0;
     uint32_t window_missed_ = 0;
 
-    // Пишет on_reset из poll() внутри pump_ - тот же поток, что ждёт окна.
+    // Пишет on_reset из poll() внутри service_ - тот же поток, что ждёт окна.
     bool aborted_ = false;
 };
 

@@ -7,11 +7,43 @@
 #include "hardware/structs/xip.h"
 #include "hardware/sync.h"
 #include "hardware/xip_cache.h"
-#include "pico/platform.h"
+#include "pico.h"
 
 #include "psram_pins.h"
 
 namespace psram {
+
+namespace {
+
+// Команды APS6404L.
+constexpr uint32_t kCmdQuadEnd     = 0xf5u; // выйти из QPI
+constexpr uint32_t kCmdResetEnable = 0x66u;
+constexpr uint32_t kCmdReset       = 0x99u;
+constexpr uint32_t kCmdEnterQpi    = 0x35u;
+constexpr uint32_t kCmdQuadRead    = 0xebu; // быстрое чтение в quad, с ожиданием
+constexpr uint32_t kCmdQuadWrite   = 0x38u;
+
+// Делитель SCK прямого режима: команды сброса идут медленно, на любой sys.
+constexpr uint32_t kDirectClkdiv = 30;
+// Пауза CS high после команды прямого режима, в командах nop.
+constexpr int kCsHighNops = 20;
+
+// Одна команда прямого режима: CS1 вниз, слово в direct_tx, ждать конца,
+// CS1 вверх, пауза, снять принятое. Только встраиваемая: в прямом режиме
+// окно флеша закрыто, и вызов во флеш - отказ.
+__force_inline void direct_cmd(uint32_t tx) {
+    qmi_hw->direct_csr |= QMI_DIRECT_CSR_ASSERT_CS1N_BITS;
+    qmi_hw->direct_tx   = tx;
+    while (qmi_hw->direct_csr & QMI_DIRECT_CSR_BUSY_BITS) {
+    }
+    qmi_hw->direct_csr &= ~QMI_DIRECT_CSR_ASSERT_CS1N_BITS;
+    for (int i = 0; i < kCsHighNops; ++i) {
+        __asm volatile("nop");
+    }
+    (void)qmi_hw->direct_rx;
+}
+
+} // namespace
 
 // Целиком из SRAM (__not_in_flash_func): в direct mode окно флеш XIP
 // (M0) заблокировано, выборка из 0x10xxxxxx - fault. Тайминги считаются
@@ -21,17 +53,18 @@ void __not_in_flash_func(psram_init)() {
 
     const uint32_t sys_hz = clock_get_hz(clk_sys);
 
-    // Потолок SCK PSRAM. APS6404L при 3.3 В - 109 МГц по паспорту, здесь
-    // sys 300 / clkdiv 2 = 150 МГц. Делитель округляется вверх: при sys 327
-    // SCK 109.
+    // Потолок SCK выше паспорта APS6404L (109 МГц при 3.3 В): при sys 300
+    // SCK 150 МГц. Делитель округляется вверх. При зависаниях и битых
+    // сэмплах - 109 МГц или sys 327. 156 МГц - граница, при которой делитель
+    // 2 держится до sys 312 МГц.
     const uint32_t max_sck_hz = 156000000u;
     uint32_t clkdiv           = (sys_hz + max_sck_hz - 1u) / max_sck_hz;
     if (clkdiv < 2u) clkdiv = 2u;
     if (clkdiv > 255u) clkdiv = 255u;
 
-    // RXDELAY - сдвиг выборки данных в полутактах sys, от clkdiv. Добавки
-    // +1 выше 100 МГц SCK и ещё +1 выше 133 МГц подобраны сообществом опытом:
-    // так PSRAM стабильнее. У hardware_psram SDK только первая.
+    // RXDELAY - сдвиг выборки в полутактах sys, от clkdiv; +1 выше 100 МГц
+    // SCK и ещё +1 выше 133 МГц - пороги из опыта пользователей RP2350, не
+    // из паспорта.
     uint32_t rxdelay = clkdiv;
     if (sys_hz / clkdiv > 100000000u) rxdelay += 1u;
     if (sys_hz / clkdiv > 133000000u) rxdelay += 1u;
@@ -49,53 +82,18 @@ void __not_in_flash_func(psram_init)() {
 
     const uint32_t intr_stash = save_and_disable_interrupts();
 
-    qmi_hw->direct_csr = (30u << QMI_DIRECT_CSR_CLKDIV_LSB) | QMI_DIRECT_CSR_EN_BITS;
+    qmi_hw->direct_csr = (kDirectClkdiv << QMI_DIRECT_CSR_CLKDIV_LSB) | QMI_DIRECT_CSR_EN_BITS;
     while (qmi_hw->direct_csr & QMI_DIRECT_CSR_BUSY_BITS) {
     }
 
-    // Шаг 0: QUAD_END (0xF5) в quad-ширине - выйти из QPI, если чип уже в нём
-    // после тёплого сброса (PSRAM при сбросе RP2350 не сбрасывается).
-    qmi_hw->direct_csr |= QMI_DIRECT_CSR_ASSERT_CS1N_BITS;
-    qmi_hw->direct_tx   = QMI_DIRECT_TX_OE_BITS | (QMI_DIRECT_TX_IWIDTH_VALUE_Q << QMI_DIRECT_TX_IWIDTH_LSB) | 0xF5u;
-    while (qmi_hw->direct_csr & QMI_DIRECT_CSR_BUSY_BITS) {
-    }
-    qmi_hw->direct_csr &= ~QMI_DIRECT_CSR_ASSERT_CS1N_BITS;
-    for (int i = 0; i < 20; ++i) {
-        __asm volatile("nop");
-    }
-    (void)qmi_hw->direct_rx;
+    // Шаг 0: QUAD_END в quad-ширине - выйти из QPI, если чип уже в нём после
+    // тёплого сброса (PSRAM при сбросе RP2350 не сбрасывается).
+    direct_cmd(QMI_DIRECT_TX_OE_BITS | (QMI_DIRECT_TX_IWIDTH_VALUE_Q << QMI_DIRECT_TX_IWIDTH_LSB) | kCmdQuadEnd);
 
-    // RSTEN (0x66) -> RST (0x99) -> EQI (0x35) в режиме SPI (1 бит). 20 NOP
-    // после каждой команды - пауза CS high для PSRAM.
-    qmi_hw->direct_csr |= QMI_DIRECT_CSR_ASSERT_CS1N_BITS;
-    qmi_hw->direct_tx   = 0x66u;
-    while (qmi_hw->direct_csr & QMI_DIRECT_CSR_BUSY_BITS) {
-    }
-    qmi_hw->direct_csr &= ~QMI_DIRECT_CSR_ASSERT_CS1N_BITS;
-    for (int i = 0; i < 20; ++i) {
-        __asm volatile("nop");
-    }
-    (void)qmi_hw->direct_rx;
-
-    qmi_hw->direct_csr |= QMI_DIRECT_CSR_ASSERT_CS1N_BITS;
-    qmi_hw->direct_tx   = 0x99u;
-    while (qmi_hw->direct_csr & QMI_DIRECT_CSR_BUSY_BITS) {
-    }
-    qmi_hw->direct_csr &= ~QMI_DIRECT_CSR_ASSERT_CS1N_BITS;
-    for (int i = 0; i < 20; ++i) {
-        __asm volatile("nop");
-    }
-    (void)qmi_hw->direct_rx;
-
-    qmi_hw->direct_csr |= QMI_DIRECT_CSR_ASSERT_CS1N_BITS;
-    qmi_hw->direct_tx   = 0x35u;
-    while (qmi_hw->direct_csr & QMI_DIRECT_CSR_BUSY_BITS) {
-    }
-    qmi_hw->direct_csr &= ~QMI_DIRECT_CSR_ASSERT_CS1N_BITS;
-    for (int i = 0; i < 20; ++i) {
-        __asm volatile("nop");
-    }
-    (void)qmi_hw->direct_rx;
+    // RSTEN -> RST -> EQI в режиме SPI (1 бит).
+    direct_cmd(kCmdResetEnable);
+    direct_cmd(kCmdReset);
+    direct_cmd(kCmdEnterQpi);
 
     qmi_hw->direct_csr &= ~(QMI_DIRECT_CSR_ASSERT_CS1N_BITS | QMI_DIRECT_CSR_EN_BITS);
     restore_interrupts(intr_stash);
@@ -111,14 +109,14 @@ void __not_in_flash_func(psram_init)() {
                         (QMI_M1_RFMT_ADDR_WIDTH_VALUE_Q << QMI_M1_RFMT_ADDR_WIDTH_LSB) | (QMI_M1_RFMT_SUFFIX_WIDTH_VALUE_Q << QMI_M1_RFMT_SUFFIX_WIDTH_LSB) |
                         (QMI_M1_RFMT_DUMMY_WIDTH_VALUE_Q << QMI_M1_RFMT_DUMMY_WIDTH_LSB) | (QMI_M1_RFMT_DATA_WIDTH_VALUE_Q << QMI_M1_RFMT_DATA_WIDTH_LSB);
 
-    qmi_hw->m[1].rcmd = (0xEBu << QMI_M1_RCMD_PREFIX_LSB);
+    qmi_hw->m[1].rcmd = (kCmdQuadRead << QMI_M1_RCMD_PREFIX_LSB);
 
     qmi_hw->m[1].wfmt = (QMI_M1_WFMT_PREFIX_LEN_VALUE_8 << QMI_M1_WFMT_PREFIX_LEN_LSB) | (QMI_M1_WFMT_SUFFIX_LEN_VALUE_NONE << QMI_M1_WFMT_SUFFIX_LEN_LSB) |
                         (QMI_M1_WFMT_DUMMY_LEN_VALUE_NONE << QMI_M1_WFMT_DUMMY_LEN_LSB) | (QMI_M1_WFMT_PREFIX_WIDTH_VALUE_Q << QMI_M1_WFMT_PREFIX_WIDTH_LSB) |
                         (QMI_M1_WFMT_ADDR_WIDTH_VALUE_Q << QMI_M1_WFMT_ADDR_WIDTH_LSB) | (QMI_M1_WFMT_SUFFIX_WIDTH_VALUE_Q << QMI_M1_WFMT_SUFFIX_WIDTH_LSB) |
                         (QMI_M1_WFMT_DUMMY_WIDTH_VALUE_Q << QMI_M1_WFMT_DUMMY_WIDTH_LSB) | (QMI_M1_WFMT_DATA_WIDTH_VALUE_Q << QMI_M1_WFMT_DATA_WIDTH_LSB);
 
-    qmi_hw->m[1].wcmd = (0x38u << QMI_M1_WCMD_PREFIX_LSB);
+    qmi_hw->m[1].wcmd = (kCmdQuadWrite << QMI_M1_WCMD_PREFIX_LSB);
 
     hw_set_bits(&xip_ctrl_hw->ctrl, XIP_CTRL_WRITABLE_M1_BITS);
 }

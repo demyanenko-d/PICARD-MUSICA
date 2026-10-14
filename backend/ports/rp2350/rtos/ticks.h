@@ -12,20 +12,18 @@
 
 namespace rp2350 {
 
-// Системная частота. configCPU_CLOCK_HZ вдвое меньше: тик FreeRTOS 0.5 мс.
-// Смена частоты - ошибка сборки, пока не решено, что делать с тиком.
+// Системная частота - она же configCPU_CLOCK_HZ: от неё тактуется SysTick.
 inline constexpr uint32_t kSysClockKhz = 300000;
-static_assert(configCPU_CLOCK_HZ * 2 == kSysClockKhz * 1000u, "the system clock disagrees with configCPU_CLOCK_HZ: decide what to do with the FreeRTOS tick");
+static_assert(configCPU_CLOCK_HZ == kSysClockKhz * 1000u, "the system clock disagrees with configCPU_CLOCK_HZ");
 
-// Тик FreeRTOS: SysTick считает от configCPU_CLOCK_HZ, а ядро вдвое
-// быстрее - тик 500 мкс, а не 1000. Паузы задач - в тиках отсюда.
-inline constexpr uint32_t kRtosTickUs = (configCPU_CLOCK_HZ / 1000u) * (1000000u / configTICK_RATE_HZ) / kSysClockKhz;
-// По этому же числу platform/os.h переводит миллисекунды в тики. Разойдутся
-// - паузы задач станут вдвое короче названного молча.
-static_assert(SOUNDSINTH_OS_TICK_US == kRtosTickUs, "the tick length in FreeRTOSConfig.h disagrees with the value computed from the system clock");
+// Тик FreeRTOS, 500 мкс. Паузы задач - в тиках отсюда.
+inline constexpr uint32_t kRtosTickUs = 1000000u / configTICK_RATE_HZ;
+static_assert(kRtosTickUs == 500u, "the FreeRTOS tick is 500 us: task delays are counted in it");
 
+// С округлением вверх, как platform::ticks_for_ms: срок не выходит раньше
+// названного.
 inline constexpr TickType_t ticks_for_us(uint32_t us) {
-    return us / kRtosTickUs;
+    return (us + kRtosTickUs - 1u) / kRtosTickUs;
 }
 
 } // namespace rp2350

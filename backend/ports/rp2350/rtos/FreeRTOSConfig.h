@@ -33,19 +33,14 @@
 #define configUSE_TIME_SLICING                  1
 #define configUSE_PORT_OPTIMISED_TASK_SELECTION 0
 
-// 150 МГц при системной 300 МГц (с kSysClockKhz сверяет static_assert):
-// SysTick тактуется от ядра (portNVIC_SYSTICK_CLK_BIT), перезагрузка
-// считается как configSYSTICK_CLOCK_HZ / configTICK_RATE_HZ от этого
-// значения, и тик выходит 0.5 мс против объявленной ядру тысячи герц.
-// Само configTICK_RATE_HZ не правится: от него пляшет перезарядка SysTick.
-// Настоящую длину тика берёт отсюда platform/os.h - без неё pdMS_TO_TICKS
-// отмерял бы вдвое меньше названного.
-#define configCPU_CLOCK_HZ            150000000UL
-#define configTICK_RATE_HZ            1000 // на деле 2000 Гц
-#define SOUNDSINTH_OS_TICK_US         500u
+// Системная частота (с kSysClockKhz сверяет static_assert). SysTick
+// тактуется от ядра (portNVIC_SYSTICK_CLK_BIT), перезагрузка -
+// configCPU_CLOCK_HZ / configTICK_RATE_HZ - 1 = 149999, тик 500 мкс.
+#define configCPU_CLOCK_HZ            300000000UL
+#define configTICK_RATE_HZ            2000
 #define configTICK_TYPE_WIDTH_IN_BITS TICK_TYPE_WIDTH_32_BITS
 #define configMAX_PRIORITIES          8
-#define configMINIMAL_STACK_SIZE      256 // слов (1 КБ), idle-задача
+#define configMINIMAL_STACK_SIZE      192 // слов, idle-задача: без хуков, путь отказа около 440 Б
 #define configMAX_TASK_NAME_LEN       16
 
 // --- Размещение: только статическое, кучи у ядра нет ---
@@ -63,8 +58,7 @@
 // на то же место порвёт списки планировщика. Задачи звука между треками
 // паркуются на семафоре.
 //
-// Строка "стек свободно" в log_task печатает запас каждого стека - теперь
-// смотреть её.
+// Запас каждого стека печатает строка "stack free:".
 #define configSUPPORT_STATIC_ALLOCATION     1
 #define configKERNEL_PROVIDED_STATIC_MEMORY 1
 #define configSUPPORT_DYNAMIC_ALLOCATION    0
@@ -133,6 +127,7 @@ void soundsinth_assert_failed(int line);
 #define INCLUDE_xTaskGetCurrentTaskHandle   1
 #define INCLUDE_vTaskDelete                 1
 #define INCLUDE_xTaskGetHandle              0
+#define INCLUDE_xTaskGetIdleTaskHandle      1 // запас стека холостой задачи в строке stack free
 #define INCLUDE_uxTaskGetStackHighWaterMark 1 // запас стеков задач в строках лога
 #define INCLUDE_uxTaskPriorityGet           1
 #define INCLUDE_vTaskPrioritySet            1

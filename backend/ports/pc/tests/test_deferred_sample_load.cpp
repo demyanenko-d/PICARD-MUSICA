@@ -15,6 +15,7 @@
 #include "testing.h"
 #include "song_compare.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <cstring>
 #include <fstream>
@@ -481,7 +482,8 @@ void check_plan_from_duration_pass(const char* path) {
     {
         formats::MemoryByteSource src(bytes.data(), size);
         player::load::SessionLoadResult load;
-        CHECK(player::load::run_session_load(src.as_byte_source(), mem, song, load, true, got.data(), player::load::kProgressiveMaxSamples));
+        player::load::UseMap map;
+        CHECK(player::load::run_session_load(src.as_byte_source(), mem, song, load, true, player::load::plan_arrays_in(got.data()), &map));
         CHECK(load.plan_usable);
         CHECK_EQ(load.plan_count, ref_count);
         // Состав: тот же набор сэмплов и те же крайние позиции.
@@ -490,6 +492,31 @@ void check_plan_from_duration_pass(const char* path) {
             CHECK(idx < song.sample_count);
             CHECK_EQ(got[player::load::kProgressiveMaxSamples + idx], ref_last[idx]);
             CHECK_EQ(got[2u * player::load::kProgressiveMaxSamples + idx], ref_first[idx]);
+        }
+        // Карта позиций того же прохода: крайние отметки сэмпла - корзины его
+        // первой и последней позиции.
+        CHECK(map.words != nullptr);
+        if (map.words != nullptr) {
+            for (uint16_t i = 0; i < load.plan_count; ++i) {
+                const uint16_t idx  = got[i];
+                const uint32_t* row = map.words + static_cast<uint32_t>(idx) * map.words_per_sample;
+                int lo = -1, hi = -1;
+                for (uint32_t bkt = 0; bkt < map.buckets; ++bkt) {
+                    if ((row[bkt / 32u] & (1u << (bkt % 32u))) == 0) continue;
+                    if (lo < 0) lo = static_cast<int>(bkt);
+                    hi = static_cast<int>(bkt);
+                }
+                CHECK_EQ(lo, static_cast<int>(ref_first[idx] >> map.shift));
+                CHECK_EQ(hi, static_cast<int>(ref_last[idx] >> map.shift));
+            }
+            // Страницы карты сэмплам не отдаются: после загрузки всех слова
+            // те же.
+            const std::vector<uint32_t> before(map.words, map.words + player::load::use_map_bytes(map) / 4u);
+            for (uint16_t s = 0; s < song.sample_count; ++s) {
+                formats::MemoryByteSource ss(bytes.data(), size);
+                (void)player::load::load_track_sample(load.format, ss.as_byte_source(), mem, song, s);
+            }
+            CHECK(std::equal(before.begin(), before.end(), map.words));
         }
     }
     memory::track_memory_destroy(mem);

@@ -30,6 +30,7 @@ Settings preset_tsconfig() {
 // тоже своих нет.
 Settings preset_trdos() {
     Settings s;
+    s.disksys         = static_cast<uint8_t>(soundsinth::config::DiskSys::TrDos);
     s.zcontroller     = 1;
     s.keyboard_layout = static_cast<uint8_t>(Layout::Picard);
     s.usb_mouse       = 1;

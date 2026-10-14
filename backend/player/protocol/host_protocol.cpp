@@ -25,7 +25,7 @@ constexpr uint32_t kSectorBytesMin = 128;
 // а не C-строка (литерал добавил бы 17-й байт). Версия синхронизируется с
 // CMakeLists.txt вручную: модуль платформонезависим, макросов pico-sdk
 // не видит.
-constexpr uint8_t kBoardName[16] = {'P', 'I', '-', 'M', 'U', 'S', 'I', 'C', 'A', ' ', 'V', '0', '.', '4', '5', ' '};
+constexpr uint8_t kBoardName[16] = {'P', 'I', '-', 'M', 'U', 'S', 'I', 'C', 'A', ' ', 'V', '0', '.', '4', '6', ' '};
 static_assert(sizeof(kBoardName) <= HostProtocol::kMaxPayload, "the board name fits the frame");
 
 uint8_t SOUNDSINTH_HOT_PATH(to_bcd8)(uint8_t v) {

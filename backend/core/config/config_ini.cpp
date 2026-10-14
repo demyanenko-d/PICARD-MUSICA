@@ -66,6 +66,44 @@ bool parse_value(const KeyDesc& k, const char* v, uint8_t& out) {
     return true;
 }
 
+bool parse_key_code(const char* v, uint8_t& out) {
+    for (const Named& n : kKeyNames) {
+        if (std::strcmp(v, n.name) == 0) {
+            out = n.value;
+            return true;
+        }
+    }
+    return false;
+}
+
+// "A" или "A,B": до kJoyKeysPerAction клавиш, недостающие гнёзда пусты.
+bool parse_joy_keys(const char* v, uint8_t (&out)[kJoyKeysPerAction]) {
+    uint8_t codes[kJoyKeysPerAction] = {};
+    uint32_t n                       = 0;
+    char token[16];
+    while (*v != '\0') {
+        uint32_t len = 0;
+        while (*v != '\0' && *v != ',') {
+            if (len + 1u >= sizeof(token)) return false;
+            token[len++] = *v++;
+        }
+        token[len] = '\0';
+        if (*v == ',') ++v;
+        if (n == kJoyKeysPerAction) return false;
+        if (!parse_key_code(token, codes[n++])) return false;
+    }
+    if (n == 0) return false;
+    std::memcpy(out, codes, sizeof(codes));
+    return true;
+}
+
+int joy_action_of(const char* key) {
+    for (uint32_t i = 0; i < kJoyActions; ++i) {
+        if (std::strcmp(key, kJoyActionNames[i]) == 0) return static_cast<int>(i);
+    }
+    return -1;
+}
+
 // Дописать строку в буфер. Считает нужную длину и при нехватке места
 // только считает - так одна и та же функция и меряет, и пишет.
 void put(const char* s, char* out, uint32_t cap, uint32_t& len) {
@@ -109,6 +147,44 @@ void put_value(const KeyDesc& k, uint8_t v, char* out, uint32_t cap, uint32_t& l
     put_num(v, out, cap, len); // значение вне таблицы: пишем числом, чтобы не потерять
 }
 
+void put_key_name(uint8_t code, char* out, uint32_t cap, uint32_t& len) {
+    for (const Named& n : kKeyNames) {
+        if (n.value == code) {
+            put(n.name, out, cap, len);
+            return;
+        }
+    }
+    put("NONE", out, cap, len); // вне таблицы settings_clamp код не оставляет
+}
+
+void put_joy_value(const uint8_t (&codes)[kJoyKeysPerAction], char* out, uint32_t cap, uint32_t& len) {
+    bool first = true;
+    for (const uint8_t code : codes) {
+        if (code == 0) continue;
+        if (!first) put(",", out, cap, len);
+        put_key_name(code, out, cap, len);
+        first = false;
+    }
+    if (first) put("NONE", out, cap, len);
+}
+
+void put_joy_keys(const Settings& s, const Settings& defaults, char* out, uint32_t cap, uint32_t& len) {
+    put("\n; keys for the joystick actions in the Win+F2 mode, up to two per action separated by a comma; NONE leaves the action without keys;\n", out, cap,
+        len);
+    put("; ESC cannot be bound; names: A..Z, 0..9, F1..F12, UP, DOWN, LEFT, RIGHT, ENTER, SPACE, TAB, BACKSPACE, INSERT, DELETE, HOME, END,\n", out, cap, len);
+    put("; PAGEUP, PAGEDOWN, KP_0..KP_9, KP_ENTER, KP_PLUS, KP_MINUS, KP_STAR, KP_SLASH, KP_DOT and the punctuation keys by name;\n", out, cap, len);
+    put("; FIRE2..FIRE4 reach the machine only with JOY_8BIT=1\n", out, cap, len);
+    for (uint32_t i = 0; i < kJoyActions; ++i) {
+        put("; default ", out, cap, len);
+        put_joy_value(defaults.joy_keys[i], out, cap, len);
+        put("\n", out, cap, len);
+        put(kJoyActionNames[i], out, cap, len);
+        put("=", out, cap, len);
+        put_joy_value(s.joy_keys[i], out, cap, len);
+        put("\n", out, cap, len);
+    }
+}
+
 } // namespace
 
 IniResult ini_parse(const char* text, uint32_t len, Settings& s) {
@@ -145,6 +221,16 @@ IniResult ini_parse(const char* text, uint32_t len, Settings& s) {
         const uint32_t vlen = squeeze(line + eq + 1u, line_len - eq - 1u, val, sizeof(val));
         if (klen == 0 || vlen == 0) {
             ++res.bad;
+            continue;
+        }
+
+        const int action = joy_action_of(key);
+        if (action >= 0) {
+            if (parse_joy_keys(val, s.joy_keys[action])) {
+                ++res.applied;
+            } else {
+                ++res.bad;
+            }
             continue;
         }
 
@@ -188,13 +274,12 @@ uint32_t ini_render(const Settings& s, char* out, uint32_t cap) {
     // по нему подключают дополнительные сигналы.
     put("\n\n; --- Board pins ---\n", out, cap, len);
     put(";\n", out, cap, len);
-    put("; GPIO32  log, output, 115200 8N1        - key LOG\n", out, cap, len);
-    put("; GPIO33  live MIDI input, 31250 8N1     - key LIVE_MIDI=WIRE\n", out, cap, len);
-    put("; GPIO34  Wi-Fi, module enable           - key WIFI\n", out, cap, len);
-    put("; GPIO36  DOS_N, output, active low      - key DISKSYS=TRDOS\n", out, cap, len);
-    put("; GPIO37  settings jumper to ground      - boot into the configurator\n", out, cap, len);
-    put("; GPIO38  Wi-Fi, transmit                - key WIFI\n", out, cap, len);
-    put("; GPIO39  Wi-Fi, receive                 - key WIFI\n", out, cap, len);
+    put("; GPIO32  log, output, 115200 8N1        - setting LOG\n", out, cap, len);
+    put("; GPIO33  live MIDI input, 31250 8N1     - setting LIVE_MIDI=WIRE\n", out, cap, len);
+    put("; GPIO34  Wi-Fi, module enable           - setting WIFI\n", out, cap, len);
+    put("; GPIO36  DOS_N, output, active low      - setting DISKSYS=TRDOS\n", out, cap, len);
+    put("; GPIO38  Wi-Fi, transmit                - setting WIFI\n", out, cap, len);
+    put("; GPIO39  Wi-Fi, receive                 - setting WIFI\n", out, cap, len);
 
     for (const KeyDesc& k : kKeys) {
         if (k.section != nullptr) {
@@ -212,6 +297,7 @@ uint32_t ini_render(const Settings& s, char* out, uint32_t cap) {
         put("=", out, cap, len);
         put_value(k, s.*(k.field), out, cap, len);
         put("\n", out, cap, len);
+        if (k.field == &Settings::joy_8bit) put_joy_keys(s, kDefaults, out, cap, len);
     }
 
     if (out != nullptr && cap != 0) out[len < cap ? len : cap - 1u] = '\0';

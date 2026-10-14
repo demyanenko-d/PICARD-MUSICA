@@ -278,11 +278,11 @@ void test_nna_works_at_full_channel_count() {
     Fixture f;
     const uint16_t s   = f.add_constant_sample(1000, 5000);
     const uint16_t ins = f.add_instrument(NewNoteAction::Continue, DuplicateCheckType::Off, DuplicateCheckAction::Cut, s);
-    std::vector<PatternCell> row0(SOUNDSINTH_MAX_VOICES), row1(SOUNDSINTH_MAX_VOICES), row2(SOUNDSINTH_MAX_VOICES);
+    std::vector<PatternCell> row0(SOUNDSINTH_MAX_CHANNELS), row1(SOUNDSINTH_MAX_CHANNELS), row2(SOUNDSINTH_MAX_CHANNELS);
     row0[0] = note_cell(ins);
     row1[0] = note_cell(ins);
-    f.add_pattern({row0, row1, row2}, SOUNDSINTH_MAX_VOICES);
-    engine::TrackerEngine& eng = f.finalize(SOUNDSINTH_MAX_VOICES);
+    f.add_pattern({row0, row1, row2}, SOUNDSINTH_MAX_CHANNELS);
+    engine::TrackerEngine& eng = f.finalize(SOUNDSINTH_MAX_CHANNELS);
 
     const auto sum    = render_sum(eng, kSamplesPerRow + 400);
     const float after = sum[kSamplesPerRow + 300];
@@ -290,40 +290,47 @@ void test_nna_works_at_full_channel_count() {
     CHECK(after > 1500.0f && after < 2500.0f); // ~2000: старый голос ушёл в фон и звучит вместе с новым
 }
 
-// Потолок SOUNDSINTH_MAX_VOICES: 63 живых голоса и два хвоста NNA на одно
-// место. Гасится тихий хвост по громкости этого тика, громкий звучит;
-// лишний хвост не замирает, а гаснет (tails_dropped). Громкость - усиление
-// голоса, без амплитуды сэмпла, поэтому хвосты различаются громкостью
-// сэмпла по умолчанию.
+// Потолок SOUNDSINTH_MAX_VOICES: живые каналы и хвосты NNA на одно место
+// больше, чем есть. Каналов - сколько влезает под потолок, но не больше
+// SOUNDSINTH_MAX_CHANNELS; остаток потолка (kRoom) добирают хвосты, и
+// хвостов на один больше. Гасится тихий хвост по громкости этого тика,
+// громкие звучат; лишний хвост не замирает, а гаснет (tails_dropped).
+// Громкость - усиление голоса, без амплитуды сэмпла, поэтому тихий хвост
+// отличается громкостью сэмпла по умолчанию.
 void test_nna_tail_over_ceiling_drops_quietest() {
     std::printf("test_nna_tail_over_ceiling_drops_quietest\n");
 
     Fixture f;
-    const uint16_t base             = f.add_constant_sample(100, 20000);
-    const uint16_t loud             = f.add_constant_sample(4000, 20000);
-    const uint16_t quiet            = f.add_constant_sample(4000, 20000);
-    f.samples[quiet].default_volume = 16; // звучит как 1000
+    const uint16_t base             = f.add_constant_sample(20, 20000);
+    const uint16_t loud             = f.add_constant_sample(1500, 20000);
+    const uint16_t quiet            = f.add_constant_sample(1500, 20000);
+    f.samples[quiet].default_volume = 16; // звучит как 375
     const uint16_t ins_base         = f.add_instrument(NewNoteAction::Continue, DuplicateCheckType::Off, DuplicateCheckAction::Cut, base);
     const uint16_t ins_loud         = f.add_instrument(NewNoteAction::Continue, DuplicateCheckType::Off, DuplicateCheckAction::Cut, loud);
     const uint16_t ins_quiet        = f.add_instrument(NewNoteAction::Continue, DuplicateCheckType::Off, DuplicateCheckAction::Cut, quiet);
-    constexpr uint8_t kChannels     = SOUNDSINTH_MAX_VOICES - 1;
+    constexpr uint8_t kChannels     = SOUNDSINTH_MAX_VOICES - 1 < SOUNDSINTH_MAX_CHANNELS ? SOUNDSINTH_MAX_VOICES - 1 : SOUNDSINTH_MAX_CHANNELS;
+    constexpr uint8_t kRoom         = SOUNDSINTH_MAX_VOICES - kChannels; // мест под хвосты
+    static_assert(kRoom + 1 <= SOUNDSINTH_MAX_NNA_VOICES, "tails fit the NNA pool");
+    static_assert(kRoom + 1 <= kChannels, "every tail has its own channel");
     std::vector<PatternCell> row0(kChannels), row1(kChannels), row2(kChannels);
-    for (uint8_t ch = 0; ch < kChannels - 2; ++ch)
+    for (uint8_t ch = 0; ch < kChannels; ++ch)
         row0[ch] = note_cell(ins_base);
-    // Тихий уходит в фон первым и берёт слот 0: по номеру слота остался бы он.
-    row0[kChannels - 2] = note_cell(ins_quiet);
-    row0[kChannels - 1] = note_cell(ins_loud);
-    // Новые ноты уводят тихий и громкий голоса в фон: живых 63, хвостов 2.
-    row1[kChannels - 2] = note_cell(ins_base);
-    row1[kChannels - 1] = note_cell(ins_base);
+    // Тихий уходит в фон первым и берёт первый слот: по номеру слота остался бы он.
+    row0[kChannels - 1 - kRoom] = note_cell(ins_quiet);
+    for (uint8_t k = 0; k < kRoom; ++k)
+        row0[kChannels - kRoom + k] = note_cell(ins_loud);
+    // Новые ноты уводят тихий и kRoom громких в фон: хвостов на один больше мест.
+    for (uint8_t k = 0; k <= kRoom; ++k)
+        row1[kChannels - 1 - kRoom + k] = note_cell(ins_base);
     f.add_pattern({row0, row1, row2}, kChannels);
     engine::TrackerEngine& eng = f.finalize(kChannels);
 
     const auto sum    = render_sum(eng, kSamplesPerRow + 400);
     const float after = sum[kSamplesPerRow + 300];
     std::printf("  after=%.1f dropped=%u\n", after, eng.tails_dropped());
-    // 63 * 100 + громкий хвост 4000 = 10300; тихий оставленный дал бы 7300.
-    CHECK(after > 9800.0f && after < 10800.0f);
+    // kChannels * 20 + kRoom громких по 1500; тихий вместо громкого - на 1125 меньше.
+    const float expect = kChannels * 20.0f + kRoom * 1500.0f;
+    CHECK(after > expect - 400.0f && after < expect + 400.0f);
     CHECK_EQ(eng.tails_dropped(), 1u);
     CHECK(eng.active_voice_count() <= SOUNDSINTH_MAX_VOICES);
 }
@@ -806,28 +813,40 @@ void observe_samples(void* user, uint16_t, const uint16_t* sample_indices, uint8
 void test_tail_over_full_list_fades_not_freezes() {
     std::printf("test_tail_over_full_list_fades_not_freezes\n");
     Fixture f;
-    const uint16_t sa           = f.add_constant_sample(1000, 20000);
-    const uint16_t sb           = f.add_constant_sample(5000, 20000);
-    const uint16_t ia           = f.add_instrument(NewNoteAction::Cut, DuplicateCheckType::Off, DuplicateCheckAction::Cut, sa);
-    const uint16_t ib           = f.add_instrument(NewNoteAction::Continue, DuplicateCheckType::Off, DuplicateCheckAction::Cut, sb);
-    constexpr uint8_t kChannels = SOUNDSINTH_MAX_VOICES;
-    std::vector<std::vector<PatternCell>> rows(8, std::vector<PatternCell>(kChannels));
+    const uint16_t sa = f.add_constant_sample(1000, 20000);
+    const uint16_t sb = f.add_constant_sample(5000, 20000);
+    const uint16_t ia = f.add_instrument(NewNoteAction::Cut, DuplicateCheckType::Off, DuplicateCheckAction::Cut, sa);
+    const uint16_t ib = f.add_instrument(NewNoteAction::Continue, DuplicateCheckType::Off, DuplicateCheckAction::Cut, sb);
+    // Список доводится до потолка: каналы, а сверх них kFill хвостов. Хвосты
+    // сравниваются по усилению голоса, без амплитуды сэмпла: B тише их
+    // громкостью сэмпла по умолчанию, и гасить из них некого.
+    f.samples[sb].default_volume = 32;
+    const uint16_t sf            = f.add_constant_sample(6000, 20000);
+    const uint16_t ifill         = f.add_instrument(NewNoteAction::Continue, DuplicateCheckType::Off, DuplicateCheckAction::Cut, sf);
+    constexpr uint8_t kChannels  = SOUNDSINTH_MAX_CHANNELS < SOUNDSINTH_MAX_VOICES ? SOUNDSINTH_MAX_CHANNELS : SOUNDSINTH_MAX_VOICES;
+    constexpr uint8_t kFill      = SOUNDSINTH_MAX_VOICES - kChannels;
+    static_assert(kFill + 2 <= kChannels, "filler tails come from their own channels");
+    std::vector<std::vector<PatternCell>> rows(9, std::vector<PatternCell>(kChannels));
     rows[0][0] = note_cell(static_cast<uint8_t>(ib));
     for (uint8_t c = 1; c < kChannels; ++c)
-        rows[0][c] = note_cell(static_cast<uint8_t>(ia));
-    rows[1][0]      = note_cell(static_cast<uint8_t>(ia)); // B уходит в фон, живых 64
-    rows[5][1].note = soundsinth::model::kNoteCut;         // в списке освобождается место
+        rows[0][c] = note_cell(static_cast<uint8_t>(c >= 2 && c < 2 + kFill ? ifill : ia));
+    for (uint8_t c = 2; c < 2 + kFill; ++c)
+        rows[1][c] = note_cell(static_cast<uint8_t>(ia));  // заполнители уходят в фон: список полон
+    rows[2][0]      = note_cell(static_cast<uint8_t>(ia)); // B уходит в фон, места нет
+    rows[6][1].note = soundsinth::model::kNoteCut;         // в списке освобождается место
     f.add_pattern(rows, kChannels);
     engine::TrackerEngine& eng = f.finalize(kChannels);
     ObservedSamples obs;
     obs.watch = sb;
     eng.set_tick_observer(&observe_samples, &obs);
-    const auto sum   = render_sum(eng, 7 * kSamplesPerRow);
-    const float row5 = sum[5 * kSamplesPerRow + 800];
-    std::printf("  row 5: %.1f, faded beyond the cap %u, ticks with B in the observer %u\n", row5, eng.tails_dropped(), obs.ticks_with_watch);
+    const auto sum   = render_sum(eng, 8 * kSamplesPerRow);
+    const float row6 = sum[6 * kSamplesPerRow + 800];
+    std::printf("  row 6: %.1f, faded beyond the cap %u, ticks with B in the observer %u\n", row6, eng.tails_dropped(), obs.ticks_with_watch);
     CHECK(eng.tails_dropped() >= 1u);
-    CHECK(std::fabs(row5 - 63000.0f) < 100.0f); // 63 живых, фоновый B не вернулся
-    CHECK_EQ(obs.ticks_with_watch, 1u);         // B - только на тике 0, пока играл живым
+    // Живых kChannels - 1 по 1000 и kFill хвостов по 6000; фоновый B не вернулся.
+    const float expect = (kChannels - 1) * 1000.0f + kFill * 6000.0f;
+    CHECK(std::fabs(row6 - expect) < 100.0f);
+    CHECK_EQ(obs.ticks_with_watch, 2u); // B - только две строки, пока играл живым
 }
 
 // --- Ветки .mid: волновое гашение (Song::volume_ramp_samples != 0) ---
@@ -1083,13 +1102,13 @@ void test_midi_wave_tails_keep_samples_mapped_under_cull() {
     std::printf("test_midi_wave_tails_keep_samples_mapped_under_cull\n");
     Fixture f;
     setup_midi_like(f);
-    constexpr uint8_t kChannels = SOUNDSINTH_MAX_VOICES;
-    std::vector<std::vector<PatternCell>> rows(24, std::vector<PatternCell>(kChannels));
+    constexpr uint8_t kChannels = SOUNDSINTH_MAX_CHANNELS;
+    std::vector<std::vector<PatternCell>> rows(30, std::vector<PatternCell>(kChannels));
     for (uint8_t c = 0; c < kChannels; ++c) {
-        const uint16_t s        = add_raw16(f, std::vector<int16_t>(kCullTestSampleLength, 100));
-        const uint16_t ins      = f.add_instrument(NewNoteAction::Off, DuplicateCheckType::Off, DuplicateCheckAction::Cut, s, true, 0, 64);
-        rows[0][c]              = note_cell(static_cast<uint8_t>(ins));
-        rows[1 + c / 4][c].note = soundsinth::model::kNoteCut;
+        const uint16_t s   = add_raw16(f, std::vector<int16_t>(kCullTestSampleLength, 100));
+        const uint16_t ins = f.add_instrument(NewNoteAction::Off, DuplicateCheckType::Off, DuplicateCheckAction::Cut, s, true, 0, 64);
+        rows[0][c]         = note_cell(static_cast<uint8_t>(ins));
+        rows[8 + c / 4][c].note = soundsinth::model::kNoteCut; // со строки 8: бюджет успевает опуститься от потолка ниже числа каналов
     }
     f.add_pattern(rows, kChannels);
     engine::TrackerEngine& eng = f.finalize(kChannels);
@@ -1099,8 +1118,8 @@ void test_midi_wave_tails_keep_samples_mapped_under_cull() {
     ev.f            = &f;
     ev.sample_count = kChannels;
     eng.set_tick_observer(&evict_unmapped, &ev);
-    const auto x     = render_lr_chunked(eng, 20 * kSamplesPerRow);
-    const float peak = max_abs(x, 0, 20 * kSamplesPerRow);
+    const auto x     = render_lr_chunked(eng, 28 * kSamplesPerRow);
+    const float peak = max_abs(x, 0, 28 * kSamplesPerRow);
     std::printf("  evicted %u, culled %u, peak %.0f (64 voices at 100 is 6400)\n", ev.evicted, eng.voices_culled(), peak);
     CHECK(ev.evicted == kChannels);
     CHECK(eng.voices_culled() > 0);
@@ -1108,6 +1127,30 @@ void test_midi_wave_tails_keep_samples_mapped_under_cull() {
 }
 
 } // namespace
+
+// Маска глушения каналов - её ставит эмуляция General Sound, когда эффект
+// отнимает канал у модуля. Маска адресует каналы 0..31, столько разрядов в
+// слове; индекс выше, завернувшись по модулю 32, гасит чужой голос
+// (канал 33 вместо 1).
+void test_channel_mute_mask_does_not_wrap() {
+    std::printf("test_channel_mute_mask_does_not_wrap\n");
+
+    Fixture f;
+    const uint16_t s      = f.add_constant_sample(1000, 5000);
+    const uint16_t ins    = f.add_instrument(NewNoteAction::Cut, DuplicateCheckType::Off, DuplicateCheckAction::Cut, s);
+    constexpr uint8_t kCh = 34;
+    std::vector<PatternCell> row(kCh, empty_cell());
+    row[1]  = note_cell(ins);
+    row[33] = note_cell(ins);
+    f.add_pattern({row, std::vector<PatternCell>(kCh, empty_cell())}, kCh);
+    engine::TrackerEngine& eng = f.finalize(kCh);
+    eng.set_channel_mute(1u << 1); // отнят канал 1
+
+    const auto sum = render_sum(eng, 800);
+    std::printf("  sum=%.1f\n", sum[700]);
+    // Звучит только канал 33: канал 1 заглушен, а 33 ему не тёзка.
+    CHECK(sum[700] > 500.0f && sum[700] < 1500.0f);
+}
 
 void run_nna_tests() {
     test_nna_off_without_envelope_fades_by_fadeout();
@@ -1124,6 +1167,7 @@ void run_nna_tests() {
     test_pan_law_right_edge();
     test_muted_channel_retrigger_stays_silent();
     test_nna_tail_over_ceiling_drops_quietest();
+    test_channel_mute_mask_does_not_wrap();
     test_retrigger_keeps_channel_pitch();
     test_nna_dct_sample_with_it_instrument_match();
     test_nna_steal_takes_quietest_then_oldest();

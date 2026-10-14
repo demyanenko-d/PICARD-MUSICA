@@ -6,8 +6,9 @@
 //   - ждёт 0x02 (сессия) -> строит BusByteSource (окно - буфер приёма
 //     протокола) -> грузит трек по фазам:
 //       A. run_session_load(metadata_only): заголовки, паттерны,
-//          дескрипторы, без PCM;
-//       B. player::load::plan_playback_order(): порядок загрузки сэмплов;
+//          дескрипторы и план сэмплов, без PCM;
+//       B. деление плана на префетч и хвост (plan_split_prefetch), при
+//          неполном плане - обход order;
 //       C. префетч: сэмплы первых позиций order-листа;
 //       D. g_playback_frames = 0,
 //          shared::g_song_generation++, protocol.mark_session_ready():
@@ -62,6 +63,9 @@ struct SessionOrchestrator {
     // плана.
     uint32_t longest_step_us     = 0;
     uint16_t longest_step_sample = 0;
+    // Последний шаг повторного прохода по плану (мкс): проход идёт не чаще
+    // kRescanIntervalUs.
+    uint32_t last_rescan_us = 0;
 
     // Итог фазы A сессии: формат, длительность прохода (по ней виден конец
     // трека), причины отказа каждого загрузчика - для отчёта о провале. В

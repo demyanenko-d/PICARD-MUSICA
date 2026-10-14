@@ -29,7 +29,7 @@ struct BootReport {
     bool file_applied  = false; // применён set_config.txt
     bool file_saved    = false; // сохранён get_config.txt
     bool flash_written = false; // блок переписан
-    // Настройки пришли запросом от конфигуратора прошлой загрузки.
+    // Конфигуратор прошлой загрузки записал настройки во флеш.
     bool from_configurator = false;
     // Запрос велит поднять конфигуратор.
     bool configurator = false;

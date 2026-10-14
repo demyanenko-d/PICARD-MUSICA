@@ -23,6 +23,8 @@
 #include "player/shared_state.h"
 #include "player/audio/buffer_pool.h"
 #include "player/audio/render_task.h"
+#include "player/gs/bridge.h"
+#include "player/gs/fx_player.h"
 #include "player/audio/sequencer_task.h"
 #include "player/config.h"
 #include "player/live/ay_tap.h"
@@ -31,10 +33,10 @@
 namespace player {
 namespace {
 
-// Миллисекунды той же шкалы, что у живого сеанса: счётчик 32-битный и
-// заворачивается раз в 71.6 минуты, поэтому сравниваются только разности.
+// Миллисекунды той же шкалы, что у живого сеанса; сравниваются только
+// разности.
 inline uint32_t now_ms() {
-    return platform::mono_us() / 1000u;
+    return platform::mono_ms();
 }
 
 // --- Движок и задача рендера без кучи ---
@@ -47,12 +49,6 @@ inline uint32_t now_ms() {
 alignas(soundsinth::engine::TrackerEngine) uint8_t s_engine_storage[sizeof(soundsinth::engine::TrackerEngine)];
 alignas(player::audio::RenderTask) uint8_t s_render_task_storage[sizeof(player::audio::RenderTask)];
 alignas(player::audio::SequencerTask) uint8_t s_sequencer_task_storage[sizeof(player::audio::SequencerTask)];
-// Только для строки лога: цепочка живёт локальной переменной задачи, а
-// печатает диагностику функция без неё.
-player::audio::RenderTask* s_render_task_for_log = nullptr;
-// Он же для секвенсора. Счётчик тиков читается из чужой задачи без атомика:
-// выровненное 32-битное слово читается одной командой, порванным не бывает.
-player::audio::SequencerTask* s_sequencer_task_for_log = nullptr;
 // Пул буферов вывода живёт всё время работы, но строится в задаче: его
 // очереди - объекты ОС. Локальная переменная задачи не годится, буферы
 // внутри объекта (4 КБ).
@@ -89,6 +85,15 @@ void SOUNDSINTH_HOT_PATH(publish_tick_state)(void* user, uint16_t order_pos, con
     // count - длина карты сэмплов, она бывает больше числа звучащих голосов.
     const auto* engine = static_cast<const soundsinth::engine::TrackerEngine*>(user);
     shared::g_row_pos.store(engine->current_row(), std::memory_order_relaxed);
+    // Поканальная телеметрия: её показывают экраны плееров. Берутся первые
+    // четыре канала - столько у MOD, и столько же просит система команд GS.
+    shared::g_speed.store(engine->current_speed(), std::memory_order_relaxed);
+    const uint8_t tele_ch = engine->channel_count() < shared::kTelemetryChannels ? engine->channel_count() : shared::kTelemetryChannels;
+    for (uint8_t c = 0; c < shared::kTelemetryChannels; ++c) {
+        const bool have = c < tele_ch;
+        shared::g_channel_note[c].store(have ? engine->channel_note(c) : 0u, std::memory_order_relaxed);
+        shared::g_channel_volume[c].store(have ? engine->channel_volume(c) : 0u, std::memory_order_relaxed);
+    }
     const uint32_t voices = engine->active_voice_count();
 
     // Средняя полифония за период опроса телеметрии. Копятся сумма и число
@@ -163,8 +168,8 @@ void log_underruns(const soundsinth::engine::TrackerEngine& engine) {
     // фоном. Все под догрузкой - конкуренция за память, а не битые
     // сэмплы; вне догрузки - дело в данных или в полифонии. late -
     // опоздания вывода больше чем на буфер: пул тут ни при чём.
-    snprintf(u, sizeof(u), "underrun: total=%" PRIu32 " (+%" PRIu32 ") bg=%" PRIu32 " late=%" PRIu32 " active_voices=%" PRIu32 "\n", underrun_total,
-             underrun_total - s_last_underrun, hal::audio_out_underruns_bg(), late, engine.active_voice_count());
+    std::snprintf(u, sizeof(u), "underrun: total=%" PRIu32 " (+%" PRIu32 ") bg=%" PRIu32 " late=%" PRIu32 " active_voices=%" PRIu32 "\n", underrun_total,
+                  underrun_total - s_last_underrun, hal::audio_out_underruns_bg(), late, engine.active_voice_count());
     debug_log(u);
     s_last_underrun = underrun_total;
     s_last_late     = late;
@@ -172,18 +177,18 @@ void log_underruns(const soundsinth::engine::TrackerEngine& engine) {
 #endif // SOUNDSINTH_AUDIO_DIAG >= 1
 
 #if SOUNDSINTH_AUDIO_DIAG == 2
-// Строка diag. head - начало строки: "diag:" раз в период, "diag итог:" с
+// Строка diag. head - начало строки: "diag:" раз в период, "diag total:" с
 // кадрами трека на сносе. Печать не глушит прерывания (кольца debug_log):
 // вывод и вытеснение этой задачи задачей RenderTask
-// (SOUNDSINTH_RENDER_TASK_PRIORITY 2 против 1) работают во время печати. Не
-// встраивается: буфер строки - в её кадре, а не в постоянном кадре задачи.
-SOUNDSINTH_NOINLINE void print_diag(const char* head, const soundsinth::engine::TrackerEngine& engine, const soundsinth::mixbus::MixBus& mix,
-                                    uint32_t underrun_base, const hal::ReadyStats& ready_base) {
-    const uint32_t underrun_total = hal::audio_out_underruns();
+// (SOUNDSINTH_RENDER_TASK_PRIORITY 2 против 1) работают во время печати.
+SOUNDSINTH_NOINLINE void print_diag(const char* head, const AudioChain& chain, uint32_t underrun_base, const hal::ReadyStats& ready_base) {
+    const soundsinth::engine::TrackerEngine& engine = *chain.engine;
+    const soundsinth::mixbus::MixBus& mix           = *chain.mix;
+    const uint32_t underrun_total                   = hal::audio_out_underruns();
     // Ключи строки: underrun - с момента старта, +N - от underrun_base;
     // active_voices - снимок, peak - максимум за трек; max_tick_us - самый
     // дорогой advance_tick(), at_worst - голоса и триггеры в нём, max_trig -
-    // максимум триггеров за любой тик; ns/voice-сэмпл - voice_render+mix на
+    // максимум триггеров за любой тик; ns_per_voice_sample - voice_render+mix на
     // голосо-сэмпл; decode_per_1k_vs - взятий родного сэмпла на 1000
     // голосо-сэмплов, растёт с питчем нот.
     const uint64_t voice_samples = engine.voice_sample_count();
@@ -220,25 +225,27 @@ SOUNDSINTH_NOINLINE void print_diag(const char* head, const soundsinth::engine::
         uint32_t ns_per_voice_sample, decode_per_1k_vs, raw8_jumps_per_1k_vs, step_clamp;
     };
     DiagValues v{};
-    v.active_voices        = engine.active_voice_count();
-    v.peak                 = engine.peak_active_voice_count();
-    v.underrun             = underrun_total;
-    v.underrun_delta       = underrun_total - underrun_base;
-    v.load_pct             = load_pct;
-    v.budget               = engine.voice_budget();
-    v.culled               = engine.voices_culled();
-    v.nna_steals           = engine.nna_steals();
-    v.no_sample            = engine.triggers_without_sample();
-    v.unlisted             = engine.voices_unlisted();
-    v.demand_peak          = engine.voice_demand_peak();
-    v.queue_peak           = engine.voice_queue_peak();
-    v.queue_full           = engine.voice_queue_full();
-    v.clip                 = mix.clipped_frames();
-    v.clip_run             = mix.longest_clip_run();
-    v.jumps                = mix.jumps();
-    v.max_jump             = mix.max_jump();
-    v.max_tick_us          = engine.max_tick_duration_us();
-    v.seq_ticks            = s_sequencer_task_for_log != nullptr ? s_sequencer_task_for_log->ticks() : 0;
+    v.active_voices  = engine.active_voice_count();
+    v.peak           = engine.peak_active_voice_count();
+    v.underrun       = underrun_total;
+    v.underrun_delta = underrun_total - underrun_base;
+    v.load_pct       = load_pct;
+    v.budget         = engine.voice_budget();
+    v.culled         = engine.voices_culled();
+    v.nna_steals     = engine.nna_steals();
+    v.no_sample      = engine.triggers_without_sample();
+    v.unlisted       = engine.voices_unlisted();
+    v.demand_peak    = engine.voice_demand_peak();
+    v.queue_peak     = engine.voice_queue_peak();
+    v.queue_full     = engine.voice_queue_full();
+    v.clip           = mix.clipped_frames();
+    v.clip_run       = mix.longest_clip_run();
+    v.jumps          = mix.jumps();
+    v.max_jump       = mix.max_jump();
+    v.max_tick_us    = engine.max_tick_duration_us();
+    // Счётчик тиков пишет задача секвенсора, читается без атомика:
+    // выровненное 32-битное слово читается одной командой.
+    v.seq_ticks            = chain.sequencer_task != nullptr ? chain.sequencer_task->ticks() : 0;
     v.worst_voices         = engine.active_voice_count_at_worst_tick();
     v.worst_trig           = engine.voice_triggers_at_worst_tick();
     v.worst_row0           = engine.worst_tick_at_row_start() ? 1u : 0u;
@@ -259,7 +266,7 @@ SOUNDSINTH_NOINLINE void print_diag(const char* head, const soundsinth::engine::
         const hal::ReadyStats now = hal::audio_out_ready_stats();
         uint32_t at               = 0;
         for (uint32_t k = 0; k < hal::kReadyBins && at < sizeof(ready); ++k) {
-            const int n = snprintf(ready + at, sizeof(ready) - at, "%s%" PRIu32, k ? "/" : "", now.ready[k] - ready_base.ready[k]);
+            const int n = std::snprintf(ready + at, sizeof(ready) - at, "%s%" PRIu32, k ? "/" : "", now.ready[k] - ready_base.ready[k]);
             if (n < 0) break;
             at += static_cast<uint32_t>(n);
         }
@@ -267,43 +274,54 @@ SOUNDSINTH_NOINLINE void print_diag(const char* head, const soundsinth::engine::
 
     // Худший случай формата - около 600 байт.
     static char d[640];
-    snprintf(d, sizeof(d),
-             "%s active_voices=%" PRIu32 " peak=%" PRIu32 " underrun=%" PRIu32 " (+%" PRIu32 ") "
-             "load=%" PRIu32 "%% budget=%" PRIu32 " culled=%" PRIu32 " nna_steals=%" PRIu32 " no_sample=%" PRIu32 " unlisted=%" PRIu32 " demand_peak=%" PRIu32
-             " "
-             "clipped=%" PRIu32 " (run %" PRIu32 ") jumps=%" PRIu32 " (max %" PRIu32 ") "
-             "max_tick_us=%" PRIu32 " ticks=%" PRIu32 " "
-             "at_worst(voices=%" PRIu32 ",trig=%" PRIu32 ",row0=%" PRIu32 ") max_trig=%" PRIu32 " ns_per_voice_sample=%" PRIu32 " "
-             "decode_per_1k_vs=%" PRIu32 " raw8_jumps_per_1k_vs=%" PRIu32 " step_clamp=%" PRIu32 " "
-             "ready_at_pull=%s queue=%" PRIu32 "/%u full=%" PRIu32 "\n",
-             head, v.active_voices, v.peak, v.underrun, v.underrun_delta, v.load_pct, v.budget, v.culled, v.nna_steals, v.no_sample, v.unlisted, v.demand_peak,
-             v.clip, v.clip_run, v.jumps, v.max_jump, v.max_tick_us, v.seq_ticks, v.worst_voices, v.worst_trig, v.worst_row0, v.max_trig, v.ns_per_voice_sample,
-             v.decode_per_1k_vs, v.raw8_jumps_per_1k_vs, v.step_clamp, ready, v.queue_peak, static_cast<unsigned>(soundsinth::engine::kVoiceQueueCapacity),
-             v.queue_full);
+    std::snprintf(d, sizeof(d),
+                  "%s active_voices=%" PRIu32 " peak=%" PRIu32 " underrun=%" PRIu32 " (+%" PRIu32 ") "
+                  "load=%" PRIu32 "%% budget=%" PRIu32 " culled=%" PRIu32 " nna_steals=%" PRIu32 " no_sample=%" PRIu32 " unlisted=%" PRIu32
+                  " demand_peak=%" PRIu32 " "
+                  "clipped=%" PRIu32 " (run %" PRIu32 ") jumps=%" PRIu32 " (max %" PRIu32 ") "
+                  "max_tick_us=%" PRIu32 " ticks=%" PRIu32 " "
+                  "at_worst(voices=%" PRIu32 ",trig=%" PRIu32 ",row0=%" PRIu32 ") max_trig=%" PRIu32 " ns_per_voice_sample=%" PRIu32 " "
+                  "decode_per_1k_vs=%" PRIu32 " raw8_jumps_per_1k_vs=%" PRIu32 " step_clamp=%" PRIu32 " "
+                  "ready_at_pull=%s queue=%" PRIu32 "/%u full=%" PRIu32 "\n",
+                  head, v.active_voices, v.peak, v.underrun, v.underrun_delta, v.load_pct, v.budget, v.culled, v.nna_steals, v.no_sample, v.unlisted,
+                  v.demand_peak, v.clip, v.clip_run, v.jumps, v.max_jump, v.max_tick_us, v.seq_ticks, v.worst_voices, v.worst_trig, v.worst_row0, v.max_trig,
+                  v.ns_per_voice_sample, v.decode_per_1k_vs, v.raw8_jumps_per_1k_vs, v.step_clamp, ready, v.queue_peak,
+                  static_cast<unsigned>(soundsinth::engine::kVoiceQueueCapacity), v.queue_full);
     debug_log(d);
+    // Доли времени рендера с начала трека, в промилле: тик (секвенсор,
+    // эффекты, арбитр), голоса (цикл голосов и сведение), остальное (шины
+    // эффектов, ревербератор, хорус).
+    const uint32_t render_us = engine.render_total_us();
+    if (render_us > 0) {
+        const uint32_t tick_pm  = static_cast<uint32_t>((static_cast<uint64_t>(engine.tick_total_us()) * 1000u) / render_us);
+        const uint32_t voice_pm = static_cast<uint32_t>((static_cast<uint64_t>(engine.voice_loop_total_us()) * 1000u) / render_us);
+        debug_logf("%s render_us=%" PRIu32 " tick_permille=%" PRIu32 " voices_permille=%" PRIu32 " rest_permille=%" PRIu32 "\n", head, render_us, tick_pm,
+                   voice_pm, tick_pm + voice_pm < 1000u ? 1000u - tick_pm - voice_pm : 0u);
+    }
     // Из чего сложился самый большой промежуток между готовыми буферами.
     // Очередь готовых - передышка убежавшего вперёд рендера, а не заминка;
     // заминка - это отрисовка длиннее буфера и ожидание ядра.
-    if (s_render_task_for_log != nullptr) {
-        const uint32_t gap   = s_render_task_for_log->worst_gap_us();
-        const uint32_t wait  = s_render_task_for_log->worst_gap_wait_us();
-        const uint32_t rend  = s_render_task_for_log->worst_gap_render_us();
-        const uint32_t push  = s_render_task_for_log->worst_gap_push_us();
-        const uint32_t spent = wait + rend + push;
-        // Свой буфер: строка длиннее 192 байт буфера debug_logf.
-        static char r[288];
-        snprintf(r, sizeof(r),
-                 "render: buffer max %" PRIu32 " us (buffer lasts %" PRIu32 "); gap %" PRIu32 " = ready queue %" PRIu32 " + free buffer %" PRIu32
-                 " + render %" PRIu32 " + core %" PRIu32 "\n",
-                 s_render_task_for_log->worst_render_us(), SOUNDSINTH_AUDIO_BUFFER_FRAMES * 1000000u / soundsinth::engine::kSampleRateHz, gap, push, wait, rend,
-                 gap > spent ? gap - spent : 0u);
-        debug_log(r);
+    if (chain.render_task != nullptr) {
+        const player::audio::RenderTask& rt = *chain.render_task;
+        const uint32_t gap                  = rt.worst_gap_us();
+        const uint32_t wait                 = rt.worst_gap_wait_us();
+        const uint32_t rend                 = rt.worst_gap_render_us();
+        const uint32_t push                 = rt.worst_gap_push_us();
+        const uint32_t spent                = wait + rend + push;
+        // Буфер строки diag: строка длиннее 192 байт буфера debug_logf, а
+        // debug_log уже скопировал прошлую в кольцо.
+        std::snprintf(d, sizeof(d),
+                      "render: buffer max %" PRIu32 " us (buffer lasts %" PRIu32 "); gap %" PRIu32 " = ready queue %" PRIu32 " + free buffer %" PRIu32
+                      " + render %" PRIu32 " + core %" PRIu32 "\n",
+                      rt.worst_render_us(), SOUNDSINTH_AUDIO_BUFFER_FRAMES * 1000000u / soundsinth::engine::kSampleRateHz, gap, push, wait, rend,
+                      gap > spent ? gap - spent : 0u);
+        debug_log(d);
     }
 }
 
 // Раз в 3000 x SOUNDSINTH_LOG_RARITY мс из цикла задачи (50 мс; не
 // аудиокритичный).
-void log_diag(const soundsinth::engine::TrackerEngine& engine, const soundsinth::mixbus::MixBus& mix) {
+void log_diag(const AudioChain& chain) {
     static uint32_t s_last_diag_ms          = 0;
     static uint32_t s_underrun_at_last_diag = 0;
     static hal::ReadyStats s_ready_at_last_diag{};
@@ -311,7 +329,7 @@ void log_diag(const soundsinth::engine::TrackerEngine& engine, const soundsinth:
     if (ms - s_last_diag_ms < 3000u * SOUNDSINTH_LOG_RARITY) return;
     const uint32_t underrun_total     = hal::audio_out_underruns();
     const hal::ReadyStats ready_total = hal::audio_out_ready_stats();
-    print_diag("diag:", engine, mix, s_underrun_at_last_diag, s_ready_at_last_diag);
+    print_diag("diag:", chain, s_underrun_at_last_diag, s_ready_at_last_diag);
     s_last_diag_ms          = ms;
     s_underrun_at_last_diag = underrun_total;
     s_ready_at_last_diag    = ready_total;
@@ -319,16 +337,15 @@ void log_diag(const soundsinth::engine::TrackerEngine& engine, const soundsinth:
 
 // Итог трека на сносе: последние до 24 с трека в периодическую строку не
 // попадают. +N у underrun и готовые при заборе - за трек.
-void log_diag_track_end(const soundsinth::engine::TrackerEngine& engine, const soundsinth::mixbus::MixBus& mix, uint32_t underrun_at_build,
-                        const hal::ReadyStats& ready_at_build) {
+void log_diag_track_end(const AudioChain& chain) {
     char head[48];
-    snprintf(head, sizeof(head), "diag total: frames=%" PRIu32, engine.elapsed_frames());
-    print_diag(head, engine, mix, underrun_at_build, ready_at_build);
+    std::snprintf(head, sizeof(head), "diag total: frames=%" PRIu32, chain.engine->elapsed_frames());
+    print_diag(head, chain, chain.underrun_at_build, chain.ready_at_build);
 }
 #endif // SOUNDSINTH_AUDIO_DIAG == 2
 
-// Счётчики микшера за трек. "на_шкале" - кадры, где сумма ушла за int16;
-// "мягко" - из них прошедшие кривую насыщения (у трекеров она выключена, там
+// Счётчики микшера за трек. "clipped" - кадры, где сумма ушла за int16;
+// "soft" - из них прошедшие кривую насыщения (у трекеров она выключена, там
 // полка). Лимитер работает до шкалы и в эти счётчики не попадает.
 void log_mix_track_stats(const soundsinth::mixbus::MixBus& mix) {
     debug_logf("bus: clipped=%" PRIu32 " run=%" PRIu32 " jumps=%" PRIu32 " max=%" PRIu32 " soft=%" PRIu32 "\n", mix.clipped_frames(), mix.longest_clip_run(),
@@ -361,7 +378,7 @@ void teardown_engine(AudioChain& chain) {
     while (waited < kFadeWaitMs && !chain.mix->faded()) {
         platform::os_task_delay_ms(kPollBriskMs);
         waited += kPollBriskMs;
-        player::live::pump_stream(now_ms());
+        player::live::feed_stream_before_session(now_ms());
     }
     if (!chain.mix->faded()) {
         debug_logf("teardown: fade did not finish in %" PRIu32 " ms\n", waited);
@@ -371,7 +388,7 @@ void teardown_engine(AudioChain& chain) {
         for (uint32_t i = 0; i < kFadeBuffersAhead && waited < kFadeWaitMs; ++i) {
             platform::os_task_delay_ms(kPollBriskMs);
             waited += kPollBriskMs;
-            player::live::pump_stream(now_ms());
+            player::live::feed_stream_before_session(now_ms());
         }
     }
     // Затем заглушить выход, иначе он повторяет последние буферы: хрип на
@@ -391,11 +408,10 @@ void teardown_engine(AudioChain& chain) {
     chain.pool->drain_rendered();
     log_mix_track_stats(*chain.mix);
 #if SOUNDSINTH_AUDIO_DIAG == 2
-    log_diag_track_end(*chain.engine, *chain.mix, chain.underrun_at_build, chain.ready_at_build);
+    log_diag_track_end(chain);
 #endif
     chain.mix->remove_source(chain.engine->as_sound_source());
     // Явные деструкторы вместо delete: память статическая (s_engine_storage).
-    s_render_task_for_log = nullptr; // до разрушения: лог печатает из другой задачи
     chain.render_task->~RenderTask();
     // Секвенсор - после рендера: пока тот жив, он ждёт от него тика.
     uint32_t sequencer_stack_free = 0;
@@ -403,9 +419,8 @@ void teardown_engine(AudioChain& chain) {
     if (chain.sequencer_task != nullptr) {
         chain.engine->set_tick_runner(nullptr, nullptr);
         chain.sequencer_task->stop();
-        sequencer_stack_free     = chain.sequencer_task->stack_unused_bytes();
-        sequencer_ticks          = chain.sequencer_task->ticks();
-        s_sequencer_task_for_log = nullptr; // до разрушения: лог печатает из другой задачи
+        sequencer_stack_free = chain.sequencer_task->stack_unused_bytes();
+        sequencer_ticks      = chain.sequencer_task->ticks();
         chain.sequencer_task->~SequencerTask();
         chain.sequencer_task = nullptr;
     }
@@ -438,7 +453,7 @@ bool build_live_engine(AudioChain& chain, uint32_t ms) {
     }
     chain.underrun_at_build = hal::audio_out_underruns();
     chain.ready_at_build    = hal::audio_out_ready_stats();
-    chain.engine            = new (s_engine_storage) soundsinth::engine::TrackerEngine(shared::g_song, shared::g_track_memory);
+    chain.engine = new (s_engine_storage) soundsinth::engine::TrackerEngine(shared::g_song, shared::g_track_memory, devices::config::settings().mod_panning);
     chain.engine->set_tick_observer(&publish_tick_state, chain.engine);
     chain.engine->set_voice_cull_enabled(SOUNDSINTH_VOICE_CULL_ON_OVERLOAD != 0);
     chain.engine->set_live_row_source(&player::live::live_row, player::live::row_user());
@@ -449,10 +464,10 @@ bool build_live_engine(AudioChain& chain, uint32_t ms) {
     chain.mix->set_soft_clip(shared::g_song.soft_clip_enabled);
     hal::audio_out_set_silent(false);
     chain.sequencer_task = new (s_sequencer_task_storage) player::audio::SequencerTask(*chain.engine);
+#if !SOUNDSINTH_TICK_IN_RENDER
     chain.engine->set_tick_runner(&player::audio::SequencerTask::run_tick, chain.sequencer_task);
-    chain.render_task        = new (s_render_task_storage) player::audio::RenderTask(*chain.mix, *chain.pool, &shared::g_render_busy_us);
-    s_render_task_for_log    = chain.render_task;
-    s_sequencer_task_for_log = chain.sequencer_task;
+#endif
+    chain.render_task = new (s_render_task_storage) player::audio::RenderTask(*chain.mix, *chain.pool, &shared::g_render_busy_us);
     if (!chain.out_started) {
         hal::audio_out_start(*chain.pool, soundsinth::engine::kSampleRateHz);
         chain.out_started = true;
@@ -484,7 +499,8 @@ void poll_live(AudioChain& chain) {
         }
         return;
     }
-    if (!player::live::stream_started(ms)) return;
+    player::live::scan_stream_before_session(ms);
+    if (!player::live::stream_detected()) return;
     // Идёт загрузка - вход запрещён, и сносить движок нельзя: собрать его
     // обратно всё равно не дадут, а трек уже не вернётся. Ждём следующего
     // прохода; счётчик событий снимается, чтобы порог брался заново.
@@ -527,7 +543,7 @@ void build_engine_if_ready(AudioChain& chain) {
     chain.underrun_at_build = hal::audio_out_underruns();
     chain.ready_at_build    = hal::audio_out_ready_stats();
     shared::g_engine_generation.store(gen, std::memory_order_relaxed);
-    chain.engine = new (s_engine_storage) soundsinth::engine::TrackerEngine(shared::g_song, shared::g_track_memory);
+    chain.engine = new (s_engine_storage) soundsinth::engine::TrackerEngine(shared::g_song, shared::g_track_memory, devices::config::settings().mod_panning);
     chain.engine->set_tick_observer(&publish_tick_state, chain.engine);
     // Сброс лишних голосов при перегрузке включается здесь, а не в движке:
     // TrackerEngine стартует с выключенным, чтобы тесты и pc_player оставались
@@ -550,11 +566,11 @@ void build_engine_if_ready(AudioChain& chain) {
     // Тик - своей задачей, и она заводится до рендера: тот с первого же
     // буфера станет её будить.
     chain.sequencer_task = new (s_sequencer_task_storage) player::audio::SequencerTask(*chain.engine);
+#if !SOUNDSINTH_TICK_IN_RENDER
     chain.engine->set_tick_runner(&player::audio::SequencerTask::run_tick, chain.sequencer_task);
+#endif
     chain.render_task =
         new (s_render_task_storage) player::audio::RenderTask(*chain.mix, *chain.pool, &shared::g_render_busy_us); // сама создаёт фоновую задачу рендера
-    s_render_task_for_log    = chain.render_task;
-    s_sequencer_task_for_log = chain.sequencer_task;
 
     if (!chain.out_started) {
         // Вывод стартует один раз за работу прошивки, на первом готовом треке.
@@ -652,7 +668,9 @@ void publish_playback_state(AudioChain& chain) {
     if (moved) chain.mix->skip_frames(chain.engine->elapsed_frames() - from);
     debug_logf("seek: %" PRIu32 " -> %" PRIu32 " frame%s, waited for silence %" PRIu32 " pass%s\n", from, chain.engine->elapsed_frames(),
                moved ? "" : " (refused)", s_seek_waits, s_seek_waits == 1u ? "" : "es");
-    shared::g_seek_frames.store(0, std::memory_order_relaxed);
+    // Гасится ровно взятое: нажатие, пришедшее во время прокрутки (сотни
+    // тиков на нажатие), останется и уйдёт следующим проходом.
+    shared::g_seek_frames.fetch_sub(seek, std::memory_order_acq_rel);
     s_seek_silent_seen = false;
     s_seek_waits       = 0;
 }
@@ -668,6 +686,10 @@ void audio_chain_task(void* /*arg*/) {
 
     soundsinth::mixbus::MixBus& mix = *new (s_mix_storage) soundsinth::mixbus::MixBus();
     chain.mix                       = &mix;
+    // Эффекты GS - свой источник, и он заводится один раз на всю работу:
+    // список источников меняется только при снятом рендере, а сэмплы
+    // переживают смену трека. Пока эффектов нет, источник молчит.
+    mix.add_source(player::gs::fx_player().as_sound_source());
     debug_log("app_task: MixBus ready, waiting for first track\n");
 
     for (;;) {
@@ -685,11 +707,14 @@ void audio_chain_task(void* /*arg*/) {
         }
         if (chain.engine) {
             publish_playback_state(chain);
+            // Эффекты General Sound отнимают канал у модуля, как у карты:
+            // маску занятых каналов держит мост, а глушит их движок.
+            chain.engine->set_channel_mute(player::gs::bridge_fx_mute_mask());
 #if SOUNDSINTH_AUDIO_DIAG >= 1
             log_underruns(*chain.engine);
 #endif
 #if SOUNDSINTH_AUDIO_DIAG == 2
-            log_diag(*chain.engine, mix);
+            log_diag(chain);
 #endif
         }
         // Под живой режим и в ожидании потока - чаще: заказанные сэмплы ждут

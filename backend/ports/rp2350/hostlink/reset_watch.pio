@@ -1,0 +1,48 @@
+; SPDX-License-Identifier: MIT
+; Сброс машины без линии сброса. Вывод RESET у платы - только выход (через
+; инвертор и диод), кнопку сброса машины плата не видит. Пока Z80 в
+; сбросе, выборок команды нет вовсе; работающий даёт M1 каждые несколько
+; тактов, в HALT тоже. Нет M1 дольше срока - машина стоит в сбросе.
+;
+; Срок - Y проходов по два такта автомата. Отметка уходит в очередь на
+; каждый истёкший срок, пока выборок нет: начало и конец сброса видны по
+; тому, идут отметки или нет.
+
+.pio_version rp2350
+
+; Порт 0x7FFD сбросом машины обнуляется: ПЗУ 128, страницы открыты. Его
+; биты для триггера TR-DOS держат флаги IRQ этого блока, и гасит их тот,
+; кто видит сброс первым, - этот автомат, без ядра.
+.define public IRQ_ROM48 7
+.define public IRQ_PAGING_LOCKED 6
+
+.program reset_watch
+
+.wrap_target
+top:
+    mov x, y            ; срок заново
+count:
+    jmp pin, quiet      ; M1_N = 1 - выборки нет, считать
+    jmp top             ; выборка - срок заново
+quiet:
+    jmp x--, count
+    push noblock        ; срок вышел: машина стоит
+    irq clear IRQ_ROM48
+    irq clear IRQ_PAGING_LOCKED
+.wrap
+
+% c-sdk {
+#include "hardware/pio.h"
+
+// passes - проходов по два такта автомата до отметки.
+static inline void reset_watch_program_init(PIO pio, uint sm, uint offset, uint pin_m1_n, uint32_t passes) {
+    pio_sm_config c = reset_watch_program_get_default_config(offset);
+    sm_config_set_jmp_pin(&c, pin_m1_n);
+    sm_config_set_in_shift(&c, /*shift_right=*/false, /*autopush=*/false, 32);
+    sm_config_set_clkdiv(&c, 1.0f);
+    pio_sm_init(pio, sm, offset, &c);
+    pio_sm_put_blocking(pio, sm, passes);
+    pio_sm_exec(pio, sm, pio_encode_pull(false, true));
+    pio_sm_exec(pio, sm, pio_encode_mov(pio_y, pio_osr));
+}
+%}

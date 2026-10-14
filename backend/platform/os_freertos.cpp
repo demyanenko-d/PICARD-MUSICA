@@ -12,23 +12,17 @@
 // GCC_ARM_CM33_NTZ_NONSECURE, ПК - симулятор Windows). Различие между ними
 // одно, макрос SOUNDSINTH_OS_YIELD_FROM_ISR из FreeRTOSConfig.h.
 
-// Настоящая длина тика. Порт объявляет её, когда она разошлась с
-// configTICK_RATE_HZ: на плате SysTick считает от configCPU_CLOCK_HZ, вдвое
-// меньшей системной частоты, и тик выходит 500 мкс при объявленной тысяче
-// герц. pdMS_TO_TICKS верит объявленному и отмерил бы половину.
-#ifndef SOUNDSINTH_OS_TICK_US
-#define SOUNDSINTH_OS_TICK_US (1000000u / configTICK_RATE_HZ)
-#endif
-
 namespace platform {
 
 // Тиков на миллисекунды, с округлением вверх: срок не должен выйти раньше
 // названного. Счёт 32-битный, потолок - 4294 секунды: паузы задач и сроки
 // ожидания здесь измеряются десятками миллисекунд.
 namespace {
+constexpr uint32_t kTickUs = 1000000u / configTICK_RATE_HZ;
+
 TickType_t ticks_for_ms(uint32_t ms) {
     const uint32_t us = ms * 1000u;
-    return static_cast<TickType_t>((us + SOUNDSINTH_OS_TICK_US - 1u) / SOUNDSINTH_OS_TICK_US);
+    return static_cast<TickType_t>((us + kTickUs - 1u) / kTickUs);
 }
 } // namespace
 
@@ -58,11 +52,21 @@ Queue* as_queue(QueueHandle_t h) {
 // вернуть nullptr значило бы отказ звука где-то дальше и без причины.
 namespace {
 
-constexpr uint32_t kSemSlots = 12;
+// Размеры пула - ключами: прошивка берёт 8 семафоров (3 у RenderTask, 5 у
+// SequencerTask) и 2 очереди (BufferPool), ПК - больше (по семафору на
+// сток). Новый потребитель на плате упрётся в configASSERT на первом треке.
+#ifndef SOUNDSINTH_OS_SEM_SLOTS
+#define SOUNDSINTH_OS_SEM_SLOTS 12u
+#endif
+#ifndef SOUNDSINTH_OS_QUEUE_SLOTS
+#define SOUNDSINTH_OS_QUEUE_SLOTS 4u
+#endif
+
+constexpr uint32_t kSemSlots = SOUNDSINTH_OS_SEM_SLOTS;
 StaticSemaphore_t s_sem_slots[kSemSlots];
 bool s_sem_busy[kSemSlots];
 
-constexpr uint32_t kQueueSlots = 4;
+constexpr uint32_t kQueueSlots = SOUNDSINTH_OS_QUEUE_SLOTS;
 // Потолок ёмкости: очереди пула буферов - kBufferCount и глубина готовых.
 constexpr uint32_t kQueueCapacity = 8;
 StaticQueue_t s_queue_slots[kQueueSlots];

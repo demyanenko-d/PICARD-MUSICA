@@ -111,9 +111,11 @@ public:
     static constexpr uint8_t kMaxNak = 3;
 
     struct Callbacks {
-        void* user                                                                                                                          = nullptr;
+        void* user = nullptr;
+
         void (*on_session_start)(void* user, uint32_t sector_size_bytes, uint32_t file_length, uint8_t telemetry_flags, uint8_t load_order) = nullptr;
-        void (*on_reset)(void* user)                                                                                                        = nullptr;
+
+        void (*on_reset)(void* user) = nullptr;
     };
 
     // Вооружение делает платформа: кодирует слова ответа и публикует статус

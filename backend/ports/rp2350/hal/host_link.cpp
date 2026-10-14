@@ -12,13 +12,14 @@
 #include "hardware/timer.h"
 #include "pico.h"
 
+#include "platform/hot_path.h"
+#include "platform/log.h"
+#include "platform/mono_time.h"
+
 #include "bus.h"
 #include "divmmc.h"
 #include "hostlink/hostlink.h"
 #include "hw_config.h"
-#include "platform/hot_path.h"
-#include "platform/log.h"
-#include "platform/mono_time.h"
 
 namespace {
 
@@ -78,17 +79,13 @@ uint32_t player::hal::host_last_seen_us() {
 }
 
 uint32_t player::hal::bus_lost_port_writes() {
-    return bus::z80_bus_pio_get_stats().wr_fifo_overruns;
-}
-
-uint32_t player::hal::bus_lost_rom_writes() {
-    return bus::divmmc_lost_writes();
+    return bus::bus_stats().wr_fifo_overruns;
 }
 
 // Ждёт следующего прерывания или будильника.
 //
 // Ждёт по событию, а не по прерыванию: у wfi есть гонка, из-за
-// которой ядро встаёт на секунды (замер платы: "core1: стоит"). Если
+// которой ядро встаёт на секунды (замер платы: "core1: stalled"). Если
 // будильник сработал между взводом и ожиданием, обработчик снимает
 // признак, и wfi засыпает до чужого прерывания - а на тихой шине его может
 // не быть долго. Регистр события защёлкивает срабатывание и гонки не имеет.

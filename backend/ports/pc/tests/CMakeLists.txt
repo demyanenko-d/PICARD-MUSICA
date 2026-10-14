@@ -66,9 +66,14 @@ add_executable(soundsinth_tests
     test_voice_cull.cpp
     test_reverb_filter.cpp
     test_gs_device.cpp
+    test_gs_midi_sched.cpp
+    test_gs_fx_player.cpp
+    test_gs_bridge.cpp
+    host_link_stub.cpp
     test_ay_midi.cpp
     test_debug_ring.cpp
     test_config.cpp
+    test_config_apply.cpp
     test_hid.cpp
     test_hid_parser.cpp
     third_party/libxmp_itsex.cpp

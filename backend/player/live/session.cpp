@@ -22,6 +22,7 @@
 #include "player/live/ay_tap.h"
 #include "player/shared_state.h"
 #include "player/live/live_requests.h"
+#include "player/load/progressive_loader.h" // SamplesInUse
 
 namespace player::live {
 
@@ -44,8 +45,9 @@ struct State {
     player::live::LiveRequestRing retire_asked;
     player::live::LiveRequestRing retire_done;
     uint32_t retire_pending[(soundsinth::formats::midi::kLiveMaxSamples + 31u) / 32u] = {};
-    uint32_t retired                                                                  = 0;
-    uint32_t retire_waiting                                                           = 0; // ждут, пока голоса их отпустят
+
+    uint32_t retired        = 0;
+    uint32_t retire_waiting = 0; // ждут, пока голоса их отпустят
     soundsinth::midi_in::AyMidiInput input;
     bool active           = false;
     uint32_t seen_events  = 0;     // сообщений до включения режима
@@ -99,15 +101,10 @@ void on_retire(void* user, uint16_t song_sample) {
     static_cast<State*>(user)->retire_asked.push(song_sample);
 }
 
-// Держит ли сэмпл живой голос: карту публикует движок раз в тик.
-bool sample_in_use(uint16_t index) {
-    if (index >= shared::kSamplesInUseBits) return true; // чужих не видим - считаем занятыми
-    return (shared::g_samples_in_use[index / 32u].load(std::memory_order_acquire) & (1u << (index % 32u))) != 0;
-}
-
-// Отвод AY -> сообщения -> очередь с упреждением. Возвращает, сколько
-// сообщений разобрано; SysEx тоже считается - режим по нему и узнают, плееры
-// начинают со сброса GM или GS.
+// Отвод AY -> сообщения. Возвращает, сколько сообщений разобрано; SysEx
+// тоже считается - режим по нему и узнают, плееры начинают со сброса GM или
+// GS. to_stream - класть разобранное в очередь с упреждением, иначе
+// выбросить; снаружи - через drain_tap_to_stream и drain_tap_discard.
 // В SRAM: зовётся из тика движка (через live_row), то есть с того пути,
 // который обязан жить в SRAM, и на каждом тике прокручивает всё кольцо
 // отвода - выборки команд из флеша идут тем же QMI, которым Core0 читает
@@ -138,6 +135,19 @@ uint32_t SOUNDSINTH_HOT_PATH(drain_tap)(uint32_t now_ms, bool to_stream) {
     return got;
 }
 
+// Одно тело на оба режима: вторая копия цикла легла бы в SRAM.
+inline uint32_t drain_tap_to_stream(uint32_t now_ms) {
+    return drain_tap(now_ms, /*to_stream=*/true);
+}
+
+inline void drain_tap_discard() {
+    drain_tap(0, /*to_stream=*/false);
+}
+
+// Держит ли сэмпл живой голос: карту публикует движок раз в тик. За
+// пределом карты - занят.
+constexpr player::load::SamplesInUse kLiveInUse{shared::g_samples_in_use, shared::kSamplesInUseBits};
+
 // Просьба о памяти трека и подтверждение. Два ядра, поэтому атомики, а не
 // поля состояния: состояние пишет только Core0.
 std::atomic<bool> s_mem_request{false};
@@ -160,13 +170,13 @@ const PatternCell* SOUNDSINTH_HOT_PATH(live_row)(void* user) {
     // видно, на что оно ушло.
     const uint32_t built0 = st->live.instruments_built(), evicted0 = st->live.instruments_evicted();
     const uint32_t records0 = st->live.records_allocated(), retire0 = st->live.retire_calls();
-    const uint32_t now = (platform::mono_us() / 1000u);
+    const uint32_t now = platform::mono_ms();
     // Подтверждения возврата: PCM записи уже выброшен, номер свободен.
     uint16_t done = 0;
     while (st->retire_done.pop(done)) {
         st->live.record_retired(done);
     }
-    drain_tap(now, /*to_stream=*/true);
+    drain_tap_to_stream(now);
     const PatternCell* row = st->stream.tick(now);
     // Живая строка идёт внутри тика рендера, и её цена в max_tick_us не
     // отделена от голосов. Считаем отдельно: строит инструменты и заводит
@@ -184,37 +194,47 @@ const PatternCell* SOUNDSINTH_HOT_PATH(live_row)(void* user) {
     return row;
 }
 
-bool stream_started(uint32_t now_ms) {
-    if (s_state.active) return false;
+void scan_stream_before_session(uint32_t now_ms) {
+    if (s_state.active) return;
     // Банк во флеше живому режиму нужен весь: сэмплы он тянет только
     // оттуда, а появиться на ходу банк не может. Отвод всё равно
     // разбирается, иначе кольцо переполнялось бы, а строка печатается
     // один раз - проход цепочки идёт раз в несколько миллисекунд.
     if (!shared::g_flash_bank.valid()) {
-        drain_tap(now_ms, /*to_stream=*/false);
+        drain_tap_discard();
         if (!s_state.no_bank_reported) {
             s_state.no_bank_reported = true;
             debug_log("live: no bank in flash, live MIDI unavailable\n");
         }
-        return false;
+        return;
     }
     // Кладём в очередь сразу: события, по которым режим и распознан (обычно
     // выбор банка и программы), нужны песне - иначе первые ноты звучат не тем
     // или молчат.
-    s_state.seen_events += drain_tap(now_ms, /*to_stream=*/true);
-    return s_state.seen_events >= kStartEvents;
+    feed_stream_before_session(now_ms);
+}
+
+bool stream_detected() {
+    return !s_state.active && shared::g_flash_bank.valid() && s_state.seen_events >= kStartEvents;
+}
+
+void decode_stats(uint32_t& bytes, uint32_t& framing, uint32_t& skipped, uint32_t& events) {
+    bytes   = s_state.input.bytes();
+    framing = s_state.input.framing_errors();
+    skipped = s_state.input.skipped_bytes();
+    events  = s_state.seen_events;
 }
 
 uint32_t silent_ms(uint32_t now_ms) {
     return s_state.active ? s_state.stream.silent_ms(now_ms) : 0;
 }
 
-void pump_stream(uint32_t now_ms) {
+void feed_stream_before_session(uint32_t now_ms) {
     // После включения режима очередь пишет тик рендера - второй
     // писатель сломал бы и автомат разбора, и SysEx.
     if (s_state.active) return;
     if (!shared::g_flash_bank.valid()) return;
-    s_state.seen_events += drain_tap(now_ms, /*to_stream=*/true);
+    s_state.seen_events += drain_tap_to_stream(now_ms);
 }
 
 // Рукопожатие передачи памяти. Просьбу ставит Core0, подтверждение -
@@ -334,7 +354,7 @@ bool SOUNDSINTH_HOT_PATH(serve_requests)() {
         for (uint16_t b = 0; bits != 0; ++b, bits >>= 1) {
             if ((bits & 1u) == 0) continue;
             const uint16_t r = static_cast<uint16_t>(w * 32u + b);
-            if (sample_in_use(r)) continue; // голос ещё читает страницы
+            if (kLiveInUse.is_busy(r)) continue; // голос ещё читает страницы
             if (auto* entry = soundsinth::memory::sample_cache_find(shared::g_track_memory.sample_cache, r)) {
                 soundsinth::memory::sample_cache_evict(shared::g_track_memory.sample_cache, shared::g_track_memory.psram, entry);
             }
@@ -446,42 +466,55 @@ void note_missing(const soundsinth::engine::TrackerEngine& engine) {
     s_state.missing_seen = total;
 }
 
+void ay_tap_log_stats() {
+    // Отличает плеера, который шлёт MIDI не в AY, от разбора, который не
+    // признал поток: у Z-Player устройство вывода выбирается настройкой, и
+    // кроме порта A там есть SC-RS232 и UART ShamaZX.
+    uint32_t bytes = 0, framing = 0, skipped = 0, events = 0;
+    decode_stats(bytes, framing, skipped, events);
+    debug_logf("live: AY writes %" PRIu32 " lost %" PRIu32 " | bytes %" PRIu32 ", framing errors %" PRIu32 ", skipped %" PRIu32 ", events %" PRIu32
+               " - mode off\n",
+               ay_tap_seen(), ay_tap_lost(), bytes, framing, skipped, events);
+}
+
 void session_log_stats() {
     if (!s_state.active) return;
-    const uint32_t now                             = (platform::mono_us() / 1000u);
+    const uint32_t now                             = platform::mono_ms();
     const soundsinth::formats::midi::LoadStats& st = s_state.live.stats();
     // Свой буфер: строка длиннее 192 байт буфера debug_logf. Размер - по
     // худшему случаю: текст 260 байт и двенадцать чисел по десять цифр.
     char line[384];
-    snprintf(line, sizeof(line),
-             "live: %" PRIu32 " s, samples from flash %" PRIu32 " (repeats %" PRIu32 ", failures %" PRIu32 "), instruments %u, evicted %" PRIu32
-             ", queued %" PRIu32 ", lost events %" PRIu32 "/requests %" PRIu32 ", records retired %" PRIu32 " (waiting %" PRIu32 "), silence %" PRIu32 " ms\n",
-             (now - s_state.started_ms) / 1000u, s_state.loaded, s_state.load_repeats, s_state.load_failed,
-             static_cast<unsigned>(shared::g_song.instrument_count), s_state.live.instruments_evicted(), s_state.stream.pending(), s_state.stream.lost(),
-             s_state.requests.lost(), s_state.retired, s_state.retire_waiting, s_state.stream.silent_ms(now));
+    std::snprintf(line, sizeof(line),
+                  "live: %" PRIu32 " s, samples from flash %" PRIu32 " (repeats %" PRIu32 ", failures %" PRIu32 "), instruments %u, evicted %" PRIu32
+                  ", queued %" PRIu32 ", lost events %" PRIu32 "/requests %" PRIu32 ", records retired %" PRIu32 " (waiting %" PRIu32 "), silence %" PRIu32
+                  " ms\n",
+                  (now - s_state.started_ms) / 1000u, s_state.loaded, s_state.load_repeats, s_state.load_failed,
+                  static_cast<unsigned>(shared::g_song.instrument_count), s_state.live.instruments_evicted(), s_state.stream.pending(), s_state.stream.lost(),
+                  s_state.requests.lost(), s_state.retired, s_state.retire_waiting, s_state.stream.silent_ms(now));
     debug_log(line);
     // Потери раскладки: из-за них нота не звучит или звучит не тем.
-    snprintf(line, sizeof(line),
-             "live: notes without a zone %" PRIu32 ", over the cap %" PRIu32 ", channel steals %" PRIu32 ", note-off without delay %" PRIu32
-             ", vibrato %" PRIu32 ", instrument not placed %" PRIu32 ", layer without a record %" PRIu32 "\n",
-             st.notes_no_zone, st.notes_over_cap, st.steals, st.off_delay_lost, st.vib_lost, s_state.live.instruments_failed(), s_state.live.samples_capped());
+    std::snprintf(line, sizeof(line),
+                  "live: notes without a zone %" PRIu32 ", over the cap %" PRIu32 ", channel steals %" PRIu32 ", note-off without delay %" PRIu32
+                  ", vibrato %" PRIu32 ", instrument not placed %" PRIu32 ", layer without a record %" PRIu32 "\n",
+                  st.notes_no_zone, st.notes_over_cap, st.steals, st.off_delay_lost, st.vib_lost, s_state.live.instruments_failed(),
+                  s_state.live.samples_capped());
     debug_log(line);
     // Байты и ошибки кадра - от самого разборщика: без них "поток идёт, а
     // нот нет" не отличить от сбоя на линии AY и от промаха keymap. Строка
     // своим буфером: в 192 байта debug_logf она не умещается.
-    snprintf(line, sizeof(line),
-             "live: AY tap - peak per drain %" PRIu32 " writes of %u, lost %" PRIu32 "; bytes %" PRIu32 ", framing errors %" PRIu32 ", skipped %" PRIu32
-             "; reverb %s\n",
-             s_state.tap_peak, static_cast<unsigned>(kAyTapRing), ay_tap_lost(), s_state.input.bytes(), s_state.input.framing_errors(),
-             s_state.input.skipped_bytes(), s_state.live.reverb_used() ? "on" : "silent (no CC91)");
+    std::snprintf(line, sizeof(line),
+                  "live: AY tap - peak per drain %" PRIu32 " writes of %u, lost %" PRIu32 "; bytes %" PRIu32 ", framing errors %" PRIu32 ", skipped %" PRIu32
+                  "; reverb %s\n",
+                  s_state.tap_peak, static_cast<unsigned>(kAyTapRing), ay_tap_lost(), s_state.input.bytes(), s_state.input.framing_errors(),
+                  s_state.input.skipped_bytes(), s_state.live.reverb_used() ? "on" : "silent (no CC91)");
     debug_log(line);
     // Живая строка внутри тика рендера: её цена растёт с числом инструментов,
     // а не с числом голосов - в max_tick_us это не видно.
-    snprintf(line, sizeof(line),
-             "live: row - peak %" PRIu32 " us, mean %" PRIu32 " us over %" PRIu32 " rows; keymap %" PRIu32 ", record retires %" PRIu32 " times (keymap %" PRIu32
-             ", records %" PRIu32 ")\n",
-             s_state.row_us_max, s_state.rows ? s_state.row_us_sum / s_state.rows : 0u, s_state.rows, s_state.live.keymap_visits(), s_state.live.retire_calls(),
-             s_state.live.retire_keymap_visits(), s_state.live.retire_record_visits());
+    std::snprintf(line, sizeof(line),
+                  "live: row - peak %" PRIu32 " us, mean %" PRIu32 " us over %" PRIu32 " rows; keymap %" PRIu32 ", record retires %" PRIu32
+                  " times (keymap %" PRIu32 ", records %" PRIu32 ")\n",
+                  s_state.row_us_max, s_state.rows ? s_state.row_us_sum / s_state.rows : 0u, s_state.rows, s_state.live.keymap_visits(),
+                  s_state.live.retire_calls(), s_state.live.retire_keymap_visits(), s_state.live.retire_record_visits());
     debug_log(line);
     debug_logf("live: worst row - instruments %" PRIu32 " (evicted %" PRIu32 "), records %" PRIu32 ", retires %" PRIu32 "; prepare deferred %" PRIu32
                " times\n",
@@ -491,21 +524,22 @@ void session_log_stats() {
     debug_logf("live: missed the lookahead - instruments %" PRIu32 ", records %" PRIu32 "; fresh records retired %" PRIu32 "\n",
                s_state.live.instruments_late(), s_state.live.records_late(), s_state.live.records_retired_recent());
     // Спор двух причин: подготовка отстаёт или чтение не успевает за форой.
-    snprintf(line, sizeof(line),
-             "live: lookahead - note margin min %" PRIu32 " ms, just in time %" PRIu32 " times; read queue peak %" PRIu32 ", request waited max %" PRIu32
-             " rows (mean %" PRIu32 "), read max %" PRIu32 " us (mean %" PRIu32 ")\n",
-             s_state.stream.prefetch_lead_min_ms() == soundsinth::midi_in::LiveStream::kLeadNotMeasured ? 0u : s_state.stream.prefetch_lead_min_ms(),
-             s_state.stream.prefetch_tight(), s_state.read_queue_peak, s_state.read_wait_max_rows,
-             s_state.read_count ? s_state.read_wait_sum_rows / s_state.read_count : 0u, s_state.read_us_max,
-             s_state.read_count ? s_state.read_us_sum / s_state.read_count : 0u);
+    std::snprintf(line, sizeof(line),
+                  "live: lookahead - note margin min %" PRIu32 " ms, just in time %" PRIu32 " times; read queue peak %" PRIu32 ", request waited max %" PRIu32
+                  " rows (mean %" PRIu32 "), read max %" PRIu32 " us (mean %" PRIu32 ")\n",
+                  s_state.stream.prefetch_lead_min_ms() == soundsinth::midi_in::LiveStream::kLeadNotMeasured ? 0u : s_state.stream.prefetch_lead_min_ms(),
+                  s_state.stream.prefetch_tight(), s_state.read_queue_peak, s_state.read_wait_max_rows,
+                  s_state.read_count ? s_state.read_wait_sum_rows / s_state.read_count : 0u, s_state.read_us_max,
+                  s_state.read_count ? s_state.read_us_sum / s_state.read_count : 0u);
     debug_log(line);
     if (s_state.missing_seen != 0) {
         debug_logf("live: silent notes %" PRIu32 " - record requested but not read %" PRIu32 ", read %" PRIu32 ", dropped %" PRIu32 ", not requested %" PRIu32
                    "\n",
                    s_state.missing_seen, s_state.missing_asked, s_state.missing_read, s_state.missing_dropped, s_state.missing_unknown);
     }
-    if (s_state.sysex.drum_changes() != 0 || s_state.sysex.volume_changes() != 0) {
-        debug_logf("live: SysEx - channel drum flag %" PRIu32 ", master volume %" PRIu32 "\n", s_state.sysex.drum_changes(), s_state.sysex.volume_changes());
+    if (s_state.sysex.drum_changes() != 0 || s_state.sysex.volume_changes() != 0 || s_state.sysex.effect_changes() != 0) {
+        debug_logf("live: SysEx - channel drum flag %" PRIu32 ", master volume %" PRIu32 ", effect params %" PRIu32 "\n", s_state.sysex.drum_changes(),
+                   s_state.sysex.volume_changes(), s_state.sysex.effect_changes());
     }
 }
 

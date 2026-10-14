@@ -17,13 +17,14 @@
 
 #include <stdint.h>
 
-#include "firmware_config.h" // SOUNDSINTH_DIVMMC_TRDOS_TRAP
 #include "pico.h"
+
+#include "firmware_config.h" // SOUNDSINTH_DIVMMC_TRDOS_TRAP
 
 namespace bus {
 
 // Окно BDI 0x3D00-0x3DFF: выборка команды оттуда - вход в TR-DOS.
-inline constexpr uint32_t kBdiWindow = 0x3D00;
+inline constexpr uint32_t kBdiWindow = 0x3d00;
 
 // Состояние после сброса: подстановка выключена, страница 0.
 void divmmc_reset();
@@ -48,19 +49,20 @@ bool divmmc_mapped();
 // Номер текущей страницы ОЗУ (0..15).
 uint8_t divmmc_bank();
 
-// Отметить потерянную запись. Вызывает обработчик прерывания при
-// переполнении приёмной очереди: тихая потеря - страница молча
-// разъехалась бы с тем, что записал процессор.
+// Отметить потерянную запись в следе. Вызывает обработчик прерывания при
+// переполнении приёмной очереди. Счёт потерь - wr_fifo_overruns в
+// bus_stats: очередь записей у памяти и портов одна.
+#if SOUNDSINTH_DIVMMC_TRACE
 void divmmc_note_lost(uint32_t drained);
-
-// Сколько записей потеряно с последнего сброса DivMMC. Ненулевое -
-// страница разъехалась с тем, что записал процессор. Печатает
-// print_bus_health.
-uint32_t divmmc_lost_writes();
+#endif
 
 // Сколько раз смена подстановки из порта 0xE3 повторялась: трап
-// переключил её посреди. Печатает log_task в строке divmmc:.
+// переключил её посреди. Печатается в строке divmmc:.
 uint32_t divmmc_remaps();
+
+// Строки divmmc: (подстановка, банк, последняя выборка, повторы E3, пик
+// очереди записей) и bus: late queue full. Зовёт log_task по расписанию.
+void divmmc_log_stats();
 
 // След переключений DivMMC с прошлого запуска (память переживает сброс
 // кнопкой): напечатать и начать заново. Только при загрузке, до запуска

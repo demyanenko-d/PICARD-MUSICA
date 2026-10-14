@@ -7,7 +7,7 @@
 
 #include <cstdint>
 
-#include "pico/platform.h"
+#include "pico.h"
 
 #include "platform/compiler.h"
 

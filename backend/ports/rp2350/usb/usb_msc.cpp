@@ -1,13 +1,16 @@
 // SPDX-License-Identifier: MIT
 #include "usb_msc.h"
 
-#include "tusb.h"
-
 #include <cinttypes>
 
-#include "devices/hal/media.h"
-#include "platform/mono_time.h"
+#include "tusb.h"
+
+#include "platform/compiler.h"
 #include "platform/log.h"
+#include "platform/mono_time.h"
+
+#include "devices/hal/media.h"
+
 #include "usb_host.h"
 
 namespace rp2350::usb {
@@ -56,7 +59,8 @@ bool wait_done() {
     return s_ok;
 }
 
-bool transfer(uint32_t lba, uint32_t count, void* buf, bool write) {
+// Не встраивается: тело около 270 байт флеша, а входов два.
+SOUNDSINTH_NOINLINE bool transfer(uint32_t lba, uint32_t count, void* buf, bool write) {
     if (s_addr == 0 || buf == nullptr || count == 0) return false;
     if (s_busy) {
         ++s_stats.reentry;
@@ -82,12 +86,20 @@ bool transfer(uint32_t lba, uint32_t count, void* buf, bool write) {
         ++s_stats.failed;
         return false;
     }
+    // Команда дольше срока чтения карты SD (100 мс): хост, ждущий токена
+    // по этому сроку, бросит ожидание. Строка на каждую - чтобы сличить с
+    // тем, что видел хост.
+    constexpr uint32_t kSlowCommandUs = 100000;
+    if (spent > kSlowCommandUs) {
+        debug_logf("usb: disk %s slow - sector %" PRIu32 ", count %" PRIu32 ", %" PRIu32 " us\n", write ? "write" : "read", lba, count, spent);
+    }
     if (write) {
         ++s_stats.writes;
         s_stats.write_total_us += spent;
         if (spent > s_stats.write_max_us) s_stats.write_max_us = spent;
     } else {
-        ++s_stats.reads;
+        ++s_stats.read_cmds;
+        s_stats.read_sectors  += count;
         s_stats.read_total_us += spent;
         if (spent > s_stats.read_max_us) s_stats.read_max_us = spent;
     }
@@ -126,10 +138,6 @@ uint8_t msc_drive_count() {
     return s_drives;
 }
 
-bool msc_read(uint32_t lba, uint8_t* dst) {
-    return transfer(lba, 1, dst, false);
-}
-
 bool msc_read_run(uint32_t lba, uint32_t count, uint8_t* dst) {
     return transfer(lba, count, dst, false);
 }
@@ -138,7 +146,13 @@ bool msc_write(uint32_t lba, const uint8_t* src) {
     return transfer(lba, 1, const_cast<uint8_t*>(src), true);
 }
 
-void msc_note_mount(uint8_t dev_addr) {
+// --- Обратные вызовы TinyUSB ---
+//
+// Зовутся из tuh_task, то есть из цикла Core1.
+
+extern "C" {
+
+void tuh_msc_mount_cb(uint8_t dev_addr) {
     ++s_drives;
     if (s_addr != 0) {
         debug_logf("usb: second disk %u not taken, %u is in use\n", dev_addr, s_addr);
@@ -159,7 +173,7 @@ void msc_note_mount(uint8_t dev_addr) {
     debug_logf("usb: disk %u, sectors %" PRIu32 " of %" PRIu32 " bytes\n", dev_addr, s_sectors, block);
 }
 
-void msc_note_umount(uint8_t dev_addr) {
+void tuh_msc_umount_cb(uint8_t dev_addr) {
     if (s_drives > 0) --s_drives;
     if (dev_addr != s_addr) return;
     s_addr    = 0;
@@ -169,16 +183,6 @@ void msc_note_umount(uint8_t dev_addr) {
     debug_logf("usb: disk %u detached\n", dev_addr);
 }
 
-} // namespace rp2350::usb
-
-extern "C" {
-
-void tuh_msc_mount_cb(uint8_t dev_addr) {
-    rp2350::usb::msc_note_mount(dev_addr);
-}
-
-void tuh_msc_umount_cb(uint8_t dev_addr) {
-    rp2350::usb::msc_note_umount(dev_addr);
-}
-
 } // extern "C"
+
+} // namespace rp2350::usb

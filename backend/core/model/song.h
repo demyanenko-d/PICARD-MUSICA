@@ -43,6 +43,7 @@ inline constexpr uint16_t kMinTempo     = 32;
 // 64 бита. У форматов пределы свои (IT - 6-битный номер канала, S3M - 32),
 // не больше этого - static_assert в каждом загрузчике.
 inline constexpr uint8_t kMaxPatternChannels = 64;
+static_assert(kMaxPatternChannels == SOUNDSINTH_MAX_CHANNELS, "channel tables of Song are sized by SOUNDSINTH_MAX_CHANNELS");
 
 // Делений шкалы среза фильтра на октаву (Song::filter_units_per_octave).
 inline constexpr uint8_t kFilterUnitsIt         = 24;
@@ -92,6 +93,8 @@ struct Song {
     // трекерных форматов посылов нет, и при false движок не трогает ни шину,
     // ни ревербератор, выход побайтово прежний.
     bool reverb_enabled = false;
+    // То же для общего хоруса (посыл CC93).
+    bool chorus_enabled = false;
 
     // Нужен ли треку лимитер на выходе шины. Ставит только загрузчик MIDI: у
     // трекерного файла уровень задан файлом и сверен с эталонными плеерами, а
@@ -200,11 +203,11 @@ struct Song {
     // панорамы каналов (usePanningTable). MOD: поля нет, разводка
     // Paula LRRL - квирк kQuirkModHardwarePanning. XM: поля на уровне песни
     // нет, только default_panning сэмпла. Умолчание 32.
-    uint8_t channel_pan[SOUNDSINTH_MAX_VOICES];
+    uint8_t channel_pan[SOUNDSINTH_MAX_CHANNELS];
     // Начальная громкость канала 0..64 (эффекты Mxx/Nxy меняют её дальше).
     // IT: таблица ChnVol[64] заголовка по смещению 0x80. У остальных
     // форматов поля нет, 64.
-    uint8_t channel_volume[SOUNDSINTH_MAX_VOICES];
+    uint8_t channel_volume[SOUNDSINTH_MAX_CHANNELS];
     // Выключенные каналы, бит на канал: IT - бит 0x80 в ChnPan; S3M не из ST3 -
     // бит 0x80 байта канала (у ST3 ячейки такого канала не хранятся). Эффекты
     // канала идут, голос не запускается, как у OpenMPT. 0 - все каналы звучат.

@@ -18,6 +18,7 @@
 #include <cstdint>
 
 #include "devices/hal/media.h"
+#include "devices/sd/sd_owner.h"
 
 namespace devices::storage {
 
@@ -70,18 +71,11 @@ void storage_attach_block_cache(uint8_t* buf, uint32_t bytes, BlockCacheWrite to
 // повторный вызов сбросит кэш и переинициализирует карту.
 bool storage_init();
 
-// Кто спрашивает. Носителей два, и достаются они разным клиентам:
-//
-//   Host  - эмуляторы карты для Z80 (DivMMC, Z-Controller). Им отдаётся
-//           флешка, если она воткнута, иначе карта;
-//   Board - код платы: банк .mid и файловая система. Ему всегда карта.
-//
-// Разделение задано назначением, а не старшинством: банк живёт на карте, а
-// флешка нужна машине как её "SD-карта".
-enum class Client : uint8_t { Host, Board };
-
-bool storage_present(Client who);
-uint32_t storage_sector_count(Client who);
+// Носитель платы: банк .mid и файловая система. Это всегда карта, флешка
+// нужна машине как её "SD-карта" и достаётся только эмуляторам. Ответ - из
+// снимка носителей.
+bool storage_present();
+uint32_t storage_sector_count();
 
 // Записать сектор на носитель платы. Зовётся только механизмом настроек
 // при старте: в работе код платы носитель не меняет.
@@ -96,15 +90,14 @@ bool storage_write_board(uint32_t lba, const uint8_t* src);
 //
 // Носителя нет физически - эмулятор отвечает "карты нет", а не подставляет
 // другой: подмена выглядела бы как чужая файловая система.
-// Номер хозяина - это devices::sd::SdOwner как число: нулевой - DivMMC,
-// первый - Z-Controller. Своей нумерации здесь нет намеренно: она
-// разошлась бы с SdOwner молча.
-inline constexpr uint8_t kEmulatorCount = 2;
+// Хозяин - devices::sd::SdOwner, его значение - индекс носителя. Своей
+// нумерации здесь нет намеренно: она разошлась бы с SdOwner молча.
+inline constexpr uint8_t kEmulatorCount = sd::kSdOwnerCount;
 
-void storage_set_emulator_medium(uint8_t owner, hal::Medium m);
-hal::Medium storage_emulator_medium(uint8_t owner);
-bool storage_emulator_present(uint8_t owner);
-uint32_t storage_emulator_sectors(uint8_t owner);
+void storage_set_emulator_medium(sd::SdOwner owner, hal::Medium m);
+hal::Medium storage_emulator_medium(sd::SdOwner owner);
+bool storage_emulator_present(sd::SdOwner owner);
+uint32_t storage_emulator_sectors(sd::SdOwner owner);
 
 // Поколение снимка носителей: растёт только на событиях. Сверке эмулятора
 // оно заменяет обход всех сторон - одно слово из SRAM вместо опроса
@@ -116,7 +109,12 @@ uint32_t storage_media_generation();
 // защита от повторного входа не даёт начать обмен с носителем, пока идёт
 // этот: иначе вложенное чтение получило бы отказ занятости.
 void storage_prefetch_step();
-bool storage_emulator_read(uint8_t owner, uint32_t lba, uint8_t* dst);
+
+// То же только для носителя платы - из disk_read. Заказ носителя машины
+// остаётся витку sd_spi_task: ожидание флешки обслуживает шину и зовёт
+// sd_spi_task, и обмен с флешкой изнутри disk_read начался бы повторно.
+void storage_prefetch_step_board();
+bool storage_emulator_read(sd::SdOwner owner, uint32_t lba, uint8_t* dst);
 
 // То же для фоновых клиентов (банк .mid): перед обращением к носителю
 // ждущие заказы хоста уходят первыми, хост ждёт не дольше одного сектора.
@@ -124,7 +122,7 @@ bool storage_read_background(uint32_t lba, uint8_t* dst);
 
 // Чем пропустить хост вперёд: функция, забирающая его заказы. Ставит цикл
 // Core1; пока не поставлена (старт на Core0), фоновое чтение - как обычное.
-void storage_set_host_yield(void (*fn)(void*), void* user);
+void storage_set_host_yield(hal::WaitServiceFn fn, void* user);
 
 // Строка здоровья носителя в лог (сбои чтения по причинам). Звать из
 // задачи логгера по расписанию.

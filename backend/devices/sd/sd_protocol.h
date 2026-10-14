@@ -31,8 +31,8 @@ inline constexpr uint8_t kCmd59  = 59; // CRC_ON_OFF
 inline constexpr uint8_t kAcmd41 = 41; // SD_SEND_OP_COND
 
 // Первый байт кадра команды: старшие биты 01, дальше номер.
-inline constexpr uint8_t kCmdStartMask = 0xc0;
-inline constexpr uint8_t kCmdStartBits = 0x40;
+inline constexpr uint8_t kCmdStartMask  = 0xc0;
+inline constexpr uint8_t kCmdStartValue = 0x40;
 
 // --- Размеры ---
 
@@ -54,6 +54,7 @@ inline constexpr uint8_t kR2Error = 0x04;
 // Ответ карты на блок данных записи: младшие пять бит, 0x05 - принят.
 inline constexpr uint8_t kDataRespMask     = 0x1f;
 inline constexpr uint8_t kDataRespAccepted = 0x05;
+inline constexpr uint8_t kDataRespWriteErr = 0x0d; // отклонён: ошибка записи
 // Карта занята (пишет блок): линия в нуле.
 inline constexpr uint8_t kBusyByte = 0x00;
 
@@ -61,15 +62,16 @@ inline constexpr uint8_t kBusyByte = 0x00;
 
 inline constexpr uint8_t kTokenStartBlock = 0xfe; // начало блока (CMD9/10/17/18/24)
 inline constexpr uint8_t kTokenStopTran   = 0xfd; // конец многоблочной записи
+inline constexpr uint8_t kTokenStartMulti = 0xfc; // начало блока записи CMD25
 inline constexpr uint8_t kIdleByte        = 0xff; // линия в простое
 // Токен ошибки данных: 0000xxxx.
 inline constexpr uint8_t kTokenErrorMask = 0xf0;
 
 // --- Биты регистров и аргументов ---
 
-inline constexpr uint32_t kOpCondHcsBits = 0x40000000u; // ACMD41/CMD1: хост понимает SDHC
-inline constexpr uint8_t kOcrPowerUpBits = 0x80;        // старший байт OCR: питание поднято
-inline constexpr uint8_t kOcrCcsBits     = 0x40;        // старший байт OCR: карта SDHC/SDXC
+inline constexpr uint32_t kOpCondHcsBit = 0x40000000u; // ACMD41/CMD1: хост понимает SDHC
+inline constexpr uint8_t kOcrPowerUpBit = 0x80;        // старший байт OCR: питание поднято
+inline constexpr uint8_t kOcrCcsBit     = 0x40;        // старший байт OCR: карта SDHC/SDXC
 // CMD8: напряжение 2.7-3.6 В и проверочный узор; карта возвращает оба в R7.
 inline constexpr uint8_t kIfCondVoltage = 0x01;
 inline constexpr uint8_t kIfCondPattern = 0xaa;

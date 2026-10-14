@@ -159,7 +159,7 @@ void VoiceLink::flush() {
                 break;
             }
             case VoiceOp::SetRoute:
-                mixer.set_route(cmd.slot, cmd.flags != 0, cmd.arg);
+                mixer.set_route(cmd.slot, cmd.flags != 0, cmd.arg, static_cast<uint8_t>(cmd.u.val.x));
                 break;
             case VoiceOp::ListClear:
                 mixer.list_clear();

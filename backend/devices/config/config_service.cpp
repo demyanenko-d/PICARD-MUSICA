@@ -5,11 +5,12 @@
 
 #include "ff.h"
 
-#include "core/config/config_ini.h"
-#include "core/config/config_store.h"
 #include "platform/boot_mode.h"
 #include "platform/config_flash.h"
 #include "platform/mono_time.h"
+
+#include "core/config/config_ini.h"
+#include "core/config/config_store.h"
 
 namespace devices::config {
 namespace {
@@ -90,22 +91,13 @@ BootReport config_boot(soundsinth::memory::TrackScratch& scratch) {
     rep.flash_valid            = cur >= 0;
     if (cur >= 0) soundsinth::config::page_read(cur == 0 ? page0 : page1, s_settings);
 
-    // Запрос прошлой загрузки: конфигуратор не пишет ни флеш, ни карту -
-    // то и другое отнимает шину у живой машины. Он складывает сюда, а
-    // делаем мы, в окне, где это уже безопасно.
+    // Запрос прошлой загрузки. Флеш конфигуратор записал сам, перед
+    // перезагрузкой; карту не трогает - это делаем мы.
     platform::BootRequest req;
     const bool have_request = platform::boot_request_take(req);
     bool changed            = false;
-    if (have_request && req.save) {
-        // Приведение к допустимым - и здесь тоже: запрос едет через
-        // регистры, а записать во флеш непроверенное значит потерять
-        // настройки у того, кто конфигуратор и не открывал.
-        soundsinth::config::settings_clamp(req.settings);
-        s_settings            = req.settings;
-        rep.from_configurator = true;
-        changed               = true;
-    }
-    rep.configurator = have_request && req.configurator;
+    rep.from_configurator   = have_request && req.saved;
+    rep.configurator        = have_request && req.configurator;
 
     // Блок для записи и текст файла - на вершине резидентного пула: своей
     // памяти им не надо, живут они одну загрузку.

@@ -39,6 +39,9 @@ Settings other_than_default() {
     s.mouse_swap_buttons = 1;
     s.disksys_media      = static_cast<uint8_t>(Media::Usb);
     s.auto_volume        = 1;
+    s.joy_8bit           = 1;
+    s.joy_keys[3][1]     = 0x1a; // W вторым к стрелке вверх
+    s.joy_keys[5][0]     = 0x1d; // Z на второй огонь
     return s;
 }
 
@@ -225,20 +228,31 @@ void test_defaults_are_tsconfig() {
     CHECK_EQ(s.live_midi, static_cast<uint8_t>(LiveMidi::Hook));
     CHECK_EQ(s.log, 1);
     CHECK_EQ(s.wifi, 0);
+    // Эти два умолчания - требование. Эффекты General Sound отнимают канал
+    // у модуля, как настоящая карта: игры на это рассчитаны. Панорама MOD
+    // разведена до упора, как на Amiga.
+    CHECK_EQ(s.gs_fx_separate, 0);
+    CHECK_EQ(s.mod_panning, kModPanningMax);
+    // Обмен кнопок мыши жестом выключен: обе кнопки разом нажимают и в
+    // играх.
+    CHECK_EQ(s.mouse_autoswap, 0);
 }
 
 // Блок, записанный прошивкой с меньшим числом полей, обязан остаться
 // годным: иначе каждое дописанное поле стирает настройки у всех.
 void test_store_reads_shorter_payload() {
-    const uint16_t kOldBytes = static_cast<uint16_t>(sizeof(Settings) - 2u);
+    // Три последних поля плюс три байта добивки: хвост, которого в
+    // старом блоке нет.
+    const uint16_t kOldBytes = static_cast<uint16_t>(kLegacyBytes - 6u);
     Settings old             = other_than_default();
     old.log                  = 0; // хвост старого блока: этих байт в нём нет
     old.wifi                 = 1;
+    old.mod_panning          = 50;
 
     uint8_t page[kPageBytes];
     page_build(page, old, 7u);
     // Укоротить payload и пересчитать сумму - ровно то, что записала бы
-    // прошивка без двух последних полей.
+    // прошивка, у которой этих полей ещё не было.
     PageHeader h{};
     std::memcpy(&h, page, sizeof(h));
     h.bytes      = kOldBytes;
@@ -257,6 +271,7 @@ void test_store_reads_shorter_payload() {
     CHECK_EQ(got.mouse_speed, old.mouse_speed);
     CHECK_EQ(got.log, def.log);
     CHECK_EQ(got.wifi, def.wifi);
+    CHECK_EQ(got.mod_panning, def.mod_panning);
 }
 
 // Провод MIDI и Wi-Fi делят единственный вывод приёма.
@@ -301,12 +316,19 @@ void test_usb_host_used_by_every_consumer() {
     gp.usb_gamepad = 1;
     CHECK(usb_host_used(gp));
 
+    // Носитель USB нужен, только если его берёт включённый эмулятор.
     Settings ds      = off;
     ds.disksys_media = static_cast<uint8_t>(Media::Usb);
+    ds.disksys       = static_cast<uint8_t>(DiskSys::None);
+    CHECK(!usb_host_used(ds));
+    ds.disksys = static_cast<uint8_t>(DiskSys::DivMmc);
     CHECK(usb_host_used(ds));
 
     Settings zc          = off;
     zc.zcontroller_media = static_cast<uint8_t>(Media::Usb);
+    zc.zcontroller       = 0;
+    CHECK(!usb_host_used(zc));
+    zc.zcontroller = 1;
     CHECK(usb_host_used(zc));
 
     // Умолчания: раскладка не выбрана, мышь и джойстик выключены, оба
@@ -391,12 +413,12 @@ void test_page_mask_follows_dependencies() {
     off.zcontroller = 0;
     off.usb_mouse   = 0;
     settings_clamp(off);
-    const uint32_t m_off = settings_active_mask(off);
-    CHECK((m_off & (1u << i_media)) == 0);
-    CHECK((m_off & (1u << i_zmed)) == 0);
-    CHECK((m_off & (1u << i_speed)) == 0);
+    const uint64_t m_off = settings_active_mask(off);
+    CHECK((m_off & (uint64_t{1} << i_media)) == 0);
+    CHECK((m_off & (uint64_t{1} << i_zmed)) == 0);
+    CHECK((m_off & (uint64_t{1} << i_speed)) == 0);
     // Сброс при выключенном DivMMC - на выбор пользователя.
-    CHECK((m_off & (1u << i_reset)) != 0);
+    CHECK((m_off & (uint64_t{1} << i_reset)) != 0);
 
     Settings on;
     on.disksys      = static_cast<uint8_t>(DiskSys::DivMmc);
@@ -406,11 +428,11 @@ void test_page_mask_follows_dependencies() {
     settings_clamp(on);
     // DivMMC грузит машину со своей карты и обязан её сбросить.
     CHECK_EQ(on.reset_signal, 1);
-    const uint32_t m_on = settings_active_mask(on);
-    CHECK((m_on & (1u << i_media)) != 0);
-    CHECK((m_on & (1u << i_zmed)) != 0);
-    CHECK((m_on & (1u << i_speed)) != 0);
-    CHECK((m_on & (1u << i_reset)) == 0);
+    const uint64_t m_on = settings_active_mask(on);
+    CHECK((m_on & (uint64_t{1} << i_media)) != 0);
+    CHECK((m_on & (uint64_t{1} << i_zmed)) != 0);
+    CHECK((m_on & (uint64_t{1} << i_speed)) != 0);
+    CHECK((m_on & (uint64_t{1} << i_reset)) == 0);
 }
 
 // Пересчёт после правки переписывает значения и маску, не трогая строк.
@@ -461,6 +483,151 @@ void test_page_saved_snapshot_stays() {
     CHECK_EQ(saved[i_reset], 0);
 }
 
+constexpr uint32_t kExtAt = kPayloadOffset + kLegacyBytes;
+
+// Расширение с нужными записями поверх собранного блока: заголовок с
+// суммой и записи следом.
+void put_records(uint8_t* page, const uint8_t* records, uint16_t bytes) {
+    std::memcpy(page + kExtAt + sizeof(ExtHeader), records, bytes);
+    ExtHeader e{};
+    e.magic = kExtMagic;
+    e.bytes = bytes;
+    e.crc   = soundsinth::util::crc32_update(soundsinth::util::kCrc32Init, page + kExtAt + sizeof(ExtHeader), bytes);
+    std::memcpy(page + kExtAt, &e, sizeof(e));
+}
+
+// Блок прошивки без записей: неподвижная часть читается, поля записей
+// остаются умолчаниями.
+void test_store_block_without_records() {
+    const Settings src = other_than_default();
+    uint8_t page[kPageBytes];
+    page_build(page, src, 3u);
+    std::memset(page + kExtAt, 0xFF, kPageBytes - kExtAt);
+
+    Settings got;
+    CHECK(page_read(page, got));
+    const Settings def;
+    CHECK(std::memcmp(&got, &src, kLegacyBytes) == 0);
+    CHECK_EQ(got.joy_8bit, def.joy_8bit);
+    CHECK(std::memcmp(got.joy_keys, def.joy_keys, sizeof(def.joy_keys)) == 0);
+}
+
+// Незнакомая запись пропускается, короткая ложится началом поверх
+// умолчаний.
+void test_store_records_unknown_and_short() {
+    uint8_t page[kPageBytes];
+    page_build(page, Settings{}, 3u);
+    const uint8_t records[] = {
+        99, 0, 3, 0, 0xAA, 0xBB, 0xCC, // номер 99, три байта
+        2,  0, 2, 0, 0x07, 0x09,       // клавиши джойстика: только первая строка
+        1,  0, 1, 0, 1,                // JOY_8BIT
+    };
+    put_records(page, records, sizeof(records));
+
+    Settings got;
+    CHECK(page_read(page, got));
+    const Settings def;
+    CHECK_EQ(got.joy_keys[0][0], 0x07);
+    CHECK_EQ(got.joy_keys[0][1], 0x09);
+    CHECK(std::memcmp(got.joy_keys[1], def.joy_keys[1], sizeof(def.joy_keys) - sizeof(def.joy_keys[0])) == 0);
+    CHECK_EQ(got.joy_8bit, 1);
+}
+
+void test_store_records_bad_crc_keeps_fixed_part() {
+    const Settings src = other_than_default();
+    uint8_t page[kPageBytes];
+    page_build(page, src, 3u);
+    page[kExtAt + sizeof(ExtHeader) + 4u] ^= 0x5Au;
+
+    Settings got;
+    CHECK(page_read(page, got));
+    CHECK(std::memcmp(&got, &src, kLegacyBytes) == 0);
+    CHECK_EQ(got.joy_8bit, Settings{}.joy_8bit);
+}
+
+void test_ini_joy_keys() {
+    const char text[] = "JOY_UP = w, kp_8\n"
+                        "JOY_FIRE=ESC\n"
+                        "JOY_FIRE2=A,B,C\n"
+                        "JOY_LEFT=NONE\n"
+                        "JOY_FIRE3=F1\n";
+    Settings s;
+    const IniResult r = ini_parse(text, sizeof(text) - 1u, s);
+    CHECK_EQ(r.applied, 3u);
+    CHECK_EQ(r.bad, 2u);
+    CHECK_EQ(s.joy_keys[3][0], 0x1a);
+    CHECK_EQ(s.joy_keys[3][1], 0x60);
+    CHECK_EQ(s.joy_keys[1][0], 0);
+    CHECK_EQ(s.joy_keys[1][1], 0);
+    CHECK_EQ(s.joy_keys[6][0], 0x3a);
+    // Esc и три клавиши на действие - отказ, строка прежняя.
+    const Settings def;
+    CHECK_EQ(s.joy_keys[4][0], def.joy_keys[4][0]);
+    CHECK_EQ(s.joy_keys[5][0], def.joy_keys[5][0]);
+}
+
+// Esc занят отменой: числом из блока или со страницы он не проходит.
+void test_clamp_joy_keys() {
+    Settings s;
+    s.joy_keys[0][0] = kKeyEsc;
+    s.joy_keys[0][1] = 0x02;
+    s.joy_keys[1][0] = 0xE0;
+    s.joy_keys[2][1] = 0x63;
+    settings_clamp(s);
+    CHECK_EQ(s.joy_keys[0][0], 0);
+    CHECK_EQ(s.joy_keys[0][1], 0);
+    CHECK_EQ(s.joy_keys[1][0], 0);
+    CHECK_EQ(s.joy_keys[2][1], 0x63);
+}
+
+// Привязки на странице: поля вида "клавиша" за ключами таблицы, по клавише действия
+// на поле. Кнопки 2..4 правятся только при восьмиразрядном Kempston, все
+// привязки - только при включённой клавиатуре.
+void test_page_joy_key_fields() {
+    Settings s;
+    s.keyboard_layout = static_cast<uint8_t>(Layout::Picard);
+    s.joy_keys[3][1]  = 0x1a; // W вторым к вверх
+    uint8_t page[kConfigPageBytes];
+    CHECK(config_page_build(s, page, sizeof(page)) != 0);
+    const auto* h = reinterpret_cast<const ConfigPageHeader*>(page);
+    CHECK_EQ(h->field_count, 40u);
+
+    const uint32_t first = h->field_count - kJoyActions * kJoyKeysPerAction;
+    ConfigPageField f{};
+    std::memcpy(&f, page + h->desc_offset + (first + 7u) * kConfigFieldBytes, sizeof(f));
+    CHECK_EQ(f.kind, static_cast<uint8_t>(PageKind::Key));
+    CHECK(f.choices != 0);
+    CHECK_EQ(std::strcmp(reinterpret_cast<const char*>(page + f.name), "JOY_UP 2"), 0);
+    CHECK_EQ(page[h->values_offset + first + 7u], 0x1a);
+
+    // Правка с экрана: Q на второй огонь, Esc на огонь - Esc отсекается.
+    page[h->values_offset + first + 10u] = 0x14;
+    page[h->values_offset + first + 8u]  = kKeyEsc;
+    uint8_t sum                          = 0;
+    for (uint32_t i = 0; i < h->field_count; ++i) {
+        sum = static_cast<uint8_t>(sum + page[h->values_offset + i]);
+    }
+    page[h->values_offset + h->field_count] = sum;
+    Settings got                            = s;
+    CHECK(config_page_apply(page, sizeof(page), got));
+    CHECK_EQ(got.joy_keys[5][0], 0x14);
+    CHECK_EQ(got.joy_keys[4][0], 0);
+
+    const uint64_t narrow = settings_active_mask(s);
+    CHECK((narrow & (uint64_t{1} << (first + 8u))) != 0);  // огонь
+    CHECK((narrow & (uint64_t{1} << (first + 10u))) == 0); // второй огонь
+    s.joy_8bit = 1;
+    CHECK((settings_active_mask(s) & (uint64_t{1} << (first + 10u))) != 0);
+    s.keyboard_layout = static_cast<uint8_t>(Layout::None);
+    CHECK((settings_active_mask(s) & (uint64_t{1} << first)) == 0);
+
+    // Ячейка захвата внутри страницы и после маски.
+    uint8_t* cell = config_page_capture(page, sizeof(page));
+    CHECK(cell != nullptr);
+    CHECK_EQ(cell[0], kCaptureIdle);
+    CHECK_EQ(static_cast<uint32_t>(cell - page), static_cast<uint32_t>(h->mask_offset + kConfigMaskBytes));
+}
+
 } // namespace
 
 void run_config_tests() {
@@ -484,6 +651,12 @@ void run_config_tests() {
     test_page_mask_follows_dependencies();
     test_page_refresh_keeps_descriptors();
     test_page_saved_snapshot_stays();
+    test_store_block_without_records();
+    test_store_records_unknown_and_short();
+    test_store_records_bad_crc_keeps_fixed_part();
+    test_ini_joy_keys();
+    test_clamp_joy_keys();
+    test_page_joy_key_fields();
 
     char text[kIniMaxBytes];
     const uint32_t len = ini_render(Settings{}, text, sizeof(text));

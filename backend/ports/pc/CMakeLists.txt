@@ -101,6 +101,7 @@ add_library(platform_pc STATIC
     usb_host_stub.cpp
     config_flash_stub.cpp
     boot_mode_stub.cpp
+    log_stdout.cpp
 )
 
 target_include_directories(platform_pc PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/..)

@@ -6,15 +6,16 @@
 #include "hardware/gpio.h"
 #include "hardware/irq.h"
 #include "hardware/pio.h"
-#include "pico/platform.h"
+#include "pico.h"
 #include "pico/time.h"
 
 #include "FreeRTOS.h" // configMAX_SYSCALL_INTERRUPT_PRIORITY
 
+#include "player/shared_state.h"
+
 #include "audio_pins.h"
 #include "hw_config.h"
 #include "i2s_pio.pio.h"
-#include "player/shared_state.h"
 
 namespace rp2350::audio {
 

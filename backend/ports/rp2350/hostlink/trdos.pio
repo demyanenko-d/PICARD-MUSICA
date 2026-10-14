@@ -36,6 +36,11 @@
 ;
 ; Y заряжен старшим байтом окна (0x3D) при запуске: в set он не влезает.
 ;
+; Окно включает TR-DOS только при ПЗУ 48: бит 4 порта 0x7FFD. Бит держит
+; флаг IRQ kTrdosIrqRom48 этого блока, читается он mov x, status. Флаг
+; ставит и снимает обработчик записей в порты на ядре, гасит сторож сброса
+; машины. Выход по 0x4000 и выше - при любом ПЗУ.
+;
 ; Уровень линии автомат помнит сам - счётчиком команд, двумя копиями
 ; цикла. Свободного регистра под него нет: X занят разбором адреса, Y -
 ; окном. Каждая копия смотрит только свой переход и кладёт слово только на
@@ -52,23 +57,22 @@
 ; единицах настоящих смен.
 .program trdos_detect
 
-.wrap_target
+released_end:
+    wait 1 gpio Z80_M1_N_GPIO   ; конец выборки: иначе она разобралась бы дважды
 public released:
     wait 0 gpio Z80_M1_N_GPIO   ; идёт выборка команды
     wait 0 gpio Z80_RD_N_GPIO   ; адрес установился
     jmp pin, released_end       ; M1 уже снят: не выборка
+    mov x, status               ; флаг ПЗУ 48: все единицы или ноль
+    jmp !x, released_end        ; ПЗУ 128 - окно 0x3Dxx не TR-DOS
     mov osr, pins
     out null, 8                 ; A0..A7: окно задано старшим байтом
     out x, 8                    ; X = A8..A15
     jmp x != y, released_end    ; не окно - уровень прежний
     mov isr, null               ; окно - включить DOS_N
     push noblock                ; полная очередь теряет отметку, а не встаёт
-    wait 1 gpio Z80_M1_N_GPIO   ; конец выборки: иначе она разобралась бы дважды
-    jmp asserted
-released_end:
     wait 1 gpio Z80_M1_N_GPIO
-    jmp released
-
+.wrap_target
 public asserted:
     wait 0 gpio Z80_M1_N_GPIO
     wait 0 gpio Z80_RD_N_GPIO
@@ -77,14 +81,12 @@ public asserted:
     out null, 14                ; до A14
     out x, 2                    ; X = A14, A15
     jmp !x, asserted_end        ; оба нуля - ниже 0x4000, уровень прежний
-    set x, 1                    ; выше - снять DOS_N
-    mov isr, x
+    mov isr, ~null              ; выше - снять DOS_N, при любом ПЗУ
     push noblock
     wait 1 gpio Z80_M1_N_GPIO
     jmp released
 asserted_end:
     wait 1 gpio Z80_M1_N_GPIO
-    jmp asserted
 .wrap
 
 ; ---
@@ -104,10 +106,11 @@ asserted_end:
 // window_hi - старший байт окна включения (0x3D). Кладётся в Y: в set
 // помещаются только пять разрядов.
 static inline void trdos_detect_program_init(PIO pio, uint sm, uint offset, uint pin_a0, uint pin_m1_n,
-                                             uint8_t window_hi) {
+                                             uint8_t window_hi, uint irq_rom48) {
     pio_sm_config c = trdos_detect_program_get_default_config(offset);
     sm_config_set_in_pins(&c, pin_a0);
     sm_config_set_jmp_pin(&c, pin_m1_n);
+    sm_config_set_mov_status(&c, STATUS_IRQ_SET, irq_rom48);
     sm_config_set_out_shift(&c, /*shift_right=*/true, /*autopull=*/false, 32);
     sm_config_set_in_shift(&c, /*shift_right=*/false, /*autopush=*/false, 32);
     sm_config_set_clkdiv(&c, 1.0f);

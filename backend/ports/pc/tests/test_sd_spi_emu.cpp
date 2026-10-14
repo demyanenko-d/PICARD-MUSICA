@@ -39,9 +39,35 @@ devices::hal::PortWriteFn g_port_wr[256];
 devices::hal::PortReadDoneFn g_port_rd_done[256];
 } // namespace
 
+// Запись в порт Z80 из другого файла тестов: хуки ставит то устройство,
+// которое их регистрирует, а таблица хуков живёт здесь.
+void test_z80_port_write(uint8_t port, uint8_t value);
+void test_z80_port_write(uint8_t port, uint8_t value) {
+    if (g_port_wr[port] != nullptr) g_port_wr[port](port, value);
+}
+bool test_z80_port_has_writer(uint8_t port);
+bool test_z80_port_has_writer(uint8_t port) {
+    return g_port_wr[port] != nullptr;
+}
+// Что плата отдаёт на чтение этого порта. 0xFF - не отвечает никто.
+uint8_t test_z80_port_read_value(uint8_t port);
+uint8_t test_z80_port_read_value(uint8_t port) {
+    return g_port_rd[port];
+}
+
 // Порты Z80 теста (devices/hal/z80_ports.h): таблица ответов и обработчики
 // в обычных массивах, тест дёргает их сам.
+// Вытеснение между обменом и записью ячейки: крюк зовётся до записи,
+// одноразовый, только для своего порта.
+void (*g_port_set_hook)()  = nullptr;
+uint8_t g_port_set_hook_on = 0;
+
 void devices::hal::z80_port_set_read(uint8_t port, uint8_t value) {
+    if (g_port_set_hook != nullptr && port == g_port_set_hook_on) {
+        void (*hook)()  = g_port_set_hook;
+        g_port_set_hook = nullptr;
+        hook();
+    }
     g_port_rd[port] = value;
     ++g_port_rd_writes[port];
 }
@@ -73,11 +99,13 @@ constexpr uint32_t kDiskSectors = 4096;
 uint8_t g_disk[kDiskSectors][512];
 uint8_t g_usb_disk[kDiskSectors][512];
 uint32_t g_card_sectors   = kDiskSectors; // ёмкость пустышки: тест меняет её на ходу
+uint32_t g_usb_sectors    = kDiskSectors; // своя у флешки, как у отдельного носителя
 bool g_usb_present        = false;
 uint32_t g_writes         = 0;
 uint32_t g_reads          = 0;           // обращений к носителю: ими видно, заказан ли сектор вовсе
 uint32_t g_fail_read_lba  = 0xFFFFFFFFu; // носитель не отдаёт этот сектор
 uint32_t g_fail_write_lba = 0xFFFFFFFFu; // носитель не принимает этот сектор
+bool g_fail_write_partial = false;       // и при этом успевает записать половину
 bool g_task_enabled       = true;
 // Обмены хоста посреди чтения сектора g_hook_lba: обработчик прерывания
 // вклинивается в цикл Core1, пока тот читает носитель.
@@ -91,19 +119,20 @@ namespace devices::hal {
 bool media_init() {
     return true;
 }
-bool media_present(Medium m) {
+bool driver_present(Medium m) {
     return m == Medium::Card || g_usb_present;
 }
-uint32_t media_sector_count(Medium) {
-    return g_card_sectors;
+uint32_t driver_sector_count(Medium m) {
+    return m == Medium::Usb ? g_usb_sectors : g_card_sectors;
 }
 
 // Пачкой - циклом: у пустышек выгоды нет, а путь блочного упреждения
-// проверить надо, и проверяется он на флешке (media_run_sectors ниже).
+// проверить надо. Ширина пачки у карты - как на плате (16), у флешки - 8:
+// так исполняются обе ширины блока.
 bool media_read_run(Medium m, uint32_t lba, uint32_t count, uint8_t* dst);
 
-uint32_t media_run_sectors(Medium) {
-    return 8u;
+uint32_t media_run_sectors(Medium m) {
+    return m == Medium::Usb ? 8u : 16u;
 }
 
 // Снимок носителей: в тесте он не кэш, а зеркало пустышек выше -
@@ -118,8 +147,8 @@ uint32_t g_media_generation = 0;
 
 void media_state_publish(Medium m) {
     MediaState& st         = media_state_slot(m);
-    const bool present     = media_present(m);
-    const uint32_t sectors = media_sector_count(m);
+    const bool present     = driver_present(m);
+    const uint32_t sectors = driver_sector_count(m);
     if (st.present == present && st.sectors == sectors) return;
     st.present = present;
     st.sectors = sectors;
@@ -161,7 +190,12 @@ bool media_read_run(Medium m, uint32_t lba, uint32_t count, uint8_t* dst) {
 }
 
 bool media_write(Medium m, uint32_t lba, const uint8_t* src) {
-    if (lba >= kDiskSectors || lba == g_fail_write_lba) return false;
+    if (lba >= kDiskSectors) return false;
+    if (lba == g_fail_write_lba) {
+        // Оборванная запись: половина сектора легла, носитель ответил отказом.
+        if (g_fail_write_partial) std::memcpy((m == Medium::Usb ? g_usb_disk : g_disk)[lba], src, 256);
+        return false;
+    }
     std::memcpy((m == Medium::Usb ? g_usb_disk : g_disk)[lba], src, 512);
     ++g_writes;
     return true;
@@ -206,19 +240,20 @@ void fill_disk() {
         for (uint32_t i = 0; i < 512; ++i)
             g_disk[s][i] = static_cast<uint8_t>(s * 7u + i);
     }
-    g_writes         = 0;
-    g_fail_read_lba  = 0xFFFFFFFFu;
-    g_fail_write_lba = 0xFFFFFFFFu;
-    g_task_enabled   = true;
-    g_read_hook      = nullptr;
-    g_hook_lba       = 0xFFFFFFFFu;
-    g_who            = SdOwner::ZController;
+    g_writes             = 0;
+    g_fail_read_lba      = 0xFFFFFFFFu;
+    g_fail_write_lba     = 0xFFFFFFFFu;
+    g_fail_write_partial = false;
+    g_task_enabled       = true;
+    g_read_hook          = nullptr;
+    g_hook_lba           = 0xFFFFFFFFu;
+    g_who                = SdOwner::ZController;
     for (uint32_t s2 = 0; s2 < kDiskSectors; ++s2)
         std::memset(g_usb_disk[s2], 0, 512);
     g_usb_present  = false;
     g_card_sectors = kDiskSectors;
     for (uint8_t o = 0; o < devices::storage::kEmulatorCount; ++o) {
-        devices::storage::storage_set_emulator_medium(o, devices::hal::Medium::Card);
+        devices::storage::storage_set_emulator_medium(static_cast<SdOwner>(o), devices::hal::Medium::Card);
     }
     // Буфер блочного кэша: на плате он в PSRAM, здесь - статический. Без
     // него блочного пути нет вовсе, и проверки шли бы мимо него.
@@ -437,6 +472,7 @@ void test_write_during_prefetch() {
 void test_late_sector() {
     std::printf("test_sd_emu_late_sector\n");
     fresh_card();
+    const uint32_t stuck = devices::sd::sd_spi_stuck_count();
     sel(true);
     g_task_enabled = false;
     CHECK_EQ(cmd(17, 700), 0x00);
@@ -457,6 +493,18 @@ void test_late_sector() {
     std::printf("  token 0x%02X after %u polls\n", t, polls);
     CHECK_EQ(t, 0xFE);
     CHECK(std::memcmp(buf, g_disk[700], 512) == 0);
+    // Поздний сектор - ожидание, а не застревание.
+    CHECK_EQ(devices::sd::sd_spi_stuck_count(), stuck);
+
+    // Настоящее застревание: после CMD24 хост шлёт байты без токена.
+    sel(true);
+    CHECK_EQ(cmd(24, 701), 0x00);
+    for (int i = 0; i < 5000; ++i)
+        x(0x00);
+    x(0xFD);
+    sel(false);
+    x(0xFF);
+    CHECK_EQ(devices::sd::sd_spi_stuck_count(), stuck + 1u);
 }
 
 // (г) Носитель не отдал сектор: хост получает 0xFF до своего предела,
@@ -560,6 +608,303 @@ void test_split_cards_and_single_writer() {
     // проходит как обычно.
     CHECK_EQ(cmd(13, 0), 0x00);
     sel(false);
+}
+
+// CMD25: токен 0xfc на каждый блок, 0xfd в конце. Байт 0xfe внутри данных -
+// просто данные. Возвращает ответ на данные блока (младшие пять бит).
+uint8_t multi_block(const uint8_t* data) {
+    x(0xFF);
+    x(0xFC);
+    for (int i = 0; i < 512; ++i)
+        x(data[i]);
+    const uint16_t c = devices::sd::crc16(data, 512);
+    x(static_cast<uint8_t>(c >> 8));
+    x(static_cast<uint8_t>(c));
+    const uint8_t resp = static_cast<uint8_t>(x(0xFF) & 0x1F);
+    for (int busy = 0; x(0xFF) == 0x00 && busy < 100000; ++busy) {
+    }
+    return resp;
+}
+
+void test_multi_block_write() {
+    std::printf("test_sd_emu_multi_block_write\n");
+    fresh_card();
+    uint8_t data[3][512];
+    for (uint32_t k = 0; k < 3; ++k) {
+        for (uint32_t i = 0; i < 512; ++i)
+            data[k][i] = static_cast<uint8_t>(0x30u + k * 0x11u + i);
+        data[k][100] = 0xFE; // байт токена CMD24 внутри данных
+    }
+    sel(true);
+    CHECK_EQ(cmd(25, 200), 0x00);
+    for (uint32_t k = 0; k < 3; ++k)
+        CHECK_EQ(multi_block(data[k]), 0x05);
+    x(0xFD);
+    for (int busy = 0; x(0xFF) == 0x00 && busy < 100000; ++busy) {
+    }
+    sel(false);
+    x(0xFF);
+    for (uint32_t k = 0; k < 3; ++k)
+        CHECK(std::memcmp(g_disk[200 + k], data[k], 512) == 0);
+    CHECK_EQ(g_writes, 3u);
+
+    // Второй блок за концом носителя: ответ на данные - ошибка записи,
+    // носитель не тронут, CMD13 отдаёт ошибку во втором байте.
+    const uint32_t last = kDiskSectors - 1;
+    sel(true);
+    CHECK_EQ(cmd(25, last), 0x00);
+    CHECK_EQ(multi_block(data[0]), 0x05);
+    CHECK_EQ(multi_block(data[1]), 0x0D);
+    x(0xFD);
+    for (int busy = 0; x(0xFF) == 0x00 && busy < 100000; ++busy) {
+    }
+    CHECK_EQ(cmd(13, 0), 0x00);
+    CHECK_EQ(x(0xFF), devices::sd::kR2Error);
+    sel(false);
+    x(0xFF);
+    CHECK(std::memcmp(g_disk[last], data[0], 512) == 0);
+    CHECK_EQ(g_writes, 4u);
+}
+
+// Замок писателя - по носителю: стороны на разных носителях пишут обе, на
+// одном - вторая получает 0x40. Карту Z-Controller уже взял прошлыми
+// тестами, замок держится до перезагрузки, поэтому DivMMC здесь на флешке.
+void test_writer_lock_per_medium() {
+    std::printf("test_sd_emu_writer_lock_per_medium\n");
+    fill_disk();
+    g_usb_present = true;
+    const auto dm = SdOwner::DivMmc;
+    const auto zc = SdOwner::ZController;
+    devices::storage::storage_set_emulator_medium(dm, devices::hal::Medium::Usb);
+    devices::storage::storage_set_emulator_medium(zc, devices::hal::Medium::Card);
+    devices::storage::storage_init();
+    devices::sd::sd_spi_emu_init();
+    g_who = SdOwner::DivMmc;
+    CHECK(init_card());
+    CHECK_EQ(write_block(50, 0x11), 0x05);
+    g_who = SdOwner::ZController;
+    CHECK(init_card());
+    CHECK_EQ(write_block(51, 0x22), 0x05);
+    CHECK_EQ(g_usb_disk[50][0], 0x11u);
+    CHECK_EQ(g_disk[51][0], 0x22u);
+    CHECK(g_disk[50][0] != 0x11);
+    g_usb_present = false;
+    g_who         = SdOwner::ZController;
+}
+
+// Блок карты - 16 секторов, как на плате: промах отдаёт сектор и заказывает
+// блок, чтение со второй половины блока заказывает следующий.
+void test_card_block_run16() {
+    std::printf("test_sd_emu_card_block_run16\n");
+    fill_disk();
+    const auto dm = SdOwner::DivMmc;
+    uint8_t out[512];
+    uint32_t r0 = g_reads;
+    CHECK(devices::storage::storage_emulator_read(dm, 33, out)); // промах, заказ 32..47
+    CHECK_EQ(g_reads - r0, 1u);
+    CHECK(std::memcmp(out, g_disk[33], 512) == 0);
+    r0 = g_reads;
+    devices::storage::storage_prefetch_step();
+    CHECK_EQ(g_reads - r0, 16u);
+    r0 = g_reads;
+    CHECK(devices::storage::storage_emulator_read(dm, 40, out)); // попадание, вторая половина
+    CHECK_EQ(g_reads - r0, 0u);
+    CHECK(std::memcmp(out, g_disk[40], 512) == 0);
+    devices::storage::storage_prefetch_step(); // следующий блок 48..63
+    r0 = g_reads;
+    CHECK(devices::storage::storage_emulator_read(dm, 50, out));
+    CHECK_EQ(g_reads - r0, 0u);
+    CHECK(std::memcmp(out, g_disk[50], 512) == 0);
+}
+
+// Запись оборвалась: что на носителе - неизвестно, блок с сектором
+// сбрасывается, и следующее чтение идёт к носителю, а не отдаёт прежнее.
+void test_failed_write_drops_block() {
+    std::printf("test_sd_emu_failed_write_drops_block\n");
+    fill_disk();
+    const auto dm = SdOwner::DivMmc;
+    uint8_t out[512];
+    CHECK(devices::storage::storage_emulator_read(dm, 300, out));
+    devices::storage::storage_prefetch_step(); // блок 288..303 в кэше
+    uint8_t blk[512];
+    std::memset(blk, 0x3C, sizeof(blk));
+    g_fail_write_lba     = 300;
+    g_fail_write_partial = true;
+    CHECK(!devices::storage::storage_write(dm, 300, blk));
+    g_fail_write_lba     = 0xFFFFFFFFu;
+    g_fail_write_partial = false;
+    CHECK(devices::storage::storage_emulator_read(dm, 300, out));
+    CHECK(std::memcmp(out, g_disk[300], 512) == 0);
+    CHECK_EQ(out[0], 0x3Cu);
+
+    // То же через путь платы (FatFs): запись платы и фоновое чтение.
+    CHECK(devices::storage::storage_read_background(310, out));
+    devices::storage::storage_prefetch_step();
+    g_fail_write_lba     = 310;
+    g_fail_write_partial = true;
+    CHECK(!devices::storage::storage_write_board(310, blk));
+    g_fail_write_lba     = 0xFFFFFFFFu;
+    g_fail_write_partial = false;
+    CHECK(devices::storage::storage_read_background(310, out));
+    CHECK(std::memcmp(out, g_disk[310], 512) == 0);
+}
+
+// Без блочного буфера (на плате - "block cache NO ROOM") работает
+// построчный кэш: повтор сектора не идёт к носителю, запись обновляет
+// строку, фоновое чтение в кэш не кладётся.
+void test_line_cache_without_blocks() {
+    std::printf("test_sd_emu_line_cache_without_blocks\n");
+    fill_disk();
+    devices::storage::storage_attach_block_cache(nullptr, 0, nullptr);
+    const auto dm = SdOwner::DivMmc;
+    uint8_t out[512];
+    uint32_t r0 = g_reads;
+    CHECK(devices::storage::storage_emulator_read(dm, 5, out));
+    CHECK(devices::storage::storage_emulator_read(dm, 5, out));
+    CHECK_EQ(g_reads - r0, 1u);
+    uint8_t blk[512];
+    std::memset(blk, 0x77, sizeof(blk));
+    CHECK(devices::storage::storage_write(dm, 5, blk));
+    r0 = g_reads;
+    CHECK(devices::storage::storage_emulator_read(dm, 5, out));
+    CHECK_EQ(g_reads - r0, 0u);
+    CHECK_EQ(out[0], 0x77u);
+    r0 = g_reads;
+    CHECK(devices::storage::storage_read_background(6, out));
+    CHECK(devices::storage::storage_read_background(6, out));
+    CHECK_EQ(g_reads - r0, 2u);
+    fill_disk(); // блочный буфер обратно
+}
+
+// Фоновый клиент на блочном пути пропускает хост перед каждым обращением к
+// носителю: перед одиночным чтением промаха и перед наполнением блока по
+// своему заказу. Попадание носитель не трогает - пропуска нет.
+uint32_t g_yields = 0;
+void count_yield(void*) {
+    ++g_yields;
+}
+
+void test_background_yields_on_block_path() {
+    std::printf("test_sd_emu_background_yields_on_block_path\n");
+    fill_disk();
+    devices::storage::storage_set_host_yield(&count_yield, nullptr);
+    g_yields = 0;
+    uint8_t out[512];
+    CHECK(devices::storage::storage_read_background(65, out)); // промах
+    CHECK_EQ(g_yields, 1u);
+    devices::storage::storage_prefetch_step_board(); // блок 64..79 по фоновому заказу
+    CHECK_EQ(g_yields, 2u);
+    CHECK(devices::storage::storage_read_background(66, out)); // попадание
+    CHECK_EQ(g_yields, 2u);
+    // Заказ эмулятора наполняется без пропуска: хост здесь сам заказчик.
+    const auto dm = SdOwner::DivMmc;
+    CHECK(devices::storage::storage_emulator_read(dm, 129, out));
+    devices::storage::storage_prefetch_step();
+    CHECK_EQ(g_yields, 2u);
+    devices::storage::storage_set_host_yield(nullptr, nullptr);
+}
+
+// Носитель не принял сектор записи: отказ виден в строке sd: у стороны.
+void test_write_failure_is_logged() {
+    std::printf("test_sd_emu_write_failure_is_logged\n");
+    fresh_card();
+    g_fail_write_lba = 600;
+    write_block(600, 0x44);
+    g_fail_write_lba = 0xFFFFFFFFu;
+    g_test_log[0]    = 0;
+    devices::sd::sd_spi_log_stats();
+    const char* z = std::strstr(g_test_log, "zctrl cmd=");
+    CHECK(z != nullptr);
+    const char* w = z ? std::strstr(z, "wfail=") : nullptr;
+    CHECK(w != nullptr && std::strtoul(w + 6, nullptr, 10) >= 1ul);
+}
+
+// Флешку вынули и вставили другую: блоки и заказ упреждения прежней
+// флешки не отдаются.
+void test_media_swap_drops_blocks() {
+    std::printf("test_sd_emu_media_swap_drops_blocks\n");
+    fill_disk();
+    const auto zc = SdOwner::ZController;
+    devices::storage::storage_set_emulator_medium(zc, devices::hal::Medium::Usb);
+    g_usb_present = true;
+    for (uint32_t s = 0; s < 16; ++s)
+        std::memset(g_usb_disk[s], 0x11, 512);
+    uint8_t out[512];
+    CHECK(devices::storage::storage_emulator_read(zc, 9, out)); // промах, заказ блока 8..15
+    devices::storage::storage_prefetch_step();
+    const uint32_t reads = g_reads;
+    CHECK(devices::storage::storage_emulator_read(zc, 10, out)); // попадание в блок
+    CHECK_EQ(g_reads, reads);
+    CHECK_EQ(out[0], 0x11u);
+
+    g_usb_present = false;
+    CHECK(!devices::storage::storage_emulator_read(zc, 10, out));
+    for (uint32_t s = 0; s < 16; ++s)
+        std::memset(g_usb_disk[s], 0x22, 512);
+    g_usb_present = true;
+    CHECK(devices::storage::storage_emulator_read(zc, 10, out));
+    CHECK_EQ(out[0], 0x22u);
+    g_usb_present = false;
+    devices::storage::storage_set_emulator_medium(zc, devices::hal::Medium::Card);
+}
+
+// Первый байт сектора, прочитанного CMD17; -1 - чтение не прошло.
+int read_first_byte(uint32_t lba) {
+    sel(true);
+    if (cmd(17, lba) != 0) {
+        sel(false);
+        return -1;
+    }
+    uint8_t t = 0xFF;
+    for (int polls = 0; polls < 0x4000 && t == 0xFF; ++polls)
+        t = x(0xFF);
+    if (t != 0xFE) {
+        sel(false);
+        return -1;
+    }
+    const uint8_t first = x(0xFF);
+    for (int i = 1; i < 512 + 2; ++i)
+        x(0xFF);
+    sel(false);
+    x(0xFF);
+    return first;
+}
+
+// Флешку сменили, пока её сектор лежал в слоте эмулятора: после новой
+// инициализации хост читает сектор новой флешки, а не слот прежней.
+void test_media_swap_drops_slots() {
+    std::printf("test_sd_emu_media_swap_drops_slots\n");
+    fill_disk();
+    const auto zc = SdOwner::ZController;
+    devices::storage::storage_set_emulator_medium(zc, devices::hal::Medium::Usb);
+    g_usb_present = true;
+    for (uint32_t s = 0; s < 32; ++s)
+        std::memset(g_usb_disk[s], 0x11, 512);
+    devices::storage::storage_init();
+    devices::sd::sd_spi_emu_init();
+    g_who = zc;
+    CHECK(init_card());
+    CHECK_EQ(read_first_byte(10), 0x11);
+    const uint32_t reads = g_reads;
+    CHECK_EQ(read_first_byte(10), 0x11); // из слота, носитель не тронут
+    CHECK_EQ(g_reads, reads);
+
+    // Смену эмулятор принимает на такте выбранной карты.
+    sel(true);
+    g_usb_present = false;
+    for (int i = 0; i < 4; ++i)
+        x(0xFF);
+    for (uint32_t s = 0; s < 32; ++s)
+        std::memset(g_usb_disk[s], 0x22, 512);
+    g_usb_present = true;
+    for (int i = 0; i < 4; ++i)
+        x(0xFF);
+    sel(false);
+    CHECK(init_card());
+    CHECK_EQ(read_first_byte(10), 0x22);
+
+    g_usb_present = false;
+    devices::storage::storage_set_emulator_medium(zc, devices::hal::Medium::Card);
 }
 
 // --- Хост через порты Z-Controller, как драйвер sd.s ---
@@ -678,19 +1023,50 @@ uint32_t zread_multi_bad(uint32_t lba, uint32_t count) {
     return bad;
 }
 
+// Запись в порт данных вытеснила обработчик чтения между его обменом и
+// записью ячейки: в ячейке остаётся ответ последнего обмена, а не
+// более ранний ответ вытесненного.
+void hook_zc_write_ff() {
+    zout(kZcData, 0xFF);
+}
+
+void test_zcontroller_latch_not_overwritten() {
+    std::printf("test_sd_emu_zcontroller_latch_not_overwritten\n");
+    fill_disk();
+    devices::sd::sd_spi_emu_init();
+    devices::zcontroller::zcontroller_init();
+    CHECK(zinit());
+    uint8_t r = 0xFF;
+    CHECK(zcmd(17, 1200, &r));
+    CHECK_EQ(r, 0x00);
+    CHECK(ztoken());
+    // В ячейке байт 0. Второе чтение отдаёт байт 1 и обменом берёт байт 2; до
+    // записи ячейки вклинивается запись, её обмен берёт байт 3.
+    CHECK_EQ(zin(kZcData), g_disk[1200][0]);
+    g_port_set_hook_on = kZcData;
+    g_port_set_hook    = hook_zc_write_ff;
+    CHECK_EQ(zin(kZcData), g_disk[1200][1]);
+    CHECK_EQ(g_port_set_hook, static_cast<void (*)()>(nullptr));
+    CHECK_EQ(g_port_rd[kZcData], g_disk[1200][3]);
+    zrelease();
+}
+
 // (е) Порт 0x57 конвейером через zcontroller.cpp: инициализация SDHC,
 // одиночное чтение и окна CMD18 по 8 секторов - байт в байт с носителем;
 // порт 0x77 после init - 0xFC при карте.
 void test_zcontroller_ports() {
     std::printf("test_sd_emu_zcontroller_ports\n");
     fill_disk();
-    devices::zcontroller::zcontroller_init(false); // эмулятор поднимает он сам: DivMMC в тесте нет
+    // Эмулятор с чистого листа: прошлые проверки его уже поднимали, а
+    // zcontroller_init поднятый не трогает.
+    devices::sd::sd_spi_emu_init();
+    devices::zcontroller::zcontroller_init();
     CHECK_EQ(g_port_rd[kZcCtrl], devices::zcontroller::kCtrlCardPresent);
 
     // Обе стороны признака носителя. Носитель виден через свой эмулятор,
     // поэтому "карты нет" изображается флешкой, которую тест выдёргивает:
     // карта в пустышке есть всегда.
-    const auto zc = static_cast<uint8_t>(SdOwner::ZController);
+    const auto zc = SdOwner::ZController;
     devices::storage::storage_set_emulator_medium(zc, devices::hal::Medium::Usb);
     devices::zcontroller::zcontroller_tick();
     CHECK_EQ(g_port_rd[kZcCtrl], devices::zcontroller::kCtrlNoCard);
@@ -720,6 +1096,34 @@ void test_zcontroller_ports() {
     CHECK_EQ(bad, 0u);
     CHECK(zread_sector(3000, buf));
     CHECK(std::memcmp(buf, g_disk[3000], 512) == 0);
+
+    // Запись через защёлку порта 0x57: ответ на данные приходит вторым IN
+    // после CRC (первый отдаёт итог обмена CRC), занятость идёт холостыми
+    // обменами чтения порта.
+    const uint32_t writes0 = g_writes;
+    uint8_t r              = 0xFF;
+    CHECK(zcmd(24, 3100, &r));
+    CHECK_EQ(r, 0x00);
+    zout(kZcData, 0xFF);
+    zout(kZcData, 0xFE);
+    for (int i = 0; i < 512; ++i)
+        zout(kZcData, static_cast<uint8_t>(0xA0 + (i & 0x0F)));
+    zout(kZcData, 0xFF);
+    zout(kZcData, 0xFF);
+    const uint8_t first = zin(kZcData);
+    const uint8_t resp  = zin(kZcData);
+    std::printf("  write through the latch: after CRC 0x%02X, then 0x%02X\n", first, resp);
+    CHECK_EQ(first, 0xFF);
+    CHECK_EQ(resp & 0x1F, 0x05);
+    int busy = 0;
+    while (zin(kZcData) == 0x00 && busy < 100000)
+        ++busy;
+    zrelease();
+    CHECK_EQ(g_writes, writes0 + 1u);
+    CHECK_EQ(g_disk[3100][0], 0xA0u);
+    CHECK_EQ(g_disk[3100][511], 0xAFu);
+    CHECK(zread_sector(3100, buf));
+    CHECK(std::memcmp(buf, g_disk[3100], 512) == 0);
 }
 
 // (е2) Повторный вход в один автомат: обработчик чтения вытеснен записью
@@ -903,8 +1307,8 @@ void test_medium_follows_owner() {
     std::printf("test_sd_emu_medium_follows_owner\n");
     fill_disk();
     g_usb_present = true;
-    const auto dm = static_cast<uint8_t>(SdOwner::DivMmc);
-    const auto zc = static_cast<uint8_t>(SdOwner::ZController);
+    const auto dm = SdOwner::DivMmc;
+    const auto zc = SdOwner::ZController;
     devices::storage::storage_set_emulator_medium(dm, devices::hal::Medium::Card);
     devices::storage::storage_set_emulator_medium(zc, devices::hal::Medium::Usb);
 
@@ -946,11 +1350,79 @@ bool g_r1_override        = false;
 uint8_t g_prev_mosi       = 0xFF;
 uint32_t g_line_ns        = 0;
 
+// Карта старше SDHC поверх эмулятора, который отвечает как SDHC. Кадры
+// команд собираются на линии и переписываются перед подачей эмулятору.
+// SDSC v1: CMD8 - "нет такой команды", CCS в OCR снят, адрес CMD17/18/24/25
+// в байтах (эмулятору - в секторах). MMC (ACMD41 - "нет такой команды")
+// здесь не проверить: эмулятор не знает CMD1.
+bool g_card_sdsc        = false;
+uint8_t g_frame[6]      = {};
+int g_frame_n           = -1;
+int g_fake_r1           = -1; // ответ вместо эмулятора на следующий опрос
+int g_ocr_stage         = 0;  // 1 - ждём R1 CMD58, 2 - следующий байт OCR[0]
+uint32_t g_seen_arg[64] = {}; // последний аргумент драйвера по номеру команды
+
+uint8_t old_card_byte(uint8_t out, bool* handled) {
+    *handled = true;
+    if (g_frame_n < 0 && g_prev_mosi == 0xFF && (out & 0xC0) == 0x40) g_frame_n = 0;
+    if (g_frame_n >= 0) {
+        g_prev_mosi          = out;
+        g_frame[g_frame_n++] = out;
+        if (g_frame_n < 6) return 0xFF;
+        g_frame_n         = -1;
+        const uint8_t cmd = g_frame[0] & 0x3F;
+        uint32_t arg      = (uint32_t{g_frame[1]} << 24) | (uint32_t{g_frame[2]} << 16) | (uint32_t{g_frame[3]} << 8) | g_frame[4];
+        g_seen_arg[cmd]   = arg;
+        if (g_card_sdsc && cmd == 8) {
+            g_fake_r1 = 0x05;
+            return 0xFF;
+        }
+        if (g_card_sdsc && (cmd == 17 || cmd == 18 || cmd == 24 || cmd == 25)) arg /= 512u;
+        if (g_card_sdsc && cmd == 58) g_ocr_stage = 1;
+        uint8_t f[6] = {g_frame[0], static_cast<uint8_t>(arg >> 24), static_cast<uint8_t>(arg >> 16), static_cast<uint8_t>(arg >> 8), static_cast<uint8_t>(arg),
+                        0};
+        f[5]         = devices::sd::crc7(f, 5);
+        uint8_t in   = 0xFF;
+        for (int i = 0; i < 6; ++i) {
+            in = devices::sd::sd_spi_byte(SdOwner::ZController, f[i]);
+            devices::sd::sd_spi_task();
+        }
+        return in;
+    }
+    if (g_fake_r1 >= 0) {
+        g_prev_mosi     = out;
+        const uint8_t v = static_cast<uint8_t>(g_fake_r1);
+        g_fake_r1       = -1;
+        return v;
+    }
+    *handled = false;
+    return 0;
+}
+
+uint8_t old_card_fix(uint8_t in) {
+    if (g_ocr_stage == 2) {
+        in          = static_cast<uint8_t>(in & ~0x40u);
+        g_ocr_stage = 0;
+    } else if (g_ocr_stage == 1 && (in & 0x80) == 0) {
+        g_ocr_stage = 2;
+    }
+    return in;
+}
+
 uint8_t line_byte(uint8_t out) {
     g_line_ns      += static_cast<uint32_t>(8000000000ull / g_test_spi_hz);
     g_test_time_us += g_line_ns / 1000u;
     g_line_ns      %= 1000u;
     if (g_card_silent) return 0xFF;
+    if (g_card_sdsc) {
+        bool handled    = false;
+        const uint8_t v = old_card_byte(out, &handled);
+        if (handled) return v;
+        g_prev_mosi      = out;
+        const uint8_t in = devices::sd::sd_spi_byte(SdOwner::ZController, out);
+        devices::sd::sd_spi_task();
+        return old_card_fix(in);
+    }
     if (g_stuck_idle && g_prev_mosi == 0xFF && (out == (0x40 | 17) || out == (0x40 | 41) || out == (0x40 | 1))) {
         g_r1_override = true;
     }
@@ -1042,6 +1514,22 @@ void test_card_driver() {
     CHECK(devices::sd::sd_card_write_sector(77, w));
     CHECK(std::memcmp(g_disk[77], w, 512) == 0);
     CHECK(card_read_ok(77));
+
+    // Пачка CMD18 - ей на плате читаются все блоки. Данные те же, что на
+    // носителе; битый блок бросает пачку, а карта после CMD12 отвечает.
+    {
+        static uint8_t run[16 * 512];
+        CHECK(devices::sd::sd_card_read_run(200, 16, run));
+        CHECK(std::memcmp(run, g_disk[200], sizeof(run)) == 0);
+        const Health r0  = health();
+        g_corrupt_blocks = 1;
+        CHECK(!devices::sd::sd_card_read_run(300, 16, run));
+        g_corrupt_blocks = 0;
+        CHECK_EQ(health().crc - r0.crc, 1ul);
+        CHECK(card_read_ok(320));
+        CHECK(devices::sd::sd_card_read_run(400, 16, run));
+        CHECK(std::memcmp(run, g_disk[400], sizeof(run)) == 0);
+    }
 
     // Битый бит на линии: один блок - повтор снимает, три подряд - отказ.
     const Health h0  = health();
@@ -1182,6 +1670,32 @@ void devices::hal::spi_write(const uint8_t* src, uint32_t n) {
 // (SDSC) настоящими обменами не проверяется ни разу, а ошибка в ней читает
 // не то место на настоящей карте SDSC - то есть отдаёт чужие данные под
 // видом своих, а не отказывает.
+// Карта старше SDHC: SDSC v1, адрес в байтах.
+// Ошибка в ветке SDSC отдаёт чужие данные под видом своих, а не отказывает.
+void test_card_old_kinds() {
+    std::printf("test_sd_card_sdsc\n");
+    // Окно переинициализации прошлого теста - позади.
+    g_test_time_us += 120000000u;
+    fill_disk();
+    devices::sd::sd_spi_emu_init();
+    g_card_sdsc = true;
+    CHECK(devices::sd::sd_card_init());
+    CHECK(devices::sd::sd_card_info().kind == devices::sd::SdKind::Sdsc);
+    CHECK_EQ(g_seen_arg[16], 512u);
+    CHECK(card_read_ok(3));
+    CHECK_EQ(g_seen_arg[17], 3u * 512u);
+    static uint8_t run[16 * 512];
+    CHECK(devices::sd::sd_card_read_run(200, 16, run));
+    CHECK_EQ(g_seen_arg[18], 200u * 512u);
+    CHECK(std::memcmp(run, g_disk[200], sizeof(run)) == 0);
+    uint8_t w[512];
+    std::memset(w, 0x6B, sizeof(w));
+    CHECK(devices::sd::sd_card_write_sector(50, w));
+    CHECK_EQ(g_seen_arg[24], 50u * 512u);
+    CHECK(std::memcmp(g_disk[50], w, 512) == 0);
+    g_card_sdsc = false;
+}
+
 void test_sectors_from_csd() {
     std::printf("test_sd_sectors_from_csd\n");
     uint8_t csd[16] = {};
@@ -1268,11 +1782,22 @@ void run_sd_spi_emu_tests() {
     test_media_read_failure();
     test_ocr_and_status_like_real_card();
     test_split_cards_and_single_writer();
+    test_multi_block_write();
+    test_writer_lock_per_medium();
+    test_media_swap_drops_blocks();
+    test_media_swap_drops_slots();
+    test_card_block_run16();
+    test_failed_write_drops_block();
+    test_line_cache_without_blocks();
+    test_background_yields_on_block_path();
+    test_write_failure_is_logged();
     test_zcontroller_ports();
+    test_zcontroller_latch_not_overwritten();
     test_reentrant_step();
     test_media_change_is_published();
     test_write_does_not_block_other_side();
     test_write_reposts_waiting_read();
     test_medium_follows_owner();
     test_card_driver();
+    test_card_old_kinds();
 }

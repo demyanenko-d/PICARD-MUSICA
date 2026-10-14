@@ -68,7 +68,7 @@ void check_solo_sum(const char* path, uint32_t frames) {
     std::vector<int32_t> discard(kDiscardFrames * 2);
     std::vector<int64_t> sum_l(frames, 0), sum_r(frames, 0);
     uint32_t audible_channels = 0;
-    for (uint8_t ch = 0; ch < song.channel_count && ch < SOUNDSINTH_MAX_VOICES; ++ch) {
+    for (uint8_t ch = 0; ch < song.channel_count && ch < SOUNDSINTH_MAX_CHANNELS; ++ch) {
         engine::TrackerEngine e(song, mem);
         e.set_solo_channel(ch, discard.data(), kDiscardFrames);
         render(e, l, r, frames);

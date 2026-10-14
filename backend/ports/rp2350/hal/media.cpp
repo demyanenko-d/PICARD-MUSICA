@@ -11,9 +11,11 @@
 #include <atomic>
 #include <cinttypes>
 
-#include "devices/sd/card_protocol.h"
 #include "platform/hot_path.h"
 #include "platform/log.h"
+
+#include "devices/sd/card_protocol.h"
+
 #include "usb/usb_msc.h"
 
 namespace {
@@ -24,6 +26,15 @@ namespace {
 // увидит и поля.
 devices::hal::MediaState s_state[2];
 std::atomic<uint32_t> s_generation{0};
+
+// Опрос драйвера, код во флеше: зовёт только media_state_publish.
+bool driver_present(devices::hal::Medium m) {
+    return m == devices::hal::Medium::Usb ? rp2350::usb::msc_present() : devices::sd::sd_card_info().present;
+}
+
+uint32_t driver_sector_count(devices::hal::Medium m) {
+    return m == devices::hal::Medium::Usb ? rp2350::usb::msc_sector_count() : devices::sd::sd_card_info().sector_count;
+}
 
 } // namespace
 
@@ -47,25 +58,17 @@ uint32_t devices::hal::media_state_generation() {
 
 void devices::hal::media_state_publish(Medium m) {
     MediaState& st         = s_state[m == Medium::Usb ? 1u : 0u];
-    const bool present     = media_present(m);
-    const uint32_t sectors = media_sector_count(m);
+    const bool present     = driver_present(m);
+    const uint32_t sectors = driver_sector_count(m);
     if (st.present == present && st.sectors == sectors) return;
     st.present = present;
     st.sectors = sectors;
     s_generation.fetch_add(1, std::memory_order_release);
 }
 
-bool devices::hal::media_present(Medium m) {
-    return m == Medium::Usb ? rp2350::usb::msc_present() : devices::sd::sd_card_info().present;
-}
-
-uint32_t devices::hal::media_sector_count(Medium m) {
-    return m == Medium::Usb ? rp2350::usb::msc_sector_count() : devices::sd::sd_card_info().sector_count;
-}
-
 SOUNDSINTH_HOT_PATH_ATTR("media_read")
 bool devices::hal::media_read(Medium m, uint32_t lba, uint8_t* dst) {
-    return m == Medium::Usb ? rp2350::usb::msc_read(lba, dst) : devices::sd::sd_card_read_sector(lba, dst);
+    return m == Medium::Usb ? rp2350::usb::msc_read_run(lba, 1, dst) : devices::sd::sd_card_read_sector(lba, dst);
 }
 
 SOUNDSINTH_HOT_PATH_ATTR("media_read_run")
@@ -100,14 +103,20 @@ bool devices::hal::media_write(Medium m, uint32_t lba, const uint8_t* src) {
 
 void devices::hal::media_log_health() {
     devices::sd::sd_card_log_health();
-    // Флешка: у неё в журнале не было ни одной строки, а при DISKSYS_MEDIA=usb
-    // машина читает именно её. Печатается только когда диск подключали:
-    // иначе строка идёт нулями каждый период.
+    // Флешка: печатается, только когда диск подключали, иначе строка идёт
+    // нулями каждый период.
     const uint8_t attached = rp2350::usb::msc_drive_count();
     if (attached == 0) return;
     const rp2350::usb::MscStats m = rp2350::usb::msc_stats();
-    debug_logf("usb: disk - attached %u, taken %u, sectors read %" PRIu32 ", written %" PRIu32 "\n", attached, rp2350::usb::msc_drive_taken(), m.reads,
-               m.writes);
+    debug_logf("usb: disk - attached %u, taken %u, sectors read %" PRIu32 " in %" PRIu32 " commands, written %" PRIu32 "\n", attached,
+               rp2350::usb::msc_drive_taken(), m.read_sectors, m.read_cmds, m.writes);
+    // Время - на команду, а не на сектор: так видна цена круга
+    // CBW-данные-CSW. Только когда обмен был.
+    if (m.read_cmds != 0 || m.writes != 0) {
+        debug_logf("usb: disk command: read mean %" PRIu32 " us, max %" PRIu32 " us; write mean %" PRIu32 " us, max %" PRIu32 " us\n",
+                   m.read_cmds ? static_cast<uint32_t>(m.read_total_us / m.read_cmds) : 0u, m.read_max_us,
+                   m.writes ? static_cast<uint32_t>(m.write_total_us / m.writes) : 0u, m.write_max_us);
+    }
     // Причины отказов - своей строкой и только когда они есть: в одну строку
     // буфера debug_logf всё это не умещается.
     if (m.failed != 0) {

@@ -6,7 +6,7 @@
 
 #include "platform/hot_path.h"
 
-// Весь файл в SRAM: read_fn и request_window крутят pump() всю загрузку трека.
+// Весь файл в SRAM: read_fn и request_window крутят service() всю загрузку трека.
 
 namespace player::load {
 
@@ -20,7 +20,7 @@ void BusByteSource::request_window(uint32_t offset, uint32_t n) {
     uint16_t len = 0;
     while (!protocol_.take_received(len)) {
         if (aborted_) return;
-        pump_(pump_user_);
+        service_(service_user_);
     }
     window_     = protocol_.data_buffer();
     window_len_ = std::min<uint32_t>(len, player::protocol::HostProtocol::kDataBufferBytes);

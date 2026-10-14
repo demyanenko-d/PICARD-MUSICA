@@ -14,6 +14,7 @@
 #include "core/config.h"
 #include "core/engine/effect_dispatch.h"
 #include "core/engine/resonant_filter.h"
+#include "core/engine/chorus.h"
 #include "core/engine/reverb.h"
 #include "core/engine/sequencer.h"
 #include "core/engine/voice.h"
@@ -29,7 +30,10 @@ namespace soundsinth::engine {
 class TrackerEngine {
 public:
     // song и mem хранятся по ссылке и должны жить не меньше TrackerEngine.
-    TrackerEngine(const soundsinth::model::Song& song, memory::TrackMemory& mem);
+    // mod_pan_percent - глубина разводки каналов MOD, проценты от
+    // аппаратной (100 - как Amiga, 0 - по центру). Ставится при сборке:
+    // разводка считается один раз, в channels_init.
+    TrackerEngine(const soundsinth::model::Song& song, memory::TrackMemory& mem, uint8_t mod_pan_percent = 100);
 
     mixbus::SoundSource* as_sound_source() { return &iface_; }
 
@@ -45,6 +49,16 @@ public:
     // discard (2 x discard_frames отсчётов), в реверберацию не посылают;
     // сумма поканальных рендеров равна полному. Вызов render_add длиннее
     // discard_frames режется на куски. Без discard solo не включается.
+    // Глушение каналов маской: единица в разряде гасит канал целиком. Нужно
+    // эмуляции General Sound: эффект отнимает канал у модуля, без глушения
+    // канал звучал бы поверх. Пишет другая задача, читает тик - одно слово.
+    void set_channel_mute(uint32_t mask) { mute_mask_ = mask; }
+    uint32_t channel_mute() const { return mute_mask_; }
+    // Маска адресует каналы 0..31 - столько разрядов в слове. Слоты выше
+    // ею не глушатся: у каналов 32..63 и у хвостов NNA индекс слота номеру
+    // канала не равен, и заворот разрядов погасил бы чужой голос.
+    bool channel_muted(uint8_t idx) const { return idx < 32u && ((mute_mask_ >> idx) & 1u) != 0u; }
+
     void set_solo_channel(int32_t ch, int32_t* discard, uint32_t discard_frames) {
         const bool ok        = ch >= 0 && discard != nullptr && discard_frames > 0;
         solo_channel_        = ok ? ch : -1;
@@ -106,6 +120,10 @@ public:
     // Время цикла по голосам (на PC 0) и число голос-отсчётов; среднее на
     // голос-отсчёт в нс: voice_loop_total_us() * 1000 / voice_sample_count().
     uint32_t voice_loop_total_us() const { return voice_loop_total_us_; }
+    // Сумма времени тиков (run_tick) и всего render_add, мкс с начала трека:
+    // доля тика в рендере - tick_total_us() / render_total_us().
+    uint32_t tick_total_us() const { return tick_total_us_; }
+    uint32_t render_total_us() const { return render_total_us_; }
     uint64_t voice_sample_count() const { return voice_sample_count_; }
 
     // Загрузка рендера в Q8 (256 - буфер считался столько, сколько играет),
@@ -145,6 +163,13 @@ public:
     using TickObserver = void (*)(void* user, uint16_t order_pos, const uint16_t* sample_indices, uint8_t count);
     // Строка паттерна для команды GS #61 (Get Pattern Position).
     uint16_t current_row() const { return ps_.row; }
+    // Тиков на строку: это и есть "скорость" на экранах плееров.
+    uint8_t current_speed() const { return ps_.speed; }
+    // Нота и громкость канала. Нужны телеметрии: её показывают и плееры под
+    // General Sound, и экран хоста.
+    uint8_t channel_count() const { return channel_count_; }
+    uint8_t channel_note(uint8_t ch) const { return channels_[ch].last_note; }
+    uint8_t channel_volume(uint8_t ch) const { return channels_[ch].volume; }
     // Где стоит секвенсор целиком. Только для чтения: этим сверяется
     // перемотка против обычной игры.
     const PlayState& play_state() const { return ps_; }
@@ -299,6 +324,8 @@ private:
     uint32_t worst_tick_triggers_         = 0;
 
     uint32_t voice_loop_total_us_ = 0;
+    uint32_t tick_total_us_       = 0;
+    uint32_t render_total_us_     = 0;
     uint64_t voice_sample_count_  = 0;
 
     uint32_t load_ewma_q8_ = 0;
@@ -347,7 +374,18 @@ private:
     // нет, и этот путь не выполняется.
     Reverb* reverb_      = nullptr;
     int32_t* reverb_bus_ = nullptr;
+    Chorus* chorus_      = nullptr;
+    int32_t* chorus_bus_ = nullptr;
+    // Посыл канала паттерна в хорус, пишет SetChorusSend.
+    uint8_t chorus_send_[soundsinth::model::kMaxPatternChannels] = {};
+    // Параметры общих эффектов: пишет SetEffectParam, в ревербератор и хорус
+    // переносит рендер блока при расхождении с применёнными.
+    uint8_t fx_params_[static_cast<uint32_t>(soundsinth::model::FxParam::Count)]  = {soundsinth::model::kFxParamDefault, soundsinth::model::kFxParamDefault,
+                                                                                     soundsinth::model::kFxParamDefault};
+    uint8_t fx_applied_[static_cast<uint32_t>(soundsinth::model::FxParam::Count)] = {soundsinth::model::kFxParamDefault, soundsinth::model::kFxParamDefault,
+                                                                                     soundsinth::model::kFxParamDefault};
 
+    volatile uint32_t mute_mask_  = 0;
     int32_t solo_channel_         = -1;
     int32_t* solo_discard_        = nullptr;
     uint32_t solo_discard_frames_ = 0;

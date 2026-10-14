@@ -54,6 +54,7 @@ uint8_t USB_ProcessHIDReport(const uint8_t* ReportData,
 	{
 		uint8_t  HIDReportItem  = *ReportData;
 		uint32_t ReportItemData;
+		uint32_t ReportItemSigned; /* SoundSinth: data sign-extended by item size */
 
 		ReportData++;
 		ReportSize--;
@@ -65,22 +66,26 @@ uint8_t USB_ProcessHIDReport(const uint8_t* ReportData,
 			                       ((uint16_t)ReportData[1] << 8)  | ReportData[0]);
 				ReportSize     -= 4;
 				ReportData     += 4;
+				ReportItemSigned = ReportItemData;
 				break;
 
 			case HID_RI_DATA_BITS_16:
 				ReportItemData  = (((uint16_t)ReportData[1] << 8) | (ReportData[0]));
 				ReportSize     -= 2;
 				ReportData     += 2;
+				ReportItemSigned = (uint32_t)(int32_t)(int16_t)ReportItemData;
 				break;
 
 			case HID_RI_DATA_BITS_8:
 				ReportItemData  = ReportData[0];
 				ReportSize     -= 1;
 				ReportData     += 1;
+				ReportItemSigned = (uint32_t)(int32_t)(int8_t)ReportItemData;
 				break;
 
 			default:
 				ReportItemData  = 0;
+				ReportItemSigned = 0;
 				break;
 		}
 
@@ -108,12 +113,17 @@ uint8_t USB_ProcessHIDReport(const uint8_t* ReportData,
 				CurrStateTable->Attributes.Usage.Page       = ReportItemData;
 				break;
 
+			/* SoundSinth: logical bounds are signed by the HID spec, with the
+			   sign at the item data size, not the field size. The maximum is
+			   taken unsigned while the minimum is not negative: devices encode
+			   0..255 as 15 00 25 FF. Same rule as Linux hid-core. */
 			case HID_RI_LOGICAL_MINIMUM(0):
-				CurrStateTable->Attributes.Logical.Minimum  = ReportItemData;
+				CurrStateTable->Attributes.Logical.Minimum  = ReportItemSigned;
 				break;
 
 			case HID_RI_LOGICAL_MAXIMUM(0):
-				CurrStateTable->Attributes.Logical.Maximum  = ReportItemData;
+				CurrStateTable->Attributes.Logical.Maximum  =
+					((int32_t)CurrStateTable->Attributes.Logical.Minimum < 0) ? ReportItemSigned : ReportItemData;
 				break;
 
 			case HID_RI_PHYSICAL_MINIMUM(0):

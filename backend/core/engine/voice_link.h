@@ -200,12 +200,14 @@ public:
     void set_filter(uint8_t slot, const FilterCoeffs& c);
     // Маршрут держится в голосе между тиками: та же пара - команды нет. У
     // трекерных файлов посыла нет вовсе, и после первого тика маршрут молчит.
-    void set_route(uint8_t slot, bool to_discard, uint8_t send_level) {
+    void set_route(uint8_t slot, bool to_discard, uint8_t send_level, uint8_t chorus_level = 0) {
         const uint8_t packed = static_cast<uint8_t>(send_level | (to_discard ? 0x80u : 0u));
-        if (route_known_[slot] && route_[slot] == packed) return;
-        route_known_[slot] = true;
-        route_[slot]       = packed;
+        if (route_known_[slot] && route_[slot] == packed && chorus_route_[slot] == chorus_level) return;
+        route_known_[slot]  = true;
+        route_[slot]        = packed;
+        chorus_route_[slot] = chorus_level;
         VoiceCommand cmd{VoiceOp::SetRoute, slot, send_level, static_cast<uint8_t>(to_discard ? 1 : 0), {}};
+        cmd.u.val.x = chorus_level;
         push(cmd);
     }
 
@@ -329,8 +331,9 @@ private:
     uint32_t pitch_memo_c5_[SOUNDSINTH_MAX_SLOTS] = {};
 
     // Последний посланный маршрут слота: посыл и признак discard в старшем бите.
-    uint8_t route_[SOUNDSINTH_MAX_SLOTS]    = {};
-    bool route_known_[SOUNDSINTH_MAX_SLOTS] = {};
+    uint8_t route_[SOUNDSINTH_MAX_SLOTS]        = {};
+    uint8_t chorus_route_[SOUNDSINTH_MAX_SLOTS] = {};
+    bool route_known_[SOUNDSINTH_MAX_SLOTS]     = {};
 
     uint8_t list_[SOUNDSINTH_MAX_SLOTS] = {};
     uint8_t list_count_                 = 0;

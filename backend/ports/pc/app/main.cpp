@@ -47,6 +47,7 @@
 #include "player/protocol/host_protocol.h"
 #include "player/load/progressive_loader.h"
 #include "player/load/session_loader.h"
+#include "player/shared_state.h"
 #include "core/memory/scratch_arena.h" // g_max_scratch_used - замер границы scratch-арены
 #include "core/memory/track_memory.h"
 #include "core/audio/mixbus.h"
@@ -71,6 +72,11 @@ struct AppArgs {
     // влезает на ПК, на плате может не влезть. Без этого ключа разница
     // ловилась бы только на слух и только на железе.
     uint32_t psram_kb = 0;
+    // Упреждение догрузки .mid в секундах, ноль - значение прошивки
+    // (SOUNDSINTH_MIDI_PREFETCH_SECONDS). Задаёт и объём загрузки до старта,
+    // и дальность фоновой догрузки; подбирается перебором на файле, который
+    // не влезает в память.
+    uint32_t prefetch_seconds = 0;
     // --prefetch-positions N - грузить только сэмплы первых N order-позиций
     // и играть, как это делает плата (фаза C session_orchestrator.cpp), без
     // фоновой догрузки. Нужно, чтобы "начало играет не тем составом" можно
@@ -533,6 +539,11 @@ struct BoardLoad {
     uint32_t late_positions                                                      = 0; // суммарное опоздание, в позициях order
     uint32_t done_at_frame                                                       = 0; // когда план кончился (0 - не кончился)
     uint32_t frames                                                              = 0;
+    // Молчащие ноты по позициям order: на какой позиции песни движок не
+    // нашёл сэмпла. Снимается по приросту счётчика движка за кусок рендера.
+    const soundsinth::engine::TrackerEngine* engine = nullptr;
+    uint32_t last_miss                              = 0;
+    uint32_t miss_by_pos[256]                       = {};
 };
 
 // Сколько байт источника стоит сэмпл: у .mid - сжатый прогон банка (так
@@ -568,12 +579,19 @@ void board_tick_observer(void* user, uint16_t order_pos, const uint16_t* indices
 // кусок, столько и догрузить. Бюджет не копится дольше секунды: пауза в
 // плане не даёт права потом прочитать мегабайт мгновенно.
 void board_per_block(void* user, uint32_t frames) {
-    auto* b           = static_cast<BoardLoad*>(user);
+    auto* b = static_cast<BoardLoad*>(user);
+    if (b->engine != nullptr) {
+        const uint32_t m = b->engine->triggers_without_sample();
+        if (m > b->last_miss) b->miss_by_pos[b->order_pos & 0xffu] += m - b->last_miss;
+        b->last_miss = m;
+    }
     b->frames        += frames;
     b->budget_bytes  += b->bytes_per_frame * frames;
     const double cap  = b->bytes_per_frame * kSampleRate;
     if (b->budget_bytes > cap) b->budget_bytes = cap;
-    const player::load::SamplesInUse in_use{b->in_use_bits, player::load::kProgressiveMaxSamples};
+    // Ширина карты - платы: сэмплы от kSamplesInUseBits читатель считает
+    // занятыми навсегда, и вытеснение их не трогает (evict_capped).
+    const player::load::SamplesInUse in_use{b->in_use_bits, shared::kSamplesInUseBits};
     b->pl.no_eviction = player::load::progressive_eviction_blocked(b->position_goes_back, b->total_frames, b->frames);
     while (b->budget_bytes > 0.0) {
         uint16_t idx  = 0;
@@ -634,8 +652,7 @@ bool board_prepare(const AppArgs* args, std::vector<uint8_t>& file_bytes, sounds
     // обхода песни не нужно. Как на плате.
     player::load::progressive_attach_plan(b.pl, b.plan_mem);
     const auto phase_a_t0 = std::chrono::steady_clock::now();
-    if (!player::load::run_session_load(src->as_byte_source(), mem, song, load, /*metadata_only=*/true, b.pl.plan_indices,
-                                        player::load::kProgressiveMaxSamples)) {
+    if (!player::load::run_session_load(src->as_byte_source(), mem, song, load, /*metadata_only=*/true, player::load::plan_arrays_of(b.pl), &b.pl.use_map)) {
         if (error_out) *error_out = load.error;
         return false;
     }
@@ -648,11 +665,13 @@ bool board_prepare(const AppArgs* args, std::vector<uint8_t>& file_bytes, sounds
 
     uint16_t prefetch_positions = player::load::kPrefetchOrderPositions;
     if (b.format == player::load::TrackFormat::Midi) {
-        const uint16_t by_time = soundsinth::formats::midi::order_positions_in_frames(SOUNDSINTH_MIDI_PREFETCH_SECONDS * kSampleRate);
+        const uint32_t seconds = args->prefetch_seconds != 0 ? args->prefetch_seconds : SOUNDSINTH_MIDI_PREFETCH_SECONDS;
+        const uint16_t by_time = soundsinth::formats::midi::order_positions_in_frames(seconds * kSampleRate);
         if (by_time > prefetch_positions) prefetch_positions = by_time;
         b.pl.lead_positions = by_time;
+        std::printf("prefetch horizon: %u s -> %u order positions\n", (unsigned)seconds, (unsigned)by_time);
     }
-    const player::load::SamplesInUse none{b.in_use_bits, player::load::kProgressiveMaxSamples};
+    const player::load::SamplesInUse none{b.in_use_bits, shared::kSamplesInUseBits};
     uint32_t phase_b_us = 0;
     if (song.sample_count <= player::load::kProgressiveMaxSamples) {
         const auto phase_b_t0 = std::chrono::steady_clock::now();
@@ -918,10 +937,8 @@ void app_main_task(void* pv_parameters) {
             }
             std::printf("playing %s (channels=%u, patterns=%u, tempo=%u, speed=%u)\n", args->play_file_path, song.channel_count, song.pattern_count,
                         song.default_tempo, song.default_speed);
-            // Замер резидентной арены: выделено 48 КБ (kResidentMetadataBytes), на
-            // плате они заняты всегда; печатается, сколько трек кладёт в неё на
-            // самом деле. Прогон по всей музыкальной библиотеке даёт максимум, по
-            // которому назначается размер.
+            // Сколько трек кладёт в резидентную арену; максимум по всей
+            // библиотеке задаёт её размер.
             std::printf("arena: used %u of %u (samples=%u, instruments=%u)\n", (unsigned)soundsinth::memory::arena_used(mem->resident),
                         (unsigned)soundsinth::memory::kResidentMetadataBytes, (unsigned)song.sample_count, (unsigned)song.instrument_count);
             if (!is_midi) {
@@ -945,7 +962,7 @@ void app_main_task(void* pv_parameters) {
                 // непомеченным, - память, занятая зря.
                 static bool used[4096];
                 std::memset(used, 0, sizeof(used));
-                soundsinth::model::PatternCell cells[SOUNDSINTH_MAX_VOICES];
+                soundsinth::model::PatternCell cells[SOUNDSINTH_MAX_CHANNELS];
                 for (uint16_t p = 0; p < song.pattern_count; ++p) {
                     const auto& pat = song.patterns[p];
                     if (pat.psram_offset == soundsinth::model::Pattern::kInvalidOffset || pat.channel_count == 0) continue;
@@ -1030,6 +1047,7 @@ void app_main_task(void* pv_parameters) {
             render_through_pool(bus, pool, args->wav_path, total_frames, engine);
         } else {
             if (args->through_pool) std::printf("--through-pool does not combine with --board-load, rendering directly\n");
+            board.engine = engine;
             render_to_wav(bus, args->wav_path, total_frames, (args->board_load && engine) ? &board_per_block : nullptr, &board);
         }
         if (args->board_load && engine) {
@@ -1042,6 +1060,34 @@ void app_main_task(void* pv_parameters) {
                         (unsigned)board.pl.plan_failed, (unsigned)board.prefetch_failed, (unsigned)board.pl.evicted,
                         (unsigned)(board.pl.plan_count - board.pl.plan_next), board.done_at_frame ? double(board.done_at_frame) / kSampleRate : -1.0,
                         (unsigned)engine->triggers_without_sample());
+            std::printf("board-load: reloaded after eviction %u, eviction capped %u, rescan cursor %u of %u\n", (unsigned)board.pl.reloaded,
+                        (unsigned)board.pl.evict_capped, (unsigned)board.pl.plan_rescan, (unsigned)board.pl.plan_count);
+            // Последние 16 ненайденных сэмплов (кольцо движка): видно, один
+            // ли сэмпл теряется раз за разом или каждый раз новый.
+            const uint32_t miss = engine->triggers_without_sample();
+            if (miss != 0) {
+                std::printf("board-load: last missing samples:");
+                const uint32_t show = miss < 16u ? miss : 16u;
+                for (uint32_t k = 0; k < show; ++k) {
+                    std::printf(" %u", (unsigned)engine->missing_sample(miss - 1u - k));
+                }
+                std::printf("\n");
+                // Первая и последняя позиции этих сэмплов по плану: при
+                // last меньше позиции молчащей ноты план и воспроизведение
+                // видят разные ячейки.
+                std::printf("board-load: plan says (sample first/last):");
+                for (uint32_t k = 0; k < show; ++k) {
+                    const uint16_t ix = engine->missing_sample(miss - 1u - k);
+                    if (ix >= player::load::kProgressiveMaxSamples) continue;
+                    std::printf(" %u:%u/%u", (unsigned)ix, (unsigned)board.pl.plan_first_use[ix], (unsigned)board.pl.plan_last_use[ix]);
+                }
+                std::printf(" | order pos at the end %u\n", (unsigned)board.order_pos);
+                std::printf("board-load: silent notes by order position:");
+                for (uint32_t p2 = 0; p2 < 256; ++p2) {
+                    if (board.miss_by_pos[p2] != 0) std::printf(" %u:%u", (unsigned)p2, (unsigned)board.miss_by_pos[p2]);
+                }
+                std::printf("\n");
+            }
         }
         const double render_s = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
 
@@ -1119,7 +1165,7 @@ void app_main_task(void* pv_parameters) {
             const size_t dot = base.find_last_of('.');
             if (dot != std::string::npos) base = base.substr(0, dot);
 
-            for (uint8_t ch = 0; ch < song.channel_count && ch < SOUNDSINTH_MAX_VOICES; ++ch) {
+            for (uint8_t ch = 0; ch < song.channel_count && ch < SOUNDSINTH_MAX_CHANNELS; ++ch) {
                 bus.remove_source(engine->as_sound_source());
                 delete engine;
                 engine = new soundsinth::engine::TrackerEngine(song, *mem);
@@ -1192,6 +1238,8 @@ int main(int argc, char** argv) {
             args.by_channel_dir = argv[++i];
         } else if (std::strcmp(argv[i], "--psram-kb") == 0 && i + 1 < argc) {
             args.psram_kb = static_cast<uint32_t>(std::strtoul(argv[++i], nullptr, 10));
+        } else if (std::strcmp(argv[i], "--prefetch-seconds") == 0 && i + 1 < argc) {
+            args.prefetch_seconds = static_cast<uint32_t>(std::strtoul(argv[++i], nullptr, 10));
         } else if (std::strcmp(argv[i], "--grid") == 0 && i + 1 < argc) {
             // "16:3" - строк на долю и тиков на строку, вместо выбора по темпу.
             const char* g  = argv[++i];

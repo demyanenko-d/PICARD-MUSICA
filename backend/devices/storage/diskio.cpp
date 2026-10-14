@@ -15,7 +15,7 @@
 extern "C" {
 
 DSTATUS disk_status(BYTE pdrv) {
-    return (pdrv == 0 && devices::storage::storage_present(devices::storage::Client::Board)) ? 0 : STA_NOINIT;
+    return (pdrv == 0 && devices::storage::storage_present()) ? 0 : STA_NOINIT;
 }
 
 DSTATUS disk_initialize(BYTE pdrv) {
@@ -25,7 +25,7 @@ DSTATUS disk_initialize(BYTE pdrv) {
 }
 
 DRESULT disk_read(BYTE pdrv, BYTE* buff, LBA_t sector, UINT count) {
-    if (pdrv != 0 || !devices::storage::storage_present(devices::storage::Client::Board)) return RES_NOTRDY;
+    if (pdrv != 0 || !devices::storage::storage_present()) return RES_NOTRDY;
     for (UINT i = 0; i < count; ++i) {
         // Фоновый клиент: заказы хоста арбитр пропускает вперёд сам.
         if (!devices::storage::storage_read_background(static_cast<uint32_t>(sector) + i, buff + i * devices::storage::kSectorBytes)) {
@@ -35,13 +35,13 @@ DRESULT disk_read(BYTE pdrv, BYTE* buff, LBA_t sector, UINT count) {
         // банка читаются при загрузке, когда витка ещё нет, и без этого
         // каждый сектор идёт к карте в одиночку. Единица арбитража от этого
         // не меняется - блок наполняется тем же вызовом, что и из цикла.
-        devices::storage::storage_prefetch_step();
+        devices::storage::storage_prefetch_step_board();
     }
     return RES_OK;
 }
 
 DRESULT disk_write(BYTE pdrv, const BYTE* buff, LBA_t sector, UINT count) {
-    if (pdrv != 0 || !devices::storage::storage_present(devices::storage::Client::Board)) return RES_NOTRDY;
+    if (pdrv != 0 || !devices::storage::storage_present()) return RES_NOTRDY;
     for (UINT i = 0; i < count; ++i) {
         if (!devices::storage::storage_write_board(static_cast<uint32_t>(sector) + i, buff + i * devices::storage::kSectorBytes)) {
             return RES_ERROR;
@@ -56,7 +56,7 @@ DRESULT disk_ioctl(BYTE pdrv, BYTE cmd, void* buff) {
         case CTRL_SYNC:
             return RES_OK;
         case GET_SECTOR_COUNT:
-            *static_cast<LBA_t*>(buff) = devices::storage::storage_sector_count(devices::storage::Client::Board);
+            *static_cast<LBA_t*>(buff) = devices::storage::storage_sector_count();
             return RES_OK;
         case GET_SECTOR_SIZE:
             *static_cast<WORD*>(buff) = devices::storage::kSectorBytes;

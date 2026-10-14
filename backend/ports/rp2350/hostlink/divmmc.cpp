@@ -12,7 +12,7 @@
 
 #include "hardware/structs/timer.h"
 
-#include "bus.h"
+#include "bus_setup.h"
 #include "platform/log.h"
 // SOUNDSINTH_DIVMMC_TRDOS_TRAP (без него окно 3D00 выпадает молча) и
 // SOUNDSINTH_DIVMMC_TRACE. Ключи нужны препроцессору ниже, поэтому явно,
@@ -33,16 +33,17 @@ namespace {
 // флеша TEST128K роняет машину, из PSRAM машина теряется через несколько
 // команд (промахи кэша XIP).
 //
-// Страницы выровнены на 8 КБ (массив 16x8192 с alignas(8192)); таблица
-// страниц хранит базу >> 8.
+// Таблица страниц хранит базу >> 8, значит требуется выравнивание на 256,
+// а не на размер банка: внутри банка страницы по 256 байт и так ложатся по
+// границе.
 constexpr uint32_t kBanks = PAGE_TAB_BANKS;
 // Начало региона 1 (ОЗУ DivMMC, 0x2000-0x3FFF).
 constexpr uint16_t kRegion1Base = 0x2000;
 static_assert((kBanks & (kBanks - 1u)) == 0, "the bank number is masked out of port 0xE3");
-// Своя входная секция: скаляры выше стоят перед массивом с alignas(8192),
-// и в общем лумпе .bss этого файла они стоили бы восемь килобайт набивки.
+// Своя входная секция: скаляры выше стоят перед выровненным массивом, и в
+// общем лумпе .bss этого файла они стоили бы набивку до его границы.
 // Выравнивание держит alignas, секция только уводит массив из лумпа.
-alignas(8192) __attribute__((section(".bss.divmmc_ram"))) uint8_t s_ram[kBanks][8192];
+alignas(256) __attribute__((section(".bss.divmmc_ram"))) uint8_t s_ram[kBanks][8192];
 constexpr uint32_t kRamBytes = sizeof(s_ram);
 
 bool s_by_port = false; // CONMEM, бит 7 порта 0xE3
@@ -51,7 +52,16 @@ bool s_by_port = false; // CONMEM, бит 7 порта 0xE3
 __force_inline bool by_trap() {
     return rom_emu_trap_entered();
 }
-uint8_t s_bank = 0;
+// Подставлено ли: по порту (CONMEM) или по трапу.
+__force_inline bool mapped() {
+    return s_by_port || by_trap();
+}
+// Разряды порта 0xE3: CONMEM, MAPRAM; младшие - номер банка.
+constexpr uint8_t kE3Conmem = 0x80u;
+constexpr uint8_t kE3Mapram = 0x40u;
+// Банк, который MAPRAM ставит на 0x0000-0x1FFF и защищает от записи.
+constexpr uint8_t kMapramBank = 3;
+uint8_t s_bank                = 0;
 // MAPRAM - бит 6 порта 0xE3: вместо ПЗУ DivMMC на 0x0000-0x1FFF встаёт
 // страница 3, защищённая от записи.
 //
@@ -61,7 +71,6 @@ uint8_t s_bank = 0;
 // Липкий: по спецификации divIDE снимается только аппаратным сбросом.
 bool s_mapram = false;
 
-uint32_t s_lost   = 0; // записи, потерянные на переполнении очереди bus_wr
 uint32_t s_remaps = 0; // повторы смены подстановки из порта 0xE3 после вклинившегося трапа
 
 // След переключений DivMMC, переживающий сброс кнопкой: память не
@@ -107,14 +116,20 @@ enum class TraceKind : uint8_t { None, Port, Reset, Lost };
 __force_inline void trace_event(TraceKind, uint16_t) {}
 #endif
 
+// Точки входа и окно выхода DivMMC. Один список на установку и на
+// самопроверку: точка, добавленная только в одно место, не проверилась бы.
+constexpr uint16_t kEnterTraps[] = {0x0000u, 0x0008u, 0x0038u, 0x0066u, 0x04C6u, 0x0562u};
+constexpr uint16_t kExitFirst    = 0x1FF8u;
+constexpr uint16_t kExitLast     = 0x1FFFu;
+
 // Карта трапов цепочки DMA: точки входа и окно выхода - по адресу, окно BDI
 // - страницей.
 void build_trap_map() {
     rom_emu_trap_clear();
-    for (const uint16_t a : {0x0000u, 0x0008u, 0x0038u, 0x0066u, 0x04C6u, 0x0562u}) {
+    for (const uint16_t a : kEnterTraps) {
         rom_emu_trap_set(a, TrapKind::Enter);
     }
-    for (uint16_t a = 0x1FF8u; a <= 0x1FFFu; ++a) {
+    for (uint16_t a = kExitFirst; a <= kExitLast; ++a) {
         rom_emu_trap_set(a, TrapKind::Exit);
     }
 #if SOUNDSINTH_DIVMMC_TRDOS_TRAP
@@ -123,11 +138,42 @@ void build_trap_map() {
     // стоящей подстановке кладёт тот же вариант.
     rom_emu_trap_set(static_cast<uint16_t>(kBdiWindow), TrapKind::Enter);
 #endif
+
+    // Самопроверка двухуровневой раскладки: ошибка индекса - panic на
+    // загрузке, а не неверная выборка у машины.
+    uint32_t enter = 0u;
+    for (const uint16_t a : kEnterTraps) {
+        const uint32_t v = rom_emu_trap_resolve(a);
+        if (v == 0u) panic("divmmc: enter trap 0x%04x lost in the two-level map", static_cast<unsigned>(a));
+        if (enter == 0u) {
+            enter = v;
+        } else if (v != enter) {
+            panic("divmmc: enter trap 0x%04x resolves elsewhere", static_cast<unsigned>(a));
+        }
+    }
+    for (uint16_t a = kExitFirst; a <= kExitLast; ++a) {
+        const uint32_t v = rom_emu_trap_resolve(a);
+        if (v == 0u) panic("divmmc: exit trap 0x%04x lost in the two-level map", static_cast<unsigned>(a));
+        if (v == enter) panic("divmmc: exit trap 0x%04x resolves to the enter word", static_cast<unsigned>(a));
+    }
+#if SOUNDSINTH_DIVMMC_TRDOS_TRAP
+    // Окно BDI - через карту страниц: тот же вход, что у точек выше.
+    if (rom_emu_trap_resolve(static_cast<uint16_t>(kBdiWindow)) != enter) {
+        panic("divmmc: BDI window 0x%04x does not resolve to the enter word", static_cast<unsigned>(kBdiWindow));
+    }
+#endif
+    // Где трапа нет, путь обязан давать ноль. 0x07F8 совпадает с окном
+    // выхода по разрядам A0..A10.
+    for (const uint16_t a : {0x0001u, 0x0007u, 0x0100u, 0x07F8u, 0x0FF8u, 0x1000u, 0x1FF7u}) {
+        if (rom_emu_trap_resolve(a) != 0u) {
+            panic("divmmc: 0x%04x traps though it must not", static_cast<unsigned>(a));
+        }
+    }
 }
 
 // Порт DivMMC. При OUT (n),A младший байт адреса - n, при OUT (C),A -
 // регистр C: искать в младшем байте.
-constexpr uint16_t kPortDivMmc = 0x00E3;
+constexpr uint8_t kPortDivMmc = 0xe3;
 
 // Порты карты у DivMMC:
 //   0xE7 запись - бит 0 выбирает кристалл, ноль выбирает;
@@ -135,8 +181,8 @@ constexpr uint16_t kPortDivMmc = 0x00E3;
 //   0xEB чтение - байт от карты, операция запускает следующий обмен.
 // Отличие от Z-Controller - номера и бит выбора (там бит 1). Разбор и
 // эмуляция карты общие.
-constexpr uint8_t kPortSdCtrl = 0xE7;
-constexpr uint8_t kPortSdData = 0xEB;
+constexpr uint8_t kPortSdCtrl = 0xe7;
+constexpr uint8_t kPortSdData = 0xeb;
 
 // Выбрана ли карта. Пока не выбрана, записи в порт данных игнорируются,
 // как на шине SPI.
@@ -150,7 +196,7 @@ bool s_sd_active = false;
 // 3DFD в стек и уходит в ПЗУ машины) попадает на наш C9 в том же цикле:
 // M1 - разряд индекса таблицы страниц, выборка команды в окне 3D00-3DFF
 // идёт из нашей памяти, чтение данных - из ПЗУ машины.
-alignas(8192) __attribute__((section(".bss.divmmc_rom"))) uint8_t s_rom[8192];
+alignas(256) __attribute__((section(".bss.divmmc_rom"))) uint8_t s_rom[8192];
 
 // Из флеша читается один memcpy, когда машина стоит в сбросе. В режиме
 // конфигуратора берётся другой образ: механизм подстановки тот же, ПЗУ
@@ -177,6 +223,10 @@ constexpr uint32_t variant_of(bool on, bool mapram, uint32_t bank) {
 }
 static_assert(variant_of(true, true, kBanks - 1u) < PAGE_TAB_VARIANTS, "the variant layout");
 static_assert(variant_of(false, false, kBanks - 1u) < PAGE_TAB_VARIANTS, "the variant layout");
+// Нечётные варианты старше 2 * kBanks - дыры с картами трапов: выбор такого
+// отдал бы детектору чужие слова как записи страниц.
+static_assert(!pagetab_is_hole(variant_of(false, false, kBanks - 1u)) && !pagetab_is_hole(variant_of(true, true, kBanks - 1u)),
+              "a DivMMC variant falls into a page table hole");
 static_assert(variant_of(false, false, 0) % 2u == 1u && variant_of(true, false, 0) % 2u == 0u && variant_of(true, true, 0) % 2u == 0u,
               "the parity of the variant is ROM_BLK_N");
 
@@ -215,14 +265,14 @@ void build_pagetabs() {
         // --- Подставлены ---
         for (uint32_t m = 0; m < 2u; ++m) {
             const uint32_t v = variant_of(true, m != 0u, b);
-            rom_emu_fill_pages(v, 0, m ? static_cast<const void*>(&s_ram[3][0]) : static_cast<const void*>(s_rom));
+            rom_emu_fill_pages(v, 0, m ? static_cast<const void*>(&s_ram[kMapramBank][0]) : static_cast<const void*>(s_rom));
             rom_emu_fill_pages(v, 1, &s_ram[b][0]);
         }
     }
 }
 
 void __not_in_flash_func(apply_mapping)() {
-    const bool on = s_by_port || by_trap();
+    const bool on = mapped();
 
     // Со следующего цикла памяти.
     wait_memory_read_end();
@@ -233,14 +283,14 @@ void __not_in_flash_func(apply_mapping)() {
     rom_emu_select_pages(pagetab_variant(on));
 }
 
-// Смена подстановки из порта 0xE3 (bus_wr_isr). Трап высшего приоритета
-// может переключить её посреди: выход esxDOS пишет 0xE3 и через около 21
+// Смена подстановки из порта 0xE3 (bus_wr_isr). Трап (цепочка DMA) может
+// переключить её посреди: выход esxDOS пишет 0xE3 и через около 21
 // такта выбирает 1FFA (ПЗУ 0x005D, 0x0D0C). Состояние читается после
 // ожидания конца цикла - трап, пришедший в ожидании, уже учтён; вклинился
 // после чтения - X детектора пишется заново, в обход запомненного
 // варианта. Иначе состояние "снято", а таблица (и с ней ROM_BLK) "стоит" до
 // следующего трапа входа: машина выходила бы в память DivMMC при погашенном
-// ПЗУ. Путь трапа (apply_mapping) не меняется.
+// ПЗУ.
 void __not_in_flash_func(apply_mapping_from_port)(bool bank_only) {
     // Меняется только банк (подстановка и MAPRAM те же): у вариантов одной
     // группы область 0x0000-0x1FFF одна и та же, выборка следующей команды
@@ -249,18 +299,33 @@ void __not_in_flash_func(apply_mapping_from_port)(bool bank_only) {
     // новый банк - запаса до него около 1 мкс на 3.5 МГц. Ожидание конца
     // цикла съедало половину. Смена подстановки ждёт, как трап.
     if (!bank_only) wait_memory_read_end();
-    auto mapped_now = [] {
+    // Подставлено ли, с перечитыванием s_by_port из памяти: после ожидания
+    // и после записи варианта, когда между чтениями мог сработать трап.
+    auto mapped_fresh = [] {
         std::atomic_signal_fence(std::memory_order_seq_cst);
         return *const_cast<volatile bool*>(&s_by_port) || by_trap();
     };
-    bool on = mapped_now();
+    bool on = mapped_fresh();
     rom_emu_select_pages(pagetab_variant(on));
     for (;;) {
-        const bool now = mapped_now();
+        const bool now = mapped_fresh();
         if (now == on) return;
         on = now;
         ++s_remaps;
         rom_emu_force_pages(pagetab_variant(on));
+    }
+}
+
+// Ответ карты в ячейку порта данных. Ячейку пишут обработчики записи и
+// чтения порта; вытесненный между обменом и записью положил бы свой, более
+// ранний ответ поверх свежего. Запись повторяется, пока ячейка не совпадёт
+// с ответом последнего исполненного обмена.
+void __not_in_flash_func(sd_answer)(uint8_t value) {
+    for (;;) {
+        port_answer(kPortSdData, value);
+        const uint8_t now = devices::sd::sd_spi_latch(devices::sd::SdOwner::DivMmc);
+        if (now == value) return;
+        value = now;
     }
 }
 
@@ -273,7 +338,7 @@ void __not_in_flash_func(divmmc_on_port_read)(uint8_t port) {
         dispatch_port_read_done(port);
         return;
     }
-    rom_emu_set_port(kPortSdData, devices::sd::sd_spi_byte(devices::sd::SdOwner::DivMmc, 0xFF));
+    sd_answer(devices::sd::sd_spi_byte(devices::sd::SdOwner::DivMmc, 0xff));
 }
 
 void divmmc_reset() {
@@ -286,7 +351,7 @@ void divmmc_reset() {
     s_sd_active = false;
     devices::sd::sd_spi_select(devices::sd::SdOwner::DivMmc, false);
     // Первый ответ до обмена - 0xFF, как у незанятой шины SPI.
-    rom_emu_set_port(kPortSdData, 0xFFu);
+    port_answer(kPortSdData, 0xffu);
 
     std::memset(s_ram, 0, kRamBytes);
     build_pagetabs();
@@ -296,7 +361,6 @@ void divmmc_reset() {
     rom_emu_trap_reset_state();
     s_bank   = 0;
     s_mapram = false;
-    s_lost   = 0;
     update_trap_variants();
     apply_mapping();
     trace_event(TraceKind::Reset, 0);
@@ -310,74 +374,83 @@ void __not_in_flash_func(divmmc_on_bus_write)(uint32_t raw) {
     // снимает весь порт ввода). Записи в память приходят только ниже 0x4000:
     // ОЗУ машины автомат отсекает по A14/A15, остаётся около трёх тысяч в
     // секунду.
-    if ((raw & (1u << PIN_IORQ_N)) != 0u) {
+    if (is_memory_write(raw)) {
         // Подстановка берётся из s_by_port и трапа на момент разбора, а не
-        // из захваченного слова. Трап с высшим приоритетом может переключить
-        // её между циклом записи и разбором. В слове есть ROM_BLK_N (GPIO 1,
-        // низкий - подставлены), но читается ли в нём наш же выход, не
-        // проверено. Банк упорядочен с записями: 0xE3 идёт через эту же
-        // очередь.
-        if (!(s_by_port || by_trap())) return;
+        // из захваченного слова. Трап может переключить её между циклом
+        // записи и разбором. В слове есть ROM_BLK_N (GPIO 1, низкий -
+        // подставлены), но читается ли в нём наш же выход, не проверено.
+        // Банк упорядочен с записями: 0xE3 идёт через эту же очередь.
+        if (!mapped()) return;
         if (addr < kRegion1Base) return;
-        // MAPRAM защищает банк 3 и в регионе 1.
-        if (s_mapram && s_bank == 3u) return;
+        // MAPRAM защищает свой банк и в регионе 1.
+        if (s_mapram && s_bank == kMapramBank) return;
         s_ram[s_bank][addr - kRegion1Base] = data;
         return;
     }
 
     // Порты карты - только в ветке портов: запись в память с тем же младшим
     // байтом (0x20E7) иначе ушла бы эмулятору карты как байт SPI.
-    if ((addr & 0xFFu) == kPortSdCtrl) {
+    const uint8_t port = port_of(raw);
+    if (port == kPortSdCtrl) {
         s_sd_active = (data & 0x01u) == 0u;
         devices::sd::sd_spi_select(devices::sd::SdOwner::DivMmc, s_sd_active);
         return;
     }
-    if ((addr & 0xFFu) == kPortSdData) {
-        if (s_sd_active) rom_emu_set_port(kPortSdData, devices::sd::sd_spi_byte(devices::sd::SdOwner::DivMmc, data));
+    if (port == kPortSdData) {
+        if (s_sd_active) sd_answer(devices::sd::sd_spi_byte(devices::sd::SdOwner::DivMmc, data));
         return;
     }
 
     // Чужой порт - плагину: в режиме DivMMC у него нет своих автоматов шины,
     // его порты обслуживает этот путь.
-    if ((addr & 0xFFu) != (kPortDivMmc & 0xFFu)) {
-        dispatch_port_write(static_cast<uint8_t>(addr & 0xFFu), data);
+    if (port != kPortDivMmc) {
+        dispatch_port_write(port, data);
         return;
     }
 
     // Бит 7 - CONMEM, младшие четыре - номер страницы, бит 6 - MAPRAM
     // (липкий).
-    const bool was_on     = s_by_port || by_trap();
+    const bool was_on     = mapped();
     const bool was_mapram = s_mapram;
-    s_by_port             = (data & 0x80u) != 0u;
-    if ((data & 0x40u) != 0u) s_mapram = true; // липкий
+    s_by_port             = (data & kE3Conmem) != 0u;
+    if ((data & kE3Mapram) != 0u) s_mapram = true; // липкий
     s_bank = static_cast<uint8_t>(data & (kBanks - 1u));
     // Сначала слова трапов: трап, сработавший после этой строки, кладёт уже
     // новый банк.
     update_trap_variants();
     // Таблицы не трогаются: всё состояние - номер варианта, смена - одно
     // слово в очередь детектора.
-    apply_mapping_from_port((s_by_port || by_trap()) == was_on && s_mapram == was_mapram);
+    // Подстановка и MAPRAM те же - меняется только банк, ждать конца цикла
+    // не надо.
+    const bool bank_only = mapped() == was_on && s_mapram == was_mapram;
+    apply_mapping_from_port(bank_only);
     trace_event(TraceKind::Port, data);
 }
 
 bool divmmc_mapped() {
-    return s_by_port || by_trap();
+    return mapped();
 }
 uint8_t divmmc_bank() {
     return s_bank;
 }
 
+#if SOUNDSINTH_DIVMMC_TRACE
 // Из bus_wr_isr (SRAM), на RXSTALL.
 void __not_in_flash_func(divmmc_note_lost)(uint32_t drained) {
-    ++s_lost;
     trace_event(TraceKind::Lost, static_cast<uint16_t>(drained));
 }
-
-uint32_t divmmc_lost_writes() {
-    return s_lost;
-}
+#endif
 uint32_t divmmc_remaps() {
     return s_remaps;
+}
+
+void divmmc_log_stats() {
+    // divmmc: подстановка (1 - ПЗУ машины закрыто), банк, адрес последней
+    // выборки.
+    debug_logf("divmmc: mapped %d, bank %u | fetch %08" PRIX32 " | E3 repeats %" PRIu32 " | queue peak %" PRIu32 "/8\n", static_cast<int>(divmmc_mapped()),
+               static_cast<unsigned>(divmmc_bank()), last_memory_read_ptr(), divmmc_remaps(), bus_wr_peak());
+    // Ноль - ни одна отметка опоздания не потеряна.
+    debug_logf("bus: late queue full %" PRIu32 "\n", bus_measurements().serve_late_full);
 }
 
 #if SOUNDSINTH_DIVMMC_TRACE
@@ -393,7 +466,7 @@ void divmmc_trace_report() {
             const TraceEvent& e = s_trace.ev[i & (kTraceLen - 1u)];
             const uint8_t k     = static_cast<uint8_t>(e.kind);
             std::printf("  -%lu ms %s %04X | bank %u%s%s%s\n", static_cast<unsigned long>((last_t - e.t_us) / 1000u),
-                        k < std::size(kKindNames) ? kKindNames[k] : "?", static_cast<unsigned>(e.addr), static_cast<unsigned>(e.state & 0x0Fu),
+                        k < std::size(kKindNames) ? kKindNames[k] : "?", static_cast<unsigned>(e.addr), static_cast<unsigned>(e.state & 0x0fu),
                         (e.state & 0x10u) ? " by port" : "", (e.state & 0x20u) ? " by trap" : "", (e.state & 0x40u) ? " MAPRAM" : "");
         }
     }

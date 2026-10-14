@@ -31,6 +31,11 @@ uint32_t platform::mono_us() {
     return g_test_time_us;
 }
 
+// Миллисекунды - от тех же часов теста.
+uint32_t platform::mono_ms() {
+    return g_test_time_us / 1000u;
+}
+
 // Ожидание просто двигает часы теста.
 void platform::busy_wait(uint32_t us) {
     g_test_time_us += us;

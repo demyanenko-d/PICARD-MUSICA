@@ -95,6 +95,7 @@ public:
     // сводится и до того, как тик впервые задал ему маршрут, а discard_l без
     // solo - нулевой указатель.
     uint8_t reverb_send[SOUNDSINTH_MAX_SLOTS] = {};
+    uint8_t chorus_send[SOUNDSINTH_MAX_SLOTS] = {}; // посыл в хорус, так же
     bool discard[SOUNDSINTH_MAX_SLOTS]        = {};
     // Голоса, которые сводятся на этом тике.
     uint8_t active[SOUNDSINTH_MAX_SLOTS];
@@ -116,6 +117,7 @@ public:
     // --- Постоянное на трек ---
     uint32_t ramp_samples = 0;
     int32_t* reverb_bus   = nullptr; // nullptr - посылов нет
+    int32_t* chorus_bus   = nullptr; // то же для хоруса
     int32_t* discard_l    = nullptr;
     int32_t* discard_r    = nullptr;
 
@@ -188,9 +190,10 @@ public:
     bool filter_on(uint8_t slot) const { return filter_coeffs[slot].active; }
     void filter_off(uint8_t slot) { filter_coeffs[slot].active = false; }
     void set_filter(uint8_t slot, const FilterCoeffs& c) { filter_coeffs[slot] = c; }
-    void set_route(uint8_t slot, bool to_discard, uint8_t send) {
+    void set_route(uint8_t slot, bool to_discard, uint8_t send, uint8_t chorus = 0) {
         discard[slot]     = to_discard;
         reverb_send[slot] = send;
+        chorus_send[slot] = chorus;
     }
 
     // Гашение последнего выданного значения до тишины за ramp_samples отсчётов.

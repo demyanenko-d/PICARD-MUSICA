@@ -46,41 +46,46 @@
 #include "FreeRTOS.h"
 #include "task.h"
 
-#include "audio/i2s_sink.h"
-#include "player/session.h"
+#include "platform/boot_mode.h"
+#include "platform/compiler.h"
 #include "platform/config_flash.h"
 #include "platform/log.h"
 #include "platform/log_rings.h"
-#include "player/audio/chain.h"
-#include "player/banks.h"
+#include "platform/memory.h"
 #include "platform/mono_time.h"
 #include "platform/usb_host.h"
-#include "log.h"
-#include "stack_paint.h"
-#include "rtos/ticks.h"
-#include "firmware_config.h"
-#include "hostlink/bus.h"
-#include "devices/config/config_apply.h"
-#include "hal/host_signals.h"
+
 #include "core/config/config_page.h"
-#include "platform/boot_mode.h"
+#include "core/config/config_store.h"
+#include "core/memory/track_memory.h"
+
+#include "devices/config/config_apply.h"
 #include "devices/config/config_service.h"
-#include "hostlink/divmmc.h"
-#include "player/hal/host_link.h"
-#include "player/gs/bridge.h"
-#include "hostlink/hostlink.h"
-#include "usb/usb_host.h"
-#include "psram/psram_driver.h"
-#include "psram/psram_pins.h"
-#include "player/shared_state.h"
 #include "devices/storage/storage.h"
 #include "devices/zcontroller/zcontroller.h"
 
-#include "platform/compiler.h"
+#include "player/audio/chain.h"
+#include "player/banks.h"
 #include "player/config.h"
+#include "player/gs/bridge.h"
+#include "player/hal/host_link.h"
 #include "player/protocol/host_protocol.h"
-#include "core/memory/track_memory.h"
-#include "platform/memory.h"
+#include "player/session.h"
+#include "player/shared_state.h"
+
+#include "audio/i2s_sink.h"
+#include "firmware_config.h"
+#include "hal/boot_save.h"
+#include "hal/host_signals.h"
+#include "hostlink/bus.h"
+#include "hostlink/divmmc.h"
+#include "hostlink/hostlink.h"
+#include "log.h"
+#include "psram/psram_driver.h"
+#include "psram/psram_pins.h"
+#include "rtos/ticks.h"
+#include "stack_paint.h"
+#include "usb/usb_host.h"
 
 namespace {
 
@@ -112,6 +117,27 @@ player::SessionOrchestrator s_orch(s_protocol);
 // Раскладка PSRAM в ядре (ядро собирается и на ПК) рассчитана на
 // чип платы.
 static_assert(psram::kSizeBytes == soundsinth::memory::kPsramChipBytes, "The board PSRAM (PICO_PSRAM_SIZE_BYTES) disagrees with kPsramChipBytes");
+
+// Держать ли машину в сбросе на загрузке платы. Решается до разбора
+// настроек: вывод сброса настраивается первым делом. При RESET_SIGNAL=0
+// сброс не выдаётся вовсе, и перезапуск по Ctrl+Alt+Del перезапускает
+// только плату. Конфигуратор - исключение: войти в него без сброса машины
+// нельзя. Порядок источников - как у загрузки: запрос прошлой загрузки,
+// перемычка, блок во флеше, умолчания. Настройки с карты разбираются позже
+// и на это решение не влияют: запись их во флеш делает загрузка.
+bool boot_holds_host() {
+    using soundsinth::config::Settings;
+    platform::BootRequest req;
+    if (platform::boot_request_peek(req) && req.configurator) return true;
+    if (platform::boot_jumper_closed()) return true;
+    Settings s;
+    const uint8_t* const page0 = platform::config_flash_view(0);
+    const uint8_t* const page1 = platform::config_flash_view(1);
+    const int cur              = soundsinth::config::store_pick(page0, page1);
+    if (cur >= 0) soundsinth::config::page_read(cur == 0 ? page0 : page1, s);
+    soundsinth::config::settings_clamp(s);
+    return s.reset_signal != 0;
+}
 
 void reserved_pins_safe_init() {
     // RP2350 Errata E9: плавающий вход (даже без подтяжек) может защёлкнуться
@@ -146,8 +172,13 @@ void reserved_pins_safe_init() {
     // зовёт session_orchestrator_run(), когда PIO/DMA/IRQ шины настроены.
     // Значение до направления, как у ROM_BLK_N: иначе после gpio_init пин
     // несколько тактов выдавал бы 0, то есть отпускал сброс.
+    // При RESET_SIGNAL=0 машина не держится: работает, пока плата грузится.
     gpio_init(bus::PIN_RESET_N);
-    bus::assert_host_reset();
+    if (boot_holds_host()) {
+        bus::assert_host_reset();
+    } else {
+        bus::release_host_reset();
+    }
     gpio_set_dir(bus::PIN_RESET_N, GPIO_OUT);
 
     // NMI - вход, линию ведёт машина. Выход в единице работает встречно: в
@@ -173,7 +204,7 @@ extern "C" void vApplicationStackOverflowHook(TaskHandle_t, char*) {
 // места, при 1 - ядро встаёт молча. pc - адрес возврата из места assert.
 extern "C" SOUNDSINTH_NOINLINE void soundsinth_assert_failed(int line) {
     char m[80];
-    snprintf(m, sizeof(m), "\n*** ASSERT core=%" PRIu32 " line=%d pc=%08" PRIxPTR " ***\n", get_core_num(), line,
+    snprintf(m, sizeof(m), "\n*** ASSERT core=%u line=%d pc=%08" PRIxPTR " ***\n", static_cast<unsigned>(get_core_num()), line,
              reinterpret_cast<uintptr_t>(__builtin_return_address(0)));
     platform::log_go_direct();
     platform::log_put_blocking(m);
@@ -230,9 +261,9 @@ extern "C" void hardfault_handler_c(uint32_t* stacked, uint32_t exc_return) {
     }
 }
 
-// Куча newlib из линкер-скрипта SDK: от конца .bss (__end__) до конца
-// основного SRAM (__HeapLimit), стеки ядер выше (SCRATCH_X и SCRATCH_Y).
-// malloc в образе нет - это свободная SRAM.
+// Хвост SRAM за .bss: от __end__ до конца основного SRAM (__HeapLimit),
+// стеки ядер выше (SCRATCH_X и SCRATCH_Y). Кучи нет (PICO_HEAP_SIZE=0) -
+// это свободная SRAM.
 extern "C" char __end__;
 extern "C" char __HeapLimit;
 // Конец образа во флеше (линкер-скрипт SDK). Нужен сторожу раскладки флеша:
@@ -310,13 +341,12 @@ void log_config_boot(const devices::config::BootReport& r) {
         printf(", set_config.txt: applied %u, unknown %u, invalid %u", static_cast<unsigned>(r.applied), static_cast<unsigned>(r.unknown),
                static_cast<unsigned>(r.bad));
     }
-    if (r.from_configurator) printf(", from the configurator");
+    if (r.from_configurator) printf(", saved by the configurator");
     if (r.gui_invite) printf(", open.gui present");
     if (r.flash_written) {
         // С причиной: настройки теряются молча, и по журналу должно быть
         // видно, кто их переписал.
-        printf(", block %u written (%s)", static_cast<unsigned>(r.slot),
-               r.from_configurator ? "configurator" : (r.file_applied ? "set_config.txt" : "no valid block"));
+        printf(", block %u written (%s)", static_cast<unsigned>(r.slot), r.file_applied ? "set_config.txt" : "no valid block");
     } else if (!r.flash_valid || r.applied != 0) {
         printf(", BLOCK WRITE FAILED");
     }
@@ -364,7 +394,7 @@ int main() {
     // отладочная сессия; сами мы watchdog_enable() не вызываем. Снимается
     // безусловно.
     watchdog_disable();
-    // Узор на стек Core0 ниже main - запас в строке "boot: стек main" и в heap:.
+    // Узор на стек Core0 ниже main - запас в строках "boot: main stack free" и "stack free:".
     rp2350::stack_paint_below_sp(&__StackBottom);
     s_boot_start_us = time_us_32();
     systick_hw->csr = 0; // FreeRTOS перепрограммирует его на Core0 сама
@@ -420,7 +450,7 @@ int main() {
     printf("boot: psram_init done t=%" PRIu32 "ms\n", boot_ms());
 
     log_boot_clocks();
-    // Арена newlib: от конца .bss до конца основного SRAM. Карта трапов
+    // Хвост SRAM за .bss, кучи нет. Карта трапов
     // лежит в .bss обычным объектом, то есть уже учтена и здесь, и в size.
     printf("boot: SRAM past .bss %u B\n", static_cast<unsigned>(&__HeapLimit - &__end__));
 
@@ -456,7 +486,7 @@ int main() {
     {
         uint8_t* const blocks = soundsinth::memory::psram_take_permanent(shared::g_track_memory.psram, devices::storage::kBlockCacheBytes);
         devices::storage::storage_attach_block_cache(blocks, devices::storage::kBlockCacheBytes, &platform::psram_write_alias);
-        printf("boot: block cache %u KB in PSRAM: %s\n", devices::storage::kBlockCacheBytes / 1024u, blocks != nullptr ? "yes" : "NO ROOM");
+        printf("boot: block cache %" PRIu32 " KB in PSRAM: %s\n", devices::storage::kBlockCacheBytes / 1024u, blocks != nullptr ? "yes" : "NO ROOM");
     }
 
     // Носитель нужен и Z-Controller, и DivMMC. На Core0 до
@@ -501,14 +531,20 @@ int main() {
         bus::config_rom_set_enabled(true);
         // Сброс машины обязателен даже при RESET_SIGNAL=0: иначе войти
         // можно было бы только снятием питания, а это явное действие
-        // пользователя, а не самоуправство платы.
+        // пользователя, а не самоуправство платы. Приглашение с карты
+        // известно только здесь - машину держим с этого места.
         rp2350::hal::host_signals_allow_reset(true);
+        bus::assert_host_reset();
     }
 
     // Режим шины - до подъёма Core1: он решает, кто захватывает автоматы PIO.
     const uint8_t disksys = devices::config::settings().disksys;
-    bus::divmmc_set_enabled(want_config || disksys == static_cast<uint8_t>(soundsinth::config::DiskSys::DivMmc));
+    bus::rom_emu_set_enabled(want_config || disksys == static_cast<uint8_t>(soundsinth::config::DiskSys::DivMmc));
     bus::trdos_set_enabled(!want_config && disksys == static_cast<uint8_t>(soundsinth::config::DiskSys::TrDos));
+    // Сброс машины по тишине на M1 - всегда, какой бы ни была настройка
+    // сброса: и кнопку машины, и свой сброс плата должна видеть одинаково.
+    // С DivMMC места нет: pio0 занят эмуляцией ПЗУ.
+    bus::reset_watch_set_enabled(!bus::rom_emu_enabled());
 
     printf("boot: main stack free %" PRIu32 " of %u B\n", rp2350::stack_unpainted_bytes(&__StackBottom, &__StackTop),
            static_cast<unsigned>((&__StackTop - &__StackBottom) * sizeof(uint32_t)));
@@ -522,13 +558,14 @@ int main() {
     // регистрируют прерывания PIO на вызывающем ядре, поэтому шина
     // поднимается отсюда, и не раньше psram_init(): в прямом режиме QMI флеш
     // XIP недоступен, а с ним код обработчиков во флеше. Не возвращается.
+    rp2350::hal::boot_save_init();
     multicore_launch_core1([]() {
         rp2350::stack_paint_below_sp(&__StackOneBottom);
         // Эмуляция ПЗУ поднимается первой: она захватывает автоматы PIO по явным
         // номерам, шина плагина берёт свои следом. Выключенная не занимает ни
         // одного автомата, а линия блокировки ПЗУ так и остаётся пассивной -
         // её подняли в пассив при загрузке, и больше её никто не трогает.
-        if (bus::divmmc_enabled()) {
+        if (bus::rom_emu_enabled()) {
             bus::rom_emu_init();
             debug_log("core1: DivMMC on, ROM emulated\n");
         }
@@ -549,7 +586,7 @@ int main() {
         // занимает: на машине со своим интерфейсом карты два устройства на
         // одном чтении дали бы столкновение на шине.
         if (devices::config::settings().zcontroller != 0) {
-            devices::zcontroller::zcontroller_init(bus::divmmc_enabled());
+            devices::zcontroller::zcontroller_init();
             debug_log("core1: z-controller on 0x57/0x77\n");
         } else {
             debug_log("core1: z-controller disabled by settings\n");
@@ -567,25 +604,28 @@ int main() {
         // ядре, и приоритет ему ставится ниже всех шинных. Виток крутит
         // цикл сеанса.
         //
-        // Поднимается всегда, независимо от настроек. Прежде стек не
-        // стартовал, когда им некому пользоваться, - его виток гасит на
-        // этом ядре все прерывания, в том числе шинные. Но настройкой
-        // клавиатуры закрывался и вход в конфигуратор, то есть
-        // единственный способ эту настройку вернуть.
-        rp2350::usb::host_init();
+        // В конфигураторе - всегда: управление с клавиатуры USB, даже если
+        // она выключена в настройках. В обычном режиме - только когда USB
+        // кому-то нужен: виток стека гасит на этом ядре все прерывания, в
+        // том числе шинные. Без стека вход в конфигуратор - перемычкой или
+        // файлом-приглашением на карте.
+        if (platform::config_rom_active() || soundsinth::config::usb_host_used(devices::config::settings())) {
+            rp2350::usb::host_init();
+        } else {
+            debug_log("usb: host not started - no USB consumer in settings\n");
+        }
 
         // Банк .mid: файл на карте (до 113 МБ), иначе регион флеша (15 МБ, по
         // XIP). Где он лежит, знает только раскладка прошивки.
         //
         // Здесь, а не на Core0 до запуска этого ядра: чтение таблиц с карты -
         // сотни миллисекунд, и ждать их незачем. USB к этому месту поднят, а
-        // перечисление двигается витком стека между куска́ми чтения. Машина
+        // перечисление двигается витком стека между кусками чтения. Машина
         // ещё в сбросе (отпускает его сеанс ниже), трека нет, и распределитель
         // PSRAM видит одно ядро.
-        debug_logf("core1: opening banks t=%" PRIu32 " ms\n", platform::mono_us() / 1000u);
-        player::open_banks(reinterpret_cast<const uint8_t*>(XIP_BASE + SOUNDSINTH_BANK_FLASH_OFFSET), PICO_FLASH_SIZE_BYTES - SOUNDSINTH_BANK_FLASH_OFFSET,
-                           &platform::usb_host_task);
-        debug_logf("core1: banks opened t=%" PRIu32 " ms\n", platform::mono_us() / 1000u);
+        debug_logf("core1: opening banks t=%" PRIu32 " ms\n", platform::mono_ms());
+        player::banks_open(reinterpret_cast<const uint8_t*>(XIP_BASE + SOUNDSINTH_BANK_FLASH_OFFSET), PICO_FLASH_SIZE_BYTES - SOUNDSINTH_BANK_FLASH_OFFSET);
+        debug_logf("core1: banks opened t=%" PRIu32 " ms\n", platform::mono_ms());
         // Будильник холостого витка - до сеанса: его захват гасит
         // прерывания, а дальше шина уже живая.
         player::hal::idle_wait_init();
@@ -601,12 +641,11 @@ int main() {
     // Место обеих задач статическое: кучи у ядра нет, нехватка SRAM должна
     // быть ошибкой компоновки, а не отказом выделения на старте.
     //
-    // По 1024 слова, 4 КБ. Замер платы (строка "стек свободно"): журнал
-    // трогает 1224 Б, цикл звука трогал 4064, из которых 2168 - микшер и
-    // 976 - буферы строк диагностики; оба уехали со стека в статику, и по
-    // графу вызовов остаётся около 1.1 КБ. Запас втрое; проверять той же
-    // строкой после прошивки.
-    static StackType_t s_log_stack[1024];
+    // Цикл звука - 1024 слова, 4 КБ: трогает до 1696 Б. Журнал - 768 слов,
+    // 3 КБ: худший путь печати около 1210 Б (session_log_stats), путь отказа
+    // (configASSERT под debug_log) около 1390 - запас больше двух раз.
+    // Проверять строкой "stack free:".
+    static StackType_t s_log_stack[768];
     static StaticTask_t s_log_tcb;
     static StackType_t s_app_stack[1024];
     static StaticTask_t s_app_tcb;

@@ -69,6 +69,9 @@ struct ReportMap {
     bool uses_report_ids = false;
 
     bool has_axes() const;
+
+    Field& field(Axis a) { return axis[static_cast<uint8_t>(a)]; }
+    const Field& field(Axis a) const { return axis[static_cast<uint8_t>(a)]; }
 };
 
 // Разобрать дескриптор. false - пригодных полей не нашлось или разборщик

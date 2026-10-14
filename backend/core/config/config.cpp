@@ -30,6 +30,7 @@ void settings_clamp(Settings& s) {
     clamp_flag(s.auto_volume);
     clamp_flag(s.log);
     clamp_flag(s.wifi);
+    clamp_flag(s.joy_8bit);
 
     // Незнакомая дисковая система - ни одной: подставлять чужую значит
     // отдать машине память или ПЗУ не тем способом.
@@ -56,6 +57,16 @@ void settings_clamp(Settings& s) {
 
     if (s.mouse_speed < kMouseSpeedMin) s.mouse_speed = kMouseSpeedMin;
     if (s.mouse_speed > kMouseSpeedMax) s.mouse_speed = kMouseSpeedMax;
+
+    if (s.mod_panning > kModPanningMax) s.mod_panning = kModPanningMax;
+
+    // Esc занят отменой, коды ниже 4 - не клавиши, выше kKeyCodeMax - не
+    // клавиши раскладки.
+    for (auto& action : s.joy_keys) {
+        for (uint8_t& code : action) {
+            if (code == kKeyEsc || code < kKeyCodeMin || code > kKeyCodeMax) code = 0;
+        }
+    }
 
     // DivMMC грузит машину со своей карты, а для этого обязан её сбросить:
     // без сброса машина уже стоит в чужом ПЗУ, и подставлять ей память

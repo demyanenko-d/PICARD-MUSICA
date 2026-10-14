@@ -31,6 +31,13 @@ struct DispatchContext {
     const soundsinth::model::Song* song = nullptr;
     // SetGlobalVolume/GlobalVolumeSlide и speed в SetPitchOffset. Не nullptr.
     PlayState* ps = nullptr;
+    // Посыл в хорус по каналу паттерна (SetChorusSend, только .mid): массив
+    // на kMaxPatternChannels, а не поле ChannelState - тот на 96 слотах SRAM.
+    // nullptr - команда без действия.
+    uint8_t* chorus_send = nullptr;
+    // Параметры общих эффектов (SetEffectParam), по model::FxParam. nullptr -
+    // команда без действия.
+    uint8_t* fx_params = nullptr;
 
     // NNA: nna_user - указатель вызывающего, не DispatchContext*. Оба поля
     // nullptr - NNA нет.
@@ -41,7 +48,10 @@ struct DispatchContext {
 // Сброс каналов, панорама и громкость из заголовка - до sequencer_init: он
 // разбирает строку 0, и её Xxx, S8x, Mxx и панорама сэмпла ложатся поверх
 // заголовка (строка 0 с Mxx, Xxx или S8x - около 8% файлов IT).
-void channels_init(const soundsinth::model::Song& song, ChannelState* channels);
+// pan_percent - глубина разводки Paula у MOD, проценты: 100 - до упора,
+// как у железа, 0 - все каналы по центру. Прочих форматов не касается:
+// у них панорама своя, из файла.
+void channels_init(const soundsinth::model::Song& song, ChannelState* channels, uint8_t pan_percent = 100);
 
 // Разбор строки: у каждого канала - перехват NoteDelay, сброс флагов
 // строки, ячейка (Note-Trigger: сэмпл по keymap, громкость сэмпла; затем

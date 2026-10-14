@@ -17,10 +17,20 @@
 
 /* 'PCFG' младшим байтом вперёд. */
 #define PAGE_MAGIC 0x47464350uL
-#define PAGE_VERSION 2u
+#define PAGE_VERSION 3u
 
 #define PAGE_KIND_NUMBER 0
 #define PAGE_KIND_CHOICE 1
+/* Код HID: выбирается нажатием, имя берётся из списка значений. */
+#define PAGE_KIND_KEY 2
+
+/* Ячейка захвата клавиши: байт состояния, байт кода. */
+#define CAPTURE_IDLE 0
+#define CAPTURE_ARMED 1
+#define CAPTURE_DONE 2
+
+/* Код Esc: отмена, а не клавиша. */
+#define HID_KEY_ESC 0x29
 
 typedef struct {
     u32 magic;
@@ -32,7 +42,7 @@ typedef struct {
     u16 saved_offset;
     u16 mask_offset;
     u16 strings_offset;
-    u16 reserved;
+    u16 capture_offset; /* ячейка захвата клавиши */
 } page_header_t;
 
 /* 16 байт на запись: переход к полю - сдвиг, а не умножение. */

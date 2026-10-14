@@ -33,11 +33,11 @@ namespace soundsinth::memory {
 // самый дорогой сценарий: у трекеров упаковщик паттернов, у живого MIDI
 // ревербератор, который стоит при полной арене.
 //
-// 80 КБ, а не 72: самый тяжёлый .mid библиотеки просит 71828 байт
-// метаданных, и на 72 КБ проходу длительности не остаётся его 9216 -
-// длительность выходит нулевая, трек не играет вовсе. Нижняя граница по
-// этому файлу - 81044 байта.
-inline constexpr uint32_t kResidentMetadataBytes = 81920;
+// 96 КБ: самый тяжёлый .mid библиотеки просит 71828 байт метаданных, и
+// сверху обязан встать самый дорогой сценарий, иначе трек играет сухим.
+// Нижние границы по этому файлу: 81044 с проходом длительности, 88556 с
+// ревербератором, хорусом и шинами (kPlayScratchBytes).
+inline constexpr uint32_t kResidentMetadataBytes = 98304;
 // Паттерн целиком: заголовок, строки и словарь. По 121750 файлам архива
 // нынешним упаковщиком худший блок 24258 байт (IT/O/orb_shy.it), словарь до
 // 13746 (XM/noahsboutique_rmx.xm), строки до 19890. Тем же буфером пакуются
@@ -74,9 +74,18 @@ inline constexpr uint32_t kConfigBytes = 4096 + 6144 + 1024;
 // PlayState прохода. Размер держит static_assert у прохода.
 inline constexpr uint32_t kDurationPassBytes = 8192 + 1024;
 
-// Ревербератор движка (12612 Б при половинной частоте) и за ним его шина
-// (кадр буфера на int32). Размер держит static_assert у движка.
-inline constexpr uint32_t kPlayScratchBytes = 12612 + 1024;
+// Ревербератор движка (12620 Б при половинной частоте), хорус (2060 Б) и
+// их шины (по кадру буфера на int32). Размер держит static_assert у движка.
+inline constexpr uint32_t kPlayScratchBytes = 12620 + 2060 + 2 * 1024;
+
+// Спрос на метаданные у самого тяжёлого файла библиотеки; сверху обязан
+// встать самый дорогой сценарий, иначе загрузка проходит, а ревербератор
+// или проход длительности не заводятся.
+inline constexpr uint32_t kHeaviestMetadataBytes = 71828;
+static_assert(kResidentMetadataBytes >= kHeaviestMetadataBytes + kPlayScratchBytes,
+              "the metadata pool must also hold the reverb scratch, or the heaviest track plays dry without saying so");
+static_assert(kResidentMetadataBytes >= kHeaviestMetadataBytes + kDurationPassBytes,
+              "the metadata pool must also hold the duration pass, or the heaviest track reports zero length");
 
 // Кто въехал в TrackScratch. Порядок объявления - порядок по времени.
 enum class Scratch : uint8_t {

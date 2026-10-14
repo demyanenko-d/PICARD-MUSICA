@@ -28,6 +28,8 @@
 ; Сборка сверяет их с номерами пинов.
 .define public Z80_WR_N_GPIO 4
 .define public Z80_IORQ_N_GPIO 6
+; A0 - разряд снимка bus_wr (IN_BASE = 0). Сборка сверяет с номером пина.
+.define public A0_GPIO 8
 
 ; Таблицы портов выровнены на 1 << PORT_TABLE_BASE_SHIFT: X = база >> сдвиг,
 ; адрес записи - in x, (32 - сдвиг) / in pins, 8 / in null, 2. Выравнивание
@@ -98,7 +100,7 @@ static inline void port_detect_program_init(PIO pio, uint sm, uint offset, uint 
 ; A8..A15, а они в окне базы. Запускает его не шина, а очередь: запись
 ; таблицы портов приходит каналом DMA, адрес ячейки уходит следующему.
 ;
-; Маршрута два, и выбирает его младший разряд записи:
+; Маршрута два, и выбирает его старший разряд записи:
 ;
 ;   0   адрес ячейки готов - отдать как есть. Так отвечает порт, у которого
 ;       ответ один на любой старший байт адреса;
@@ -117,17 +119,18 @@ static inline void port_detect_program_init(PIO pio, uint sm, uint offset, uint 
 .program port_join
 
 .wrap_target
+; Маршрут в старшем разряде записи: полезная часть берётся первым же out, и
+; прямая ветвь - один in. Память команд pio2 на счету: в ней и trap_route.
 top:
-    out x, 1                    ; маршрут (автоподхват)
-    out y, 31                   ; адрес ячейки >> 1 или база страницы >> 8
+    out y, 31                   ; адрес ячейки или база страницы >> 8
+    out x, 1                    ; маршрут (автоподхват: 31 + 1 = 32)
     jmp !y, top                 ; порт не наш
     jmp !x, direct
     in y, 24                    ; база страницы
     in pins, 8                  ; A8..A15 - смещение, 32-й разряд - автопуш
 .wrap
 direct:
-    in y, 31                    ; адрес ячейки без младшего разряда
-    in null, 1                  ; вернуть его на место - автопуш
+    in y, 32                    ; адрес ячейки как есть - автопуш
     jmp top
 
 % c-sdk {
@@ -171,11 +174,11 @@ static inline void port_join_program_init(PIO pio, uint sm, uint offset, uint pi
     ; адрес и данные.
     wait 0 gpio Z80_WR_N_GPIO [31] ; WR_N низкий: идёт запись, и выдержка
     mov osr, pins
-    out null, 6                 ; до IORQ (GPIO 6, IN_BASE = 0)
+    out null, Z80_IORQ_N_GPIO   ; до IORQ (IN_BASE = 0)
     out y, 1                    ; Y = IORQ_N
     jmp !y, take                ; ноль: порт, взять безусловно
 public mem:                     ; без эмуляции памяти здесь jmp done (bus_setup)
-    out null, 15                ; иначе память: до разряда A14 (6+1+15 = 22)
+    out null, (A0_GPIO + 14 - Z80_IORQ_N_GPIO - 1) ; иначе память: до разряда A14
     out y, 2                    ; Y = A14,A15
     jmp y--, done               ; не ноль: выше 0x3FFF, ОЗУ машины
 take:
@@ -217,13 +220,19 @@ static inline void bus_wr_program_init(PIO pio, uint sm, uint offset) {
 ; последнее выставленное значение.
 .program rom_serve
 
+; Удержание байта после подъёма RD_N: итерация rd_confirm/rd_high - 2
+; команды, 6.7 нс при 300 МГц; 5 даёт 6 проходов, около 40 нс. Это время
+; байт ещё стоит на шине у общего ответчика памяти и портов. Своё имя, а не
+; PORT_CONFIRM детектора портов: значение то же, срок другой.
+.define RD_END_CONFIRM 5
+
 .side_set 1 opt
 
     ; Байт опоздал: цикл чтения кончился раньше, чем байт дошёл по цепочке
     ; DMA. На шину он не выходит - иначе плата заняла бы шину в следующем
     ; цикле Z80, и если это выборка команды из ОЗУ, процессор исполнил бы
     ; наш байт вместо своего. Отметка - слово в RX FIFO, его забирает и
-    ; считает ядро (rom_emu_serve_late_poll); noblock: полное FIFO теряет
+    ; считает ядро (bus_queues_poll); noblock: полное FIFO теряет
     ; отметку, а не останавливает автомат. Сюда только по jmp pin ниже,
     ; старт автомата - с pull (rom_serve_program_init).
 late:
@@ -239,7 +248,7 @@ late:
     ; неподведённую шину. Пока идёт подтверждение,
     ; данные выставлены.
 rd_end:
-    set y, PORT_CONFIRM
+    set y, RD_END_CONFIRM
 rd_confirm:
     jmp pin, rd_high            ; RD_N высокий: засчитать
     jmp rd_end                  ; просел: счётчик заново

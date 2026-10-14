@@ -4,13 +4,14 @@
 #include "platform/hot_path.h"
 
 #include "devices/hal/z80_ports.h"
+#include "platform/compiler.h"
 
 namespace devices::hid {
 namespace {
 
 // Заполняется mouse_reset: незанятые сочетания старшего байта отвечают
 // 0xFF, три занятых - счётчиками и кнопками.
-alignas(256) uint8_t s_page[256];
+alignas(256) SOUNDSINTH_BSS_SECTION("hid_mouse_page") uint8_t s_page[256];
 
 uint8_t s_x = 0;
 uint8_t s_y = 0;

@@ -27,7 +27,7 @@ namespace soundsinth::config {
 // Номер формата страницы. Поднимать при любой перестановке полей
 // заголовка или записи поля: ПЗУ сверяет его и отказывается рисовать
 // чужую страницу.
-inline constexpr uint16_t kConfigPageVersion = 2;
+inline constexpr uint16_t kConfigPageVersion = 3;
 
 inline constexpr uint32_t kConfigPageBytes = 8192;
 
@@ -40,7 +40,17 @@ inline constexpr uint32_t kConfigFieldBytes = 16;
 
 // Вид поля в странице: число правится прибавлением, перечисление -
 // переходом по списку.
-enum class PageKind : uint8_t { Number = 0, Choice = 1 };
+// Клавиша - код HID, выбирается нажатием: ПЗУ взводит ячейку захвата,
+// плата кладёт в неё код следующей нажатой клавиши USB.
+enum class PageKind : uint8_t { Number = 0, Choice = 1, Key = 2 };
+
+// Ячейка захвата клавиши: байт состояния и байт кода.
+inline constexpr uint8_t kCaptureIdle  = 0; // никто не ждёт
+inline constexpr uint8_t kCaptureArmed = 1; // ПЗУ ждёт нажатия
+inline constexpr uint8_t kCaptureDone  = 2; // плата положила код
+
+// Байтов маски доступности: по биту на поле, до 64 полей.
+inline constexpr uint32_t kConfigMaskBytes = 8;
 
 // Заголовок страницы, 20 байт. Все смещения - от начала страницы.
 struct ConfigPageHeader {
@@ -55,7 +65,7 @@ struct ConfigPageHeader {
     uint16_t saved_offset;
     uint16_t mask_offset;    // биты доступности, по полю на бит
     uint16_t strings_offset; // начало области строк
-    uint16_t reserved;
+    uint16_t capture_offset; // ячейка захвата клавиши, два байта
 };
 static_assert(sizeof(ConfigPageHeader) == 20, "the page header layout is frozen");
 
@@ -82,7 +92,7 @@ static_assert(sizeof(ConfigPageChoice) == 4, "the choice record layout is frozen
 
 // Маска доступных полей: бит на поле в порядке таблицы, единица - поле
 // правится. Недоступное поле ПЗУ показывает, но не даёт выбрать.
-uint32_t settings_active_mask(const Settings& s);
+uint64_t settings_active_mask(const Settings& s);
 
 // Сколько полей в странице. Оно же число байт в массиве значений.
 uint32_t config_page_field_count();
@@ -99,5 +109,8 @@ bool config_page_refresh(const Settings& s, uint8_t* page, uint32_t cap);
 // применить зависимости. false - страница не наша или сумма не сошлась,
 // настройки не тронуты.
 bool config_page_apply(const uint8_t* page, uint32_t cap, Settings& s);
+
+// Ячейка захвата клавиши, nullptr - страница не наша.
+uint8_t* config_page_capture(uint8_t* page, uint32_t cap);
 
 } // namespace soundsinth::config

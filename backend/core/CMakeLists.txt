@@ -27,6 +27,7 @@ add_library(soundsinth_core STATIC
     engine/effect_dispatch.cpp
     engine/resonant_filter.cpp
     engine/reverb.cpp
+    engine/chorus.cpp
     engine/voice.cpp
     engine/tracker_engine.cpp
     engine/voice_mixer.cpp

@@ -51,15 +51,58 @@ const uint8_t kBootMouse[] = {
 };
 // clang-format on
 
-HID_ReportInfo_t g_info;
+// Мышь с осями по 12 разрядов: минимум -2047 записан двумя байтами, то
+// есть ширина данных предмета (16) не равна ширине поля (12).
+// clang-format off
+const uint8_t kMouse12[] = {
+    0x05, 0x01,       // Usage Page (Generic Desktop)
+    0x09, 0x02,       // Usage (Mouse)
+    0xA1, 0x01,       // Collection (Application)
+    0x09, 0x01,       //   Usage (Pointer)
+    0xA1, 0x00,       //   Collection (Physical)
+    0x05, 0x01,       //     Usage Page (Generic Desktop)
+    0x09, 0x30,       //     Usage (X)
+    0x09, 0x31,       //     Usage (Y)
+    0x16, 0x01, 0xF8, //     Logical Minimum (-2047)
+    0x26, 0xFF, 0x07, //     Logical Maximum (2047)
+    0x75, 0x0C,       //     Report Size (12)
+    0x95, 0x02,       //     Report Count (2)
+    0x81, 0x06,       //     Input (Data, Variable, Relative)
+    0xC0,             //   End Collection
+    0xC0              // End Collection
+};
 
-// Расширение знака по ширине поля: разборщик кладёт границы сырыми
-// разрядами, а поле бывает знаковым.
-int32_t sign_extend(uint32_t value, uint8_t bits) {
-    if (bits == 0 || bits >= 32) return static_cast<int32_t>(value);
-    const uint32_t sign = 1u << (bits - 1);
-    return static_cast<int32_t>((value ^ sign) - sign);
-}
+// Ось 16 разрядов с границами одним байтом: -1..1.
+const uint8_t kAxis16[] = {
+    0x05, 0x01,       // Usage Page (Generic Desktop)
+    0x09, 0x04,       // Usage (Joystick)
+    0xA1, 0x01,       // Collection (Application)
+    0x09, 0x30,       //   Usage (X)
+    0x15, 0xFF,       //   Logical Minimum (-1)
+    0x25, 0x01,       //   Logical Maximum (1)
+    0x75, 0x10,       //   Report Size (16)
+    0x95, 0x01,       //   Report Count (1)
+    0x81, 0x02,       //   Input (Data, Variable, Absolute)
+    0xC0              // End Collection
+};
+
+// 0..255 одним байтом: максимум 0xFF при неотрицательном минимуме -
+// беззнаковое 255, а не -1. Так пишут многие геймпады.
+const uint8_t kAxisU8[] = {
+    0x05, 0x01,       // Usage Page (Generic Desktop)
+    0x09, 0x04,       // Usage (Joystick)
+    0xA1, 0x01,       // Collection (Application)
+    0x09, 0x30,       //   Usage (X)
+    0x15, 0x00,       //   Logical Minimum (0)
+    0x25, 0xFF,       //   Logical Maximum (255)
+    0x75, 0x08,       //   Report Size (8)
+    0x95, 0x01,       //   Report Count (1)
+    0x81, 0x02,       //   Input (Data, Variable, Absolute)
+    0xC0              // End Collection
+};
+// clang-format on
+
+HID_ReportInfo_t g_info;
 
 } // namespace
 
@@ -91,15 +134,10 @@ void run_hid_parser_tests() {
     CHECK_EQ(static_cast<int>(x.bit_size), 8);
     CHECK_EQ(static_cast<int>(y.bit_size), 8);
 
-    // ВАЖНО: знак у границ разборщик не расширяет, кладёт разряды как
-    // пришли - в дескрипторе минимум записан одним байтом 0x81, то есть
-    // 129 как беззнаковое. Правило "минимум больше максимума - поле
-    // знаковое, расширить обе границы по ширине поля" живёт в
-    // report_map.cpp, и вот его итог. На нём держится нормировка осей у
-    // геймпада.
+    // Минимум записан одним байтом 0x81: со знаком по размеру данных
+    // предмета это -127. На границах держится нормировка осей геймпада.
     CHECK_EQ(static_cast<int>(x.logical_min), -127);
     CHECK_EQ(static_cast<int>(x.logical_max), 127);
-    CHECK_EQ(static_cast<int>(sign_extend(0x81, 8)), -127);
 
     // Прямой вызов разборщика: таблица предметов обязана остаться пустой -
     // отбор всё разобрал на месте и ничего не принял, - а размер отчёта он
@@ -120,4 +158,30 @@ void run_hid_parser_tests() {
     CHECK(report_field_read(y, report, sizeof(report), vy));
     CHECK_EQ(static_cast<int>(vx), 5);
     CHECK_EQ(static_cast<int>(vy), -3);
+
+    std::printf("hid_parser: logical bounds signed by the item data size\n");
+    ReportMap m12;
+    CHECK(report_map_build(kMouse12, sizeof(kMouse12), m12));
+    const Field& x12 = m12.axis[static_cast<uint8_t>(Axis::X)];
+    CHECK(x12.present());
+    CHECK_EQ(static_cast<int>(x12.logical_min), -2047);
+    CHECK_EQ(static_cast<int>(x12.logical_max), 2047);
+    const uint8_t r12[3] = {0xFF, 0xFF, 0xFF}; // X = -1, Y = -1
+    int32_t v12          = 0;
+    CHECK(report_field_read(x12, r12, sizeof(r12), v12));
+    CHECK_EQ(static_cast<int>(v12), -1);
+
+    ReportMap m16;
+    CHECK(report_map_build(kAxis16, sizeof(kAxis16), m16));
+    const Field& x16 = m16.axis[static_cast<uint8_t>(Axis::X)];
+    CHECK(x16.present());
+    CHECK_EQ(static_cast<int>(x16.logical_min), -1);
+    CHECK_EQ(static_cast<int>(x16.logical_max), 1);
+
+    ReportMap mu8;
+    CHECK(report_map_build(kAxisU8, sizeof(kAxisU8), mu8));
+    const Field& xu8 = mu8.axis[static_cast<uint8_t>(Axis::X)];
+    CHECK(xu8.present());
+    CHECK_EQ(static_cast<int>(xu8.logical_min), 0);
+    CHECK_EQ(static_cast<int>(xu8.logical_max), 255);
 }

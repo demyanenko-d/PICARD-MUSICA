@@ -7,12 +7,13 @@
 #include <cinttypes>
 #include <cstdio>
 
-#include "devices/hal/media.h"
-#include "devices/hal/spi.h"
-#include "devices/sd/sd_protocol.h"
 #include "platform/hot_path.h"
 #include "platform/log.h"
 #include "platform/mono_time.h"
+
+#include "devices/hal/media.h"
+#include "devices/hal/spi.h"
+#include "devices/sd/sd_protocol.h"
 
 namespace devices::sd {
 namespace {
@@ -70,11 +71,18 @@ HandshakeReport s_hs;
 // Ждать приходится долго: опрос ACMD41 и CMD1 при инициализации до 4 с,
 // токен данных 200 мс, конец записи 500 мс. Всё это время протокол хоста
 // не обслуживается, а его кольцо команд держит два кадра.
-void (*s_wait_service)(void*) = nullptr;
-void* s_wait_service_user     = nullptr;
+hal::WaitServiceFn s_wait_service = nullptr;
+void* s_wait_service_user         = nullptr;
 // Драйвер внутри своей транзакции: вложенные чтение и запись сектора
 // отказывают, иначе новая команда ушла бы посреди чужой при опущенном CS.
 bool s_in_transaction = false;
+
+// Сроки ожидания карты: токен данных и конец занятости (запись, CMD12).
+constexpr uint32_t kTokenTimeoutMs = 200;
+constexpr uint32_t kBusyTimeoutMs  = 500;
+// Попыток чтения сектора с неверной CRC и байт опроса ответа R1.
+constexpr uint32_t kCrcAttempts = 3;
+constexpr uint8_t kR1PollBytes  = 10;
 
 // Зовётся из циклов ожидания, не чаще этого срока. Время - в микросекундах
 // 32 бит: опрос токена крутится на каждом читаемом секторе, а миллисекунды
@@ -116,9 +124,10 @@ void SOUNDSINTH_HOT_PATH(cs_high)() {
     xfer(sd::kIdleByte); // карте нужен такт после снятия CS, чтобы отпустить линию
 }
 
-// Ответ R1 приходит не сразу: до восьми байт линия в 0xFF.
+// Ответ R1 приходит не сразу: по спецификации до восьми байт линия в
+// 0xFF, опрос - kR1PollBytes, с запасом.
 uint8_t SOUNDSINTH_HOT_PATH(wait_r1)() {
-    for (uint8_t i = 0; i < 10; ++i) {
+    for (uint8_t i = 0; i < kR1PollBytes; ++i) {
         const uint8_t r = xfer(sd::kIdleByte);
         if ((r & sd::kR1StartBit) == 0) return r;
     }
@@ -127,7 +136,7 @@ uint8_t SOUNDSINTH_HOT_PATH(wait_r1)() {
 
 uint8_t SOUNDSINTH_HOT_PATH(send_cmd)(uint8_t cmd, uint32_t arg) {
     uint8_t frame[sd::kCmdFrameBytes];
-    frame[0] = static_cast<uint8_t>(sd::kCmdStartBits | cmd);
+    frame[0] = static_cast<uint8_t>(sd::kCmdStartValue | cmd);
     frame[1] = static_cast<uint8_t>(arg >> 24);
     frame[2] = static_cast<uint8_t>(arg >> 16);
     frame[3] = static_cast<uint8_t>(arg >> 8);
@@ -226,8 +235,8 @@ bool card_handshake(SdInfo& out) {
         const uint16_t flush = static_cast<uint16_t>(10u << (attempt < 6u ? attempt : 6u));
         for (uint16_t i = 0; i < flush; ++i) {
             xfer(sd::kIdleByte);
-            // Самая длинная порция - 640 байт, на 400 кГц это 12.8 мс в одном
-            // куске, и всё это время шину не обслуживает никто.
+            // Порция до 640 байт, на 400 кГц это 12.8 мс: шина обслуживается
+            // каждые 32 байта.
             if ((i & 0x1fu) == 0x1fu) serve_while_waiting(last_service_us);
         }
         cs_low();
@@ -259,14 +268,10 @@ bool card_handshake(SdInfo& out) {
     }
     s_hs.v2 = v2;
 
-    // ACMD41 до выхода из idle - оба варианта HCS.
-    //
-    // HCS сообщает карте, что хост умеет высокую ёмкость; ставится картам
-    // v2 по ответу на CMD8. Если карта объявила CMD8 недопустимой, хост
-    // считает её v1 и HCS не ставит, а SDHC без заявленной поддержки высокой
-    // ёмкости из idle не выходит никогда: бесконечный ACMD41 (так ведёт себя
-    // 4-гигабайтная карта). Поэтому сначала вариант по CMD8, потом
-    // противоположный: ошибка в версии стоит секунды на старте, а не отказа.
+    // ACMD41 - оба варианта HCS: сначала по ответу на CMD8, потом
+    // противоположный. SDHC, принятая за v1, без HCS из idle не выходит (так
+    // ведёт себя 4-гигабайтная карта); ошибка версии стоит 1.5 с на старте, а
+    // не отказа.
     const uint32_t acmd41_t0_us = platform::mono_us();
     bool hcs                    = v2;
     uint8_t last_r41            = 0xff;
@@ -303,7 +308,7 @@ bool card_handshake(SdInfo& out) {
             // Окно напряжений в аргументе, а не только HCS. Спецификация
             // разрешает нулевое окно, но часть карт на нём не встаёт; берётся
             // окно, которое карта сама сообщила в OCR.
-            last_r41 = send_cmd(sd::kAcmd41, (hcs ? sd::kOpCondHcsBits : 0u) | volt_window);
+            last_r41 = send_cmd(sd::kAcmd41, (hcs ? sd::kOpCondHcsBit : 0u) | volt_window);
             if (last_r41 == sd::kR1Ready) {
                 acmd41_ok = true;
                 break;
@@ -319,7 +324,7 @@ bool card_handshake(SdInfo& out) {
     if (!acmd41_ok) {
         const uint32_t mmc_t0 = platform::mono_us();
         for (;;) {
-            last_r41 = send_cmd(sd::kCmd1, sd::kOpCondHcsBits | volt_window);
+            last_r41 = send_cmd(sd::kCmd1, sd::kOpCondHcsBit | volt_window);
             if (last_r41 == sd::kR1Ready) {
                 acmd41_ok = true;
                 mmc       = true;
@@ -347,7 +352,7 @@ bool card_handshake(SdInfo& out) {
         for (uint8_t i = 0; i < 4; ++i) {
             ocr[i] = xfer(sd::kIdleByte);
         }
-        if (ocr[0] & sd::kOcrCcsBits) out.kind = SdKind::Sdhc;
+        if (ocr[0] & sd::kOcrCcsBit) out.kind = SdKind::Sdhc;
     } else if (v2) {
         cs_high();
         s_hs.step = HandshakeStep::Ocr;
@@ -360,7 +365,7 @@ bool card_handshake(SdInfo& out) {
         return false;
     }
 
-    if (send_cmd(sd::kCmd9, 0) != sd::kR1Ready || !wait_data_token(200)) {
+    if (send_cmd(sd::kCmd9, 0) != sd::kR1Ready || !wait_data_token(kTokenTimeoutMs)) {
         cs_high();
         s_hs.step = HandshakeStep::Csd;
         return false;
@@ -384,8 +389,9 @@ bool card_handshake(SdInfo& out) {
     return true;
 }
 
-// Сбои чтения носителя по причинам.
-struct SdReadErrors {
+// Счётчики карты: сбои чтения по причинам, время чтений и записей,
+// сбои записи.
+struct SdCardStats {
     uint32_t r1            = 0; // карта не приняла CMD17 (ответ не ноль)
     uint32_t token         = 0; // не пришёл токен данных
     uint32_t crc           = 0; // CRC не сошлась во всех трёх попытках
@@ -411,9 +417,14 @@ struct SdReadErrors {
     uint32_t writes         = 0;
     uint32_t write_max_us   = 0;
     uint64_t write_total_us = 0;
+    // Неудачные записи по причине: карта не приняла CMD24, отвергла данные,
+    // не освободила линию за 500 мс. Хост видит их только через CMD13.
+    uint32_t write_r1   = 0;
+    uint32_t write_data = 0;
+    uint32_t write_busy = 0;
 };
 constexpr uint32_t kSlowReadUs = SOUNDSINTH_SD_SLOW_READ_US;
-SdReadErrors s_read_err;
+SdCardStats s_card_stats;
 
 // Карта вышла из рабочего режима: не приняла команду чтения или замолчала
 // посреди него. На плате так бывает после самопроизвольного сброса карты:
@@ -438,15 +449,15 @@ enum class ReadResult : uint8_t { Ok, Lost, BadCrc };
 // обращаться до перезагрузки платы.
 bool reinit_card() {
     // Разностью: момент у оборота 2^32 мс не блокирует карту надолго.
-    if (s_reinit_tried && (platform::mono_us() / 1000u) - s_last_reinit_ms < s_reinit_interval_ms) {
-        ++s_read_err.window_rejects;
+    if (s_reinit_tried && platform::mono_ms() - s_last_reinit_ms < s_reinit_interval_ms) {
+        ++s_card_stats.window_rejects;
         return false;
     }
     s_reinit_tried = true;
-    ++s_read_err.reinit;
+    ++s_card_stats.reinit;
     SdInfo info;
     const bool ok    = card_handshake(info);
-    s_last_reinit_ms = platform::mono_us() / 1000u;
+    s_last_reinit_ms = platform::mono_ms();
     if (ok) {
         s_info = info;
         // Снимок носителя - событием, а не опросом: горячий путь читает
@@ -456,31 +467,31 @@ bool reinit_card() {
         s_reinit_interval_ms = kReinitIntervalMs;
         return true;
     }
-    ++s_read_err.reinit_failed;
+    ++s_card_stats.reinit_failed;
     if (s_reinit_interval_ms < kReinitIntervalMaxMs) s_reinit_interval_ms *= 2u;
     return false;
 }
 
 ReadResult SOUNDSINTH_HOT_PATH(read_sector_once)(uint32_t lba, uint8_t* dst) {
-    // Чтение с проверкой CRC-16/XMODEM: без неё битая середина блока уходит
-    // хосту молча (при 24 МГц от clk_peri 48 МГц - около 1% секторов).
+    // Чтение с проверкой CRC-16/XMODEM: без неё битый блок уходит хосту молча
+    // (при 2 тактах clk_peri на бит - около 1% секторов).
     //
     // Три попытки: ошибка случайная, повтор её снимает. Не снял - неудача:
     // заведомо испорченный сектор хуже никакого.
-    for (uint32_t attempt = 0; attempt < 3; ++attempt) {
+    for (uint32_t attempt = 0; attempt < kCrcAttempts; ++attempt) {
         cs_low();
         const uint8_t r1 = send_cmd(sd::kCmd17, block_arg(lba));
         if (r1 != sd::kR1Ready) {
             cs_high();
-            ++s_read_err.r1;
-            s_read_err.last_r1  = r1;
-            s_read_err.last_lba = lba;
+            ++s_card_stats.r1;
+            s_card_stats.last_r1  = r1;
+            s_card_stats.last_lba = lba;
             return ReadResult::Lost;
         }
-        if (!wait_data_token(200)) {
+        if (!wait_data_token(kTokenTimeoutMs)) {
             cs_high();
-            ++s_read_err.token;
-            s_read_err.last_lba = lba;
+            ++s_card_stats.token;
+            s_card_stats.last_lba = lba;
             return ReadResult::Lost;
         }
         // Одним обменом: блочное чтение держит на выходе 0xFF.
@@ -491,10 +502,10 @@ ReadResult SOUNDSINTH_HOT_PATH(read_sector_once)(uint32_t lba, uint8_t* dst) {
 
         const uint16_t want = static_cast<uint16_t>((hi << 8) | lo);
         if (sd::crc16(dst, sd::kBlockBytes) == want) return ReadResult::Ok;
-        ++s_read_err.crc_retry;
+        ++s_card_stats.crc_retry;
     }
-    ++s_read_err.crc;
-    s_read_err.last_lba = lba;
+    ++s_card_stats.crc;
+    s_card_stats.last_lba = lba;
     return ReadResult::BadCrc;
 }
 
@@ -504,7 +515,7 @@ ReadResult SOUNDSINTH_HOT_PATH(read_sector_once)(uint32_t lba, uint8_t* dst) {
 // следующая команда придёт на занятую карту.
 void stop_transmission() {
     send_cmd(sd::kCmd12, 0);
-    wait_not_busy(500);
+    wait_not_busy(kBusyTimeoutMs);
 }
 
 // Пачка подряд идущих секторов одной командой CMD18. Экономится не
@@ -519,17 +530,17 @@ ReadResult SOUNDSINTH_HOT_PATH(read_run_once)(uint32_t lba, uint32_t count, uint
     const uint8_t r1 = send_cmd(sd::kCmd18, block_arg(lba));
     if (r1 != sd::kR1Ready) {
         cs_high();
-        ++s_read_err.r1;
-        s_read_err.last_r1  = r1;
-        s_read_err.last_lba = lba;
+        ++s_card_stats.r1;
+        s_card_stats.last_r1  = r1;
+        s_card_stats.last_lba = lba;
         return ReadResult::Lost;
     }
     for (uint32_t i = 0; i < count; ++i) {
-        if (!wait_data_token(200)) {
+        if (!wait_data_token(kTokenTimeoutMs)) {
             stop_transmission();
             cs_high();
-            ++s_read_err.token;
-            s_read_err.last_lba = lba + i;
+            ++s_card_stats.token;
+            s_card_stats.last_lba = lba + i;
             return ReadResult::Lost;
         }
         uint8_t* const p = dst + i * sd::kBlockBytes;
@@ -539,8 +550,8 @@ ReadResult SOUNDSINTH_HOT_PATH(read_run_once)(uint32_t lba, uint32_t count, uint
         if (sd::crc16(p, sd::kBlockBytes) != static_cast<uint16_t>((hi << 8) | lo)) {
             stop_transmission();
             cs_high();
-            ++s_read_err.crc;
-            s_read_err.last_lba = lba + i;
+            ++s_card_stats.crc;
+            s_card_stats.last_lba = lba + i;
             return ReadResult::BadCrc;
         }
     }
@@ -618,21 +629,25 @@ void sd_card_log_handshake() {
         case HandshakeStep::Ok:
             break;
     }
+    // Причина и числа шага - двумя строками: одной строкой худший случай
+    // длиннее m, и обрезанная строка теряет перевод.
+    std::snprintf(m, sizeof(m), "sd: %s\n", why);
+    debug_log(m);
     std::snprintf(m, sizeof(m),
-                  "sd: %s (MISO at rest 0x%02X, SCK %" PRIu32 " kHz, CMD0 0x%02X, CMD8 0x%02X, version %s, CMD58 "
-                  "0x%02X, OCR %08" PRIX32 ", last ACMD41/CMD1 0x%02X after %" PRIu32 " ms)\n",
-                  why, hs.miso_idle, hs.init_khz, hs.r0, hs.r8, hs.v2 ? "v2" : "v1", hs.r58, hs.volt_window, hs.last_r41, hs.acmd41_ms);
+                  "sd:   MISO at rest 0x%02X, SCK %" PRIu32 " kHz, CMD0 0x%02X, CMD8 0x%02X, version %s, CMD58 "
+                  "0x%02X, OCR %08" PRIX32 ", last ACMD41/CMD1 0x%02X after %" PRIu32 " ms\n",
+                  hs.miso_idle, hs.init_khz, hs.r0, hs.r8, hs.v2 ? "v2" : "v1", hs.r58, hs.volt_window, hs.last_r41, hs.acmd41_ms);
     debug_log(m);
 }
 
-void sd_card_set_wait_service(void (*fn)(void* user), void* user) {
+void sd_card_set_wait_service(hal::WaitServiceFn fn, void* user) {
     s_wait_service      = fn;
     s_wait_service_user = user;
 }
 
 void sd_card_log_health() {
-    static SdReadErrors last{};
-    const SdReadErrors re = s_read_err;
+    static SdCardStats last{};
+    const SdCardStats re = s_card_stats;
     char sm[320];
     std::snprintf(sm, sizeof(sm),
                   "sd: media: reinits %" PRIu32 " (+%" PRIu32 "), failed %" PRIu32 " | r1 errors %" PRIu32 " (+%" PRIu32 ", last %02X), token %" PRIu32
@@ -646,8 +661,10 @@ void sd_card_log_health() {
                   re.reads, re.read_max_us, static_cast<uint32_t>(re.read_total_us / 1000u), re.slow_reads, re.window_rejects);
     debug_log(sm);
     if (re.writes != 0) {
-        std::snprintf(sm, sizeof(sm), "sd: sector write: total %" PRIu32 ", max %" PRIu32 " us, sum %" PRIu32 " ms\n", re.writes, re.write_max_us,
-                      static_cast<uint32_t>(re.write_total_us / 1000u));
+        std::snprintf(sm, sizeof(sm),
+                      "sd: sector write: total %" PRIu32 ", max %" PRIu32 " us, sum %" PRIu32 " ms | failed: write r1 %" PRIu32 ", data %" PRIu32
+                      ", busy %" PRIu32 "\n",
+                      re.writes, re.write_max_us, static_cast<uint32_t>(re.write_total_us / 1000u), re.write_r1, re.write_data, re.write_busy);
         debug_log(sm);
     }
     // Была переинициализация - её итог. Рукопожатие само не печатает: оно
@@ -665,11 +682,11 @@ bool SOUNDSINTH_HOT_PATH(sd_card_read_sector)(uint32_t lba, uint8_t* dst) {
     const uint32_t t0 = platform::mono_us();
     const bool ok     = read_sector_recovering(lba, dst);
     const uint32_t dt = platform::mono_us() - t0;
-    if (dt > s_read_err.read_max_us) s_read_err.read_max_us = dt;
-    if (dt > kSlowReadUs) ++s_read_err.slow_reads;
-    ++s_read_err.reads;
-    s_read_err.read_total_us += dt;
-    s_in_transaction          = false;
+    if (dt > s_card_stats.read_max_us) s_card_stats.read_max_us = dt;
+    if (dt > kSlowReadUs) ++s_card_stats.slow_reads;
+    ++s_card_stats.reads;
+    s_card_stats.read_total_us += dt;
+    s_in_transaction            = false;
     return ok;
 }
 
@@ -690,13 +707,13 @@ bool SOUNDSINTH_HOT_PATH(sd_card_read_run)(uint32_t lba, uint32_t count, uint8_t
         ok = r == ReadResult::Ok;
     }
     const uint32_t dt = platform::mono_us() - t0;
-    if (dt > s_read_err.read_max_us) s_read_err.read_max_us = dt;
-    if (dt > kSlowReadUs) ++s_read_err.slow_reads;
+    if (dt > s_card_stats.read_max_us) s_card_stats.read_max_us = dt;
+    if (dt > kSlowReadUs) ++s_card_stats.slow_reads;
     // Считается пачка как одно чтение: среднее тогда прямо сравнимо с
     // ценой команды, ради которой она и заведена.
-    ++s_read_err.reads;
-    s_read_err.read_total_us += dt;
-    s_in_transaction          = false;
+    ++s_card_stats.reads;
+    s_card_stats.read_total_us += dt;
+    s_in_transaction            = false;
     return ok;
 }
 
@@ -709,6 +726,7 @@ bool SOUNDSINTH_HOT_PATH(write_sector_locked)(uint32_t lba, const uint8_t* src) 
     cs_low();
     if (send_cmd(sd::kCmd24, block_arg(lba)) != sd::kR1Ready) {
         cs_high();
+        ++s_card_stats.write_r1;
         return false;
     }
 
@@ -722,13 +740,15 @@ bool SOUNDSINTH_HOT_PATH(write_sector_locked)(uint32_t lba, const uint8_t* src) 
     const uint8_t resp = static_cast<uint8_t>(xfer(sd::kIdleByte) & sd::kDataRespMask);
     if (resp != sd::kDataRespAccepted) {
         cs_high();
+        ++s_card_stats.write_data;
         return false;
     }
 
     // Конец физической записи - до снятия CS, иначе следующая команда придёт
     // на занятую карту.
-    const bool ok = wait_not_busy(500);
+    const bool ok = wait_not_busy(kBusyTimeoutMs);
     cs_high();
+    if (!ok) ++s_card_stats.write_busy;
     return ok;
 }
 } // namespace
@@ -740,10 +760,10 @@ bool SOUNDSINTH_HOT_PATH(sd_card_write_sector)(uint32_t lba, const uint8_t* src)
     const uint32_t t0 = platform::mono_us();
     const bool ok     = write_sector_locked(lba, src);
     const uint32_t dt = platform::mono_us() - t0;
-    ++s_read_err.writes;
-    if (dt > s_read_err.write_max_us) s_read_err.write_max_us = dt;
-    s_read_err.write_total_us += dt;
-    s_in_transaction           = false;
+    ++s_card_stats.writes;
+    if (dt > s_card_stats.write_max_us) s_card_stats.write_max_us = dt;
+    s_card_stats.write_total_us += dt;
+    s_in_transaction             = false;
     return ok;
 }
 

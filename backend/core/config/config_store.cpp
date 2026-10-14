@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 #include "core/config/config_store.h"
 
+#include <cstddef>
 #include <cstring>
 
 #include "core/util/crc32.h"
@@ -27,10 +28,80 @@ bool header_of(const uint8_t* page, PageHeader& out) {
     // Короче нынешнего блок писала прошивка, у которой полей было меньше:
     // читается он целиком, недостающие остаются умолчаниями. Длиннее -
     // писала прошивка новее нас, и что в лишних байтах, мы не знаем.
-    if (out.bytes > sizeof(Settings)) return false;
+    if (out.bytes > kLegacyBytes) return false;
     if (out.bytes == 0) return false;
     return out.crc == page_crc(out, page + kPayloadOffset);
 }
+
+// Поля за неподвижной частью: номер записи и место в Settings. Номера не
+// переиспользуются: запись, которую прошивка не знает, пропускается.
+struct Record {
+    uint16_t id;
+    uint16_t offset;
+    uint16_t size;
+};
+constexpr Record kRecords[] = {
+    {1, offsetof(Settings, joy_8bit), sizeof(Settings::joy_8bit)},
+    {2, offsetof(Settings, joy_keys), sizeof(Settings::joy_keys)},
+};
+
+struct RecordHeader {
+    uint16_t id;
+    uint16_t bytes;
+};
+static_assert(sizeof(RecordHeader) == 4, "the record header is frozen");
+
+constexpr uint32_t kExtOffset = kPayloadOffset + kLegacyBytes;
+constexpr uint32_t kExtData   = kExtOffset + sizeof(ExtHeader);
+
+// Записи читаются, только когда сошлась сумма расширения. Неподвижная
+// часть от него не зависит: блок старой прошивки расширения не имеет, а
+// настройки в нём годные.
+void ext_read(const uint8_t* page, Settings& out) {
+    ExtHeader e{};
+    std::memcpy(&e, page + kExtOffset, sizeof(e));
+    if (e.magic != kExtMagic || e.bytes > kPageBytes - kExtData) return;
+    if (e.crc != util::crc32_update(util::kCrc32Init, page + kExtData, e.bytes)) return;
+    auto* const dst = reinterpret_cast<uint8_t*>(&out);
+    uint32_t at     = 0;
+    while (at + sizeof(RecordHeader) <= e.bytes) {
+        RecordHeader r{};
+        std::memcpy(&r, page + kExtData + at, sizeof(r));
+        at += sizeof(r);
+        if (r.bytes > e.bytes - at) return;
+        for (const Record& k : kRecords) {
+            // Короче нынешней запись писала прошивка с меньшей таблицей:
+            // хвост остаётся умолчанием. Длиннее - лишнее отбрасывается.
+            if (k.id == r.id) std::memcpy(dst + k.offset, page + kExtData + at, r.bytes < k.size ? r.bytes : k.size);
+        }
+        at += r.bytes;
+    }
+}
+
+void ext_build(uint8_t* page, const Settings& s) {
+    const auto* const src = reinterpret_cast<const uint8_t*>(&s);
+    uint32_t at           = 0;
+    for (const Record& k : kRecords) {
+        const RecordHeader r{k.id, k.size};
+        std::memcpy(page + kExtData + at, &r, sizeof(r));
+        std::memcpy(page + kExtData + at + sizeof(r), src + k.offset, k.size);
+        at += sizeof(r) + k.size;
+    }
+    ExtHeader e{};
+    e.magic = kExtMagic;
+    e.bytes = static_cast<uint16_t>(at);
+    e.crc   = util::crc32_update(util::kCrc32Init, page + kExtData, at);
+    std::memcpy(page + kExtOffset, &e, sizeof(e));
+}
+
+constexpr uint32_t records_bytes() {
+    uint32_t n = 0;
+    for (const Record& k : kRecords) {
+        n += sizeof(RecordHeader) + k.size;
+    }
+    return n;
+}
+static_assert(kExtData + records_bytes() <= kPageBytes, "the records fit the block");
 
 // Счётчик восьмизначный и когда-нибудь перевернётся. Сравнение по разности
 // со знаком переживает это: важно не какой больше, а какой следующий.
@@ -56,6 +127,7 @@ bool page_read(const uint8_t* page, Settings& out) {
     // остаётся тем, чем пришёл.
     out = Settings{};
     std::memcpy(&out, page + kPayloadOffset, h.bytes);
+    if (h.bytes == kLegacyBytes) ext_read(page, out);
     settings_clamp(out);
     return true;
 }
@@ -67,9 +139,10 @@ void page_build(uint8_t* page, const Settings& s, uint32_t counter) {
     PageHeader h{};
     h.magic   = kMagic;
     h.format  = kFormatVersion;
-    h.bytes   = sizeof(Settings);
+    h.bytes   = kLegacyBytes;
     h.counter = counter;
-    std::memcpy(page + kPayloadOffset, &s, sizeof(Settings));
+    std::memcpy(page + kPayloadOffset, &s, kLegacyBytes);
+    ext_build(page, s);
     h.crc = page_crc(h, page + kPayloadOffset);
     std::memcpy(page, &h, sizeof(h));
 }

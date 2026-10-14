@@ -22,7 +22,7 @@
 /* Строка списка: либо заголовок раздела, либо поле. */
 #define ROW_SECTION 0xFF
 
-#define MAX_ROWS 48
+#define MAX_ROWS 64
 
 static u8 row_field[MAX_ROWS]; /* номер поля или ROW_SECTION */
 static u16 row_text[MAX_ROWS]; /* смещение заголовка раздела */
@@ -43,7 +43,7 @@ static void put_spaces(u8 n) {
 static u8 put_clipped(const char *s, u8 width) {
     u8 n = 0;
     while (*s && n < width) {
-        fw_scr_putc((u8)(*s++ & 0x7F));
+        fw_scr_putc((u8)*s++);
         ++n;
     }
     return n;
@@ -130,7 +130,7 @@ static u8 first_field_row(void) {
 
 static void draw_value(const page_field_t *f, u8 value, u8 width) {
     u8 n = 0;
-    if (f->kind == PAGE_KIND_CHOICE) {
+    if (f->kind == PAGE_KIND_CHOICE || f->kind == PAGE_KIND_KEY) {
         u8 count = choice_count(f);
         u8 k;
         for (k = 0; k < count; ++k) {
@@ -219,7 +219,7 @@ static void put_wrapped2(const char *s, u8 y0) {
         /* Слово не рвём, если есть куда перенести. */
         take = (k == SCR_W && s[k] != 0 && brk != 0) ? brk : k;
         fw_scr_at(0, (u8)(y0 + line));
-        for (w = 0; w < take; ++w) fw_scr_putc((u8)(s[w] & 0x7F));
+        for (w = 0; w < take; ++w) fw_scr_putc((u8)s[w]);
         put_spaces((u8)(SCR_W - take));
         s += take;
         while (*s == ' ') ++s;
@@ -318,14 +318,10 @@ static u8 next_value(const page_field_t *f, u8 value, signed char step) {
     return (value > f->min) ? (u8)(value - 1u) : f->max;
 }
 
-static void change_value(signed char step) {
-    const u8 i = row_field[cursor];
-    const page_field_t *f;
-    u8 *v;
-    if (i == ROW_SECTION || !field_active(i)) return;
-    f    = field_at(i);
-    v    = values();
-    v[i] = next_value(f, v[i], step);
+/* Записать значение поля и отдать плате на пересчёт. */
+static void set_value(u8 i, u8 value) {
+    u8 *v = values();
+    v[i]  = value;
     /* Сумма пересчитывается платой при ответе; здесь её надо привести в
        согласие, иначе страница будет отвергнута. */
     {
@@ -340,6 +336,48 @@ static void change_value(signed char step) {
     if (!cfg_refresh()) return;
     /* Маска могла закрыть поле под курсором - сойти с него. */
     if (!field_active(i)) move_cursor(1);
+}
+
+static void change_value(signed char step) {
+    const u8 i = row_field[cursor];
+    const page_field_t *f;
+    if (i == ROW_SECTION || !field_active(i)) return;
+    f = field_at(i);
+    if (f->kind == PAGE_KIND_KEY) return;
+    set_value(i, next_value(f, values()[i], step));
+}
+
+/* Поле под курсором - клавиша и правится? */
+static bool_t cursor_on_key(void) {
+    const u8 i = row_field[cursor];
+    if (i == ROW_SECTION || !field_active(i)) return FALSE;
+    return field_at(i)->kind == PAGE_KIND_KEY ? TRUE : FALSE;
+}
+
+/* Привязка нажатием. Код клавиши USB видит только плата: здесь ячейка
+   взводится и ждётся ответ. Esc отменяет - и с USB, где плата отдаёт его
+   код, и с клавиатуры машины. */
+static void capture_key(void) {
+    volatile u8 *cell = page_at(page_hdr()->capture_offset);
+    const u8 i        = row_field[cursor];
+    fw_scr_attr       = FW_ATTR(FW_BLACK, FW_YELLOW);
+    put_wrapped2("press the key on the USB keyboard; ESC cancels", SCR_H - HINT_ROWS);
+    fw_kbd_flush();
+    cell[0] = CAPTURE_ARMED;
+    for (;;) {
+        if (cell[0] == CAPTURE_DONE) {
+            const u8 code = cell[1];
+            cell[0]       = CAPTURE_IDLE;
+            if (code != HID_KEY_ESC) set_value(i, code);
+            break;
+        }
+        if (fw_kbd_get() == FW_KEY_ESC) {
+            cell[0] = CAPTURE_IDLE;
+            break;
+        }
+    }
+    /* Пойманная клавиша дошла и до матрицы: её нажатие здесь не команда. */
+    fw_kbd_flush();
 }
 
 /* -- Экран ожидания -- */
@@ -397,7 +435,14 @@ void main(void) {
                 if (editing) change_value(1);
                 break;
             case FW_KEY_ENTER:
+                if (cursor_on_key()) {
+                    capture_key();
+                    break;
+                }
                 editing = editing ? FALSE : TRUE;
+                break;
+            case FW_KEY_DEL:
+                if (cursor_on_key()) set_value(row_field[cursor], 0);
                 break;
             case FW_KEY_ESC:
                 editing = FALSE;

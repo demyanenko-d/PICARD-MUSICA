@@ -6,8 +6,8 @@
 
 #include <cstdint>
 
-#include "player/hal/audio_out.h"
 #include "player/audio/buffer_pool.h"
+#include "player/hal/audio_out.h"
 
 namespace rp2350::audio {
 

@@ -8,11 +8,13 @@
 #include "hardware/sync.h"
 #include "pico/time.h"
 
-#include "bus.h"
-#include "platform/log.h"
-#include "divmmc.h"
 #include "platform/compiler.h"
+#include "platform/log.h"
+
 #include "player/shared_state.h" // чем занято ядро в самый долгий промежуток
+
+#include "bus.h"
+#include "divmmc.h"
 
 namespace hostlink {
 
@@ -43,32 +45,26 @@ uint8_t s_poll_gap_phase = 0;
 // чередой строк подряд.
 constexpr uint8_t kProtocolDiagDrainPerPass = 8;
 
-const char* core1_phase_name(uint8_t phase) {
-    switch (static_cast<shared::Core1Phase>(phase)) {
-        case shared::Core1Phase::Loop:
-            return "loop";
-        case shared::Core1Phase::Load:
-            return "load";
-        case shared::Core1Phase::TeardownWait:
-            return "engine teardown";
-        case shared::Core1Phase::GsModule:
-            return "GS module";
-        default:
-            return "?";
-    }
+// Буфер строк здоровья шины. Статический, а не на стеке: печать зовётся и
+// из service_and_wait() посреди загрузки, на самом глубоком стеке Core1.
+// Только основной поток Core1.
+char s_out[192];
+
+// Сводка шины - раз в 10 с, а не по изменению: каждая строка лога - тоже
+// нагрузка.
+constexpr uint32_t kBusSummaryPeriodMs = 10000;
+
+// Наибольший промежуток опроса за период - и сброс: следующий период
+// меряется заново. Период - kBusSummaryPeriodMs, замер - в service().
+uint32_t take_poll_gap_max() {
+    const uint32_t gap = s_poll_gap_max_us;
+    s_poll_gap_max_us  = 0;
+    return gap;
 }
 
-// Здоровье шины: переполнения RX FIFO записи - при изменении; сводка - раз
-// в 10 с. Не встраивается: снимки счётчиков легли бы в кадр
-// service_and_wait.
-SOUNDSINTH_NOINLINE void print_bus_health(const player::protocol::HostProtocol& protocol) {
-    static uint32_t s_last_overruns  = 0;
-    static uint32_t s_last_report_ms = 0;
-    // Статический, а не на стеке: зовётся и из service_and_wait() посреди
-    // загрузки, на самом глубоком стеке Core1. Только основной поток Core1.
-    static char s_out[192];
-    const bus::PioStats st = bus::z80_bus_pio_get_stats();
-
+// Потери шины - сразу, как появились.
+SOUNDSINTH_NOINLINE void log_bus_losses_on_change(const bus::PioStats& st, const bus::BusMeasurements& bm) {
+    static uint32_t s_last_overruns = 0;
     // Ненулевое - хост пишет чаще, чем bus_wr_isr успевает разбирать.
     if (st.wr_fifo_overruns != s_last_overruns) {
         snprintf(s_out, sizeof(s_out), "proto: WR FIFO OVERRUN total=%" PRIu32 " (+%" PRIu32 ")\n", st.wr_fifo_overruns, st.wr_fifo_overruns - s_last_overruns);
@@ -76,13 +72,25 @@ SOUNDSINTH_NOINLINE void print_bus_health(const player::protocol::HostProtocol& 
         s_last_overruns = st.wr_fifo_overruns;
     }
 
-    // Раз в 10 секунд, а не по изменению: каждая строка лога - тоже
-    // нагрузка.
-    // От 64-битного счётчика: миллисекунды из time_us_32() прыгают на ноль
-    // раз в 71.6 минуты.
-    const uint32_t now_ms = to_ms_since_boot(get_absolute_time());
-    if (now_ms - s_last_report_ms < 10000u) return;
-    s_last_report_ms = now_ms;
+    // Потери в очередях трапов: каждая такая потеря - несработавший вход
+    // или выход DivMMC, то есть машина исполняет чужую память. Нули в
+    // норме, и нули тут же отличают потерю в очереди от неверного разбора
+    // адреса. Числа - опросов, заставших флаг, а не слов.
+    static uint32_t s_last_lost = 0;
+    const uint32_t lost         = bm.trap_lost + bm.join_lost + bm.route_lost + bm.detect_lost + bm.trdos_lost + bm.trdos_desync;
+    if (lost != s_last_lost) {
+        snprintf(s_out, sizeof(s_out),
+                 "bus: TRAP QUEUE LOST (polls) rom_trap=%" PRIu32 " join=%" PRIu32 " route=%" PRIu32 " detect=%" PRIu32 " | trdos lost=%" PRIu32
+                 " desync=%" PRIu32 "\n",
+                 bm.trap_lost, bm.join_lost, bm.route_lost, bm.detect_lost, bm.trdos_lost, bm.trdos_desync);
+        debug_log(s_out);
+        s_last_lost = lost;
+    }
+}
+
+// Сводка шины: порты протокола, очереди трапов, промежуток опроса gap_us
+// и фаза Core1 при нём.
+SOUNDSINTH_NOINLINE void log_bus_summary(const bus::PioStats& st, const bus::BusMeasurements& bm, uint32_t gap_us, uint8_t gap_phase) {
     // Счётчика состоявшихся чтений нет: плата на чтение кодом не отвечает,
     // ответ выдаёт PIO из таблицы, ISR готовит следующее слово.
     // Путь портов один на оба режима: что отвечается по портам,
@@ -95,14 +103,33 @@ SOUNDSINTH_NOINLINE void print_bus_health(const player::protocol::HostProtocol& 
              st.cmd_bytes, st.dat_bytes, g.tab_cmd, static_cast<unsigned>(g.val_cmd), g.tab_dat, static_cast<unsigned>(g.val_dat), g.serve_late,
              st.wr_fifo_overruns);
     debug_log(s_out);
+    // Очереди трапов: потери в норме нули, простои склейщиков - нет (стоял
+    // на полной RX, слово ушло позже). Печатаются и когда нули - иначе по
+    // молчанию не отличить "потерь нет" от "счётчик не снимается".
+    snprintf(s_out, sizeof(s_out),
+             "bus: trap queues lost (polls) rom_trap=%" PRIu32 " join=%" PRIu32 " route=%" PRIu32 " detect=%" PRIu32 " | stalls join=%" PRIu32 " route=%" PRIu32
+             "\n",
+             bm.trap_lost, bm.join_lost, bm.route_lost, bm.detect_lost, bm.join_stall, bm.route_stall);
+    debug_log(s_out);
+    // TR-DOS: вывод DOS_N и состояние детектора; на машине без карты журнал
+    // - единственный свидетель потерянной отметки.
+    if (bm.trdos) {
+        snprintf(s_out, sizeof(s_out), "trdos: DOS_N=%u state=%s lost=%" PRIu32 " desync=%" PRIu32 "\n", static_cast<unsigned>(bm.trdos_level),
+                 bm.trdos_asserted ? "asserted" : "released", bm.trdos_lost, bm.trdos_desync);
+        debug_log(s_out);
+    }
     // Промежуток и фаза - своей строкой: вместе со счётчиками выше это 231
     // байт из 192 буфера, и обрезок уходит без перевода строки, слипаясь со
     // следующей. Имя фазы - единственное, что говорит, кто держал цикл.
-    snprintf(s_out, sizeof(s_out), "proto: poll not called for up to %" PRIu32 " us (phase %s)\n", s_poll_gap_max_us, core1_phase_name(s_poll_gap_phase));
-    s_poll_gap_max_us = 0;
+    snprintf(s_out, sizeof(s_out), "proto: poll not called for up to %" PRIu32 " us (phase %s)\n", gap_us,
+             shared::core1_phase_name(static_cast<shared::Core1Phase>(gap_phase)));
     debug_log(s_out);
-    // Хост не опрашивает (armed, ack=1, байты не растут), плата ждёт окна
-    // (data=1) или вооружать нечего (всё нули) - по первой строке одинаковы.
+}
+
+// Снимок протокола. Хост не опрашивает (armed, ack=1, байты не растут),
+// плата ждёт окна (data=1) или вооружать нечего (всё нули) - по сводке
+// шины одинаковы.
+SOUNDSINTH_NOINLINE void log_protocol_state(const player::protocol::HostProtocol& protocol, uint32_t now_ms) {
     const player::protocol::HostProtocol::StateSnapshot ps = protocol.state_snapshot();
     snprintf(s_out, sizeof(s_out),
              "proto: t=%" PRIu32 " armed=0x%02X ack=%u ready=%u q=%u data=%u pos=%u dirty=0x%02X"
@@ -111,6 +138,24 @@ SOUNDSINTH_NOINLINE void print_bus_health(const player::protocol::HostProtocol& 
              static_cast<unsigned>(ps.queued_request), static_cast<unsigned>(ps.awaiting_data), static_cast<unsigned>(ps.data_pos),
              static_cast<unsigned>(ps.telemetry_dirty), ps.cmd_overruns, ps.unknown_commands, ps.data_short, ps.short_done);
     debug_log(s_out);
+}
+
+// Здоровье шины: потери - при изменении; сводка и снимок протокола - раз в
+// kBusSummaryPeriodMs. Не встраивается: снимки счётчиков легли бы в кадр
+// service_and_wait.
+SOUNDSINTH_NOINLINE void print_bus_health(const player::protocol::HostProtocol& protocol) {
+    static uint32_t s_last_report_ms = 0;
+    const bus::PioStats st           = bus::bus_stats();
+    const bus::BusMeasurements bm    = bus::bus_measurements();
+    log_bus_losses_on_change(st, bm);
+
+    // От 64-битного счётчика: миллисекунды из time_us_32() прыгают на ноль
+    // раз в 71.6 минуты.
+    const uint32_t now_ms = to_ms_since_boot(get_absolute_time());
+    if (now_ms - s_last_report_ms < kBusSummaryPeriodMs) return;
+    s_last_report_ms = now_ms;
+    log_bus_summary(st, bm, take_poll_gap_max(), s_poll_gap_phase);
+    log_protocol_state(protocol, now_ms);
 }
 
 // Кольцо событий разбирается всегда: без разбора оно переполняется, и

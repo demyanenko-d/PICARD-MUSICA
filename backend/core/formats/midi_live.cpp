@@ -60,6 +60,7 @@ const char* LiveMidi::begin(soundsinth::model::Song& song, memory::TrackMemory& 
     // каналов нулевые, шина молчит - слышно то же, что и без него. У файла
     // .mid это решает разбор, он видит весь трек.
     song.reverb_enabled = true;
+    song.chorus_enabled = true; // так же для CC93
     song.instruments    = memory::arena_new<Instrument>(mem.resident, kLiveMaxInstruments);
     song.samples        = memory::arena_new<SampleDescriptor>(mem.resident, kLiveMaxSamples);
     cv_                 = memory::arena_new<Converter>(mem.resident);
@@ -93,7 +94,7 @@ const char* LiveMidi::begin(soundsinth::model::Song& song, memory::TrackMemory& 
     // Пул keymap - остаток арены за вычетом места ревербератора: линии
     // садятся на вершину того же пула, но позже, при сборке движка. Забрать
     // весь остаток - оставить движок без них.
-    const size_t reserve  = song.reverb_enabled ? memory::kPlayScratchBytes : 0u;
+    const size_t reserve  = (song.reverb_enabled || song.chorus_enabled) ? memory::kPlayScratchBytes : 0u;
     const size_t free_now = memory::arena_free(mem.resident);
     const size_t left     = free_now > reserve ? free_now - reserve : 0u;
     keymap_capacity_      = static_cast<uint32_t>(left / sizeof(KeymapRange));

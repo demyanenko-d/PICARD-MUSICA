@@ -51,6 +51,14 @@ project(soundsinth_firmware C CXX ASM)
 # в саму прошивку, а два разных её перевода компоновщик не сводит.
 add_compile_definitions(PICO_TIME_DEFAULT_ALARM_POOL_DISABLED=1)
 
+# Плавающей точки в строках журнала нет: ни одного %f, %e или %g. Перевод
+# числа в десятичную запись (_ftoa 1172 Б, _etoa 1410 Б) всё равно
+# линковался, и это не только флеш. Обе функции вызывают друг друга, кадры
+# 92 и 124 байта, а добирается до них худший путь КАЖДОЙ задачи: configASSERT
+# идёт через snprintf. Определение общее на сборку по той же причине, что и
+# выше: pico_printf попадает и в библиотеку платформы, и в прошивку.
+add_compile_definitions(PICO_PRINTF_SUPPORT_FLOAT=0 PICO_PRINTF_SUPPORT_EXPONENTIAL=0)
+
 # Замер сборки кадра I2S: 1 - вместо музыки знакопеременный узор, одинаковый
 # в обоих каналах. На выходе смотрят соотношение каналов: совпадают - кадр
 # собран из одного отсчёта, противофаза - правое слово от следующего.
@@ -68,56 +76,17 @@ add_compile_definitions(SOUNDSINTH_RP2350_I2S_PHASE_TEST=${SOUNDSINTH_I2S_PHASE_
 # ставится до pico_sdk_init().
 set(TINYUSB_OPT_OS OPT_OS_NONE)
 
-# TinyUSB берётся из мейнстрима, а не из SDK. В 0.18.0, которую несёт
-# pico-sdk 2.3.0, массовые обмены хоста идут через "interrupt"-точки с
-# опросом раз в кадр: 64 байта за миллисекунду, то есть сектор флешки
-# за 10 мс при возможных полутора. В 0.20.0 драйвер RP2 переписан: массовые
-# точки переведены на epx с двойной буферизацией.
+# TinyUSB 0.21.0 - своя копия в backend/lib/tinyusb, а не из SDK. В 0.18.0,
+# которую несёт pico-sdk 2.3.0, массовые обмены хоста идут через
+# "interrupt"-точки с опросом раз в кадр: 64 байта за миллисекунду, то есть
+# сектор флешки за 10 мс при возможных полутора. В 0.20.0 драйвер RP2
+# переписан: массовые точки переведены на epx с двойной буферизацией.
 #
-# Сборку ведёт всё равно SDK, поэтому здесь только выкачивание
-# (SOURCE_SUBDIR указан несуществующий), а путь ставится до
+# Копия, а не выкачивание: драйвер хоста RP2 правлен (секция без PRIMASK,
+# обмены на EPX при выдёргивании устройств, номер прерывающего слота), и
+# правки - обычный дифф в истории. Сборку ведёт SDK, путь ставится до
 # pico_sdk_init(): его читает src/rp2_common/tinyusb/CMakeLists.txt.
-include(FetchContent)
-FetchContent_Declare(
-    tinyusb_mainline
-    GIT_REPOSITORY https://github.com/hathach/tinyusb.git
-    GIT_TAG 0.21.0
-    GIT_SHALLOW TRUE
-    SOURCE_SUBDIR do-not-build-here
-)
-FetchContent_MakeAvailable(tinyusb_mainline)
-set(PICO_TINYUSB_PATH ${tinyusb_mainline_SOURCE_DIR})
-
-# Секция драйвера RP2 запирается не PRIMASK, а прерыванием USB.
-#
-# С 0.21.0 порт RP2 завёл свою critical_section_t и берёт её в hcd_edpt_xfer,
-# то есть на каждую передачу. В pico-sdk это save_and_disable_interrupts():
-# PRIMASK гасит на ядре всё, включая шинные обработчики, которые мы
-# намеренно подняли выше порога планировщика. У Z80 нет /WAIT, и пропущенный
-# цикл чтения порта значит байт прошлого обмена на шине.
-#
-# Секция защищает состояние драйвера от его же обработчика прерывания и
-# больше ни от чего: сам обработчик её не берёт, ядро у стека одно. Запрета
-# одного USBCTRL_IRQ достаточно - именно так делает сама TinyUSB в своём
-# слое OPT_OS_NONE (osal_none.h, interrupt_set).
-#
-# Замена текстом, а не патчем: повторный запуск безвреден, git не нужен.
-set(_rp2_usb_h ${tinyusb_mainline_SOURCE_DIR}/src/portable/raspberrypi/rp2040/rp2040_usb.h)
-file(READ ${_rp2_usb_h} _rp2_usb_src)
-string(REPLACE
-    "  critical_section_enter_blocking(&rp2usb_lock);"
-    "  irq_set_enabled(USBCTRL_IRQ, false); // правка SoundSinth: не PRIMASK"
-    _rp2_usb_src "${_rp2_usb_src}")
-string(REPLACE
-    "  critical_section_exit(&rp2usb_lock);"
-    "  irq_set_enabled(USBCTRL_IRQ, true); // правка SoundSinth: не PRIMASK"
-    _rp2_usb_src "${_rp2_usb_src}")
-string(REPLACE
-    "#include \"pico/critical_section.h\""
-    "#include \"pico/critical_section.h\"
-#include \"hardware/irq.h\""
-    _rp2_usb_src "${_rp2_usb_src}")
-file(WRITE ${_rp2_usb_h} "${_rp2_usb_src}")
+set(PICO_TINYUSB_PATH ${CMAKE_CURRENT_LIST_DIR}/backend/lib/tinyusb)
 
 # Initialise the Raspberry Pi Pico SDK
 pico_sdk_init()
@@ -214,7 +183,7 @@ target_include_directories(platform_rp2350 PRIVATE
     ${CMAKE_CURRENT_LIST_DIR}/backend/ports/rp2350/hostlink/rom_images
 )
 
-# Без -Werror, пока предупреждения не вычищены. -Wformat из -Wall ловит
+# -Wformat из -Wall ловит
 # спецификатор без аргумента в snprintf.
 target_compile_options(platform_rp2350 PRIVATE -Wall -Wextra)
 # Как у ядра: исключений и RTTI в коде платы нет. С -fexceptions каждый .cpp
@@ -226,10 +195,25 @@ target_compile_options(platform_rp2350 PRIVATE
 target_compile_options(soundsinth_core PRIVATE -Wall -Wextra)
 target_compile_options(soundsinth_devices PRIVATE -Wall -Wextra)
 target_compile_options(soundsinth_player PRIVATE -Wall -Wextra)
+# Плеер вычищен от предупреждений: держит это сборка, а не привычка.
+target_compile_options(soundsinth_player PRIVATE -Werror)
 # Загрузка трека идёт на Core1 со стеком 4 КБ, MSPLIM там нет: кадр больше
 # 1400 байт - предупреждение сборки, а не порча стека на плате. Самые большие
 # кадры загрузчиков - около 1.3 КБ (IT).
 target_compile_options(soundsinth_core PRIVATE -Wframe-larger-than=1400)
+# Сторож стоял только на ядре, а самые глубокие кадры оказались вне его.
+# Замер при пороге 500: 728 байт у config_boot, 712 у сборки плана
+# догрузки, 688 у строки состояния сеанса; дальше 468 у печати здоровья
+# карты и ниже. Все они на Core1 со стеком 4 КБ, запас есть.
+#
+# Порог 750 - чуть выше нынешнего максимума: сторож обязан ловить РОСТ, а
+# не кричать на то, что уже измерено и принято. Опустится максимум -
+# опустить и порог.
+target_compile_options(soundsinth_devices PRIVATE -Wframe-larger-than=750)
+target_compile_options(soundsinth_player PRIVATE -Wframe-larger-than=750)
+target_compile_options(platform_rp2350 PRIVATE -Wframe-larger-than=750)
+# Пул ОС по счёту платы: 8 семафоров и 2 очереди (ПК берёт больше).
+target_compile_definitions(platform_rp2350 PRIVATE SOUNDSINTH_OS_SEM_SLOTS=8u SOUNDSINTH_OS_QUEUE_SLOTS=2u)
 
 # PIO-программы (Z80-шина + I2S) - сгенерированные .pio.h нужны только
 # platform_rp2350 (единственная библиотека, которая их #include'ит).
@@ -249,6 +233,9 @@ pico_generate_pio_header(platform_rp2350
 )
 pico_generate_pio_header(platform_rp2350
     ${CMAKE_CURRENT_LIST_DIR}/backend/ports/rp2350/hostlink/trdos.pio
+)
+pico_generate_pio_header(platform_rp2350
+    ${CMAKE_CURRENT_LIST_DIR}/backend/ports/rp2350/hostlink/reset_watch.pio
 )
 
 add_executable(soundsinth_firmware
@@ -280,14 +267,25 @@ target_include_directories(soundsinth_firmware PRIVATE
 # 0x1000 - предел: SCRATCH_X/Y по 4 КБ.
 target_compile_definitions(soundsinth_firmware PRIVATE PICO_STACK_SIZE=0x1000)
 
+# Задержка запуска кварца x64 (около 64 мс вместо 1). У платы WeAct множитель
+# не задан, и с 1 кварц выставляет STABLE до того, как раскачался: PLL на
+# нём теряет захват (залипший LOCK_N), и Core0 падает на выборке команд в
+# runtime_init_clocks. Замер тёплыми перезапусками сторожем: с 1 - 17 отказов
+# из 230 и 11 из 50 со сбросом самого кварца, с 64 - 0 из 60 и 0 из 40.
+target_compile_definitions(soundsinth_firmware PRIVATE PICO_XOSC_STARTUP_DELAY_MULTIPLIER=64)
+
 # printf только на Core0 до запуска Core1, дальше печать через debug_log:
 # замок stdout не нужен, а его код pico_sync лёг бы в SRAM.
 target_compile_definitions(soundsinth_firmware PRIVATE PICO_STDOUT_MUTEX=0)
 
+# Кучи нет: malloc в образе не слинкован, а секция .heap по умолчанию
+# держала 2 КБ за .bss впустую.
+target_compile_definitions(soundsinth_firmware PRIVATE PICO_HEAP_SIZE=0)
+
 # Без LTO: -flto только на своих таргетах без pico-sdk даёт при компоновке
 # "dangerous relocation: unsupported relocation" (частичный LTO на Thumb).
 pico_set_program_name(soundsinth_firmware "SoundSinth")
-pico_set_program_version(soundsinth_firmware "0.4")
+pico_set_program_version(soundsinth_firmware "0.46")
 
 # copy_to_ram выключен: весь бинарник вместе со статикой в SRAM не
 # помещается (ошибка линковки "region RAM overflowed"). Код выполняется из
@@ -326,6 +324,22 @@ target_sources(soundsinth_firmware PRIVATE
     backend/ports/rp2350/usb/usb_msc.cpp
 )
 target_include_directories(soundsinth_firmware PRIVATE backend/ports/rp2350/usb)
+
+# Свои единицы цели прошивки - с теми же предупреждениями и сторожем кадра,
+# что у библиотек. Через свойства файлов, а не цели: в цели ещё десятки
+# единиц SDK и TinyUSB, сторож кадра на них не мерен.
+set_source_files_properties(
+    backend/ports/rp2350/main.cpp
+    backend/ports/rp2350/log.cpp
+    backend/ports/rp2350/hal/spi.cpp
+    backend/ports/rp2350/hal/media.cpp
+    backend/ports/rp2350/hal/audio_out.cpp
+    backend/ports/rp2350/hal/host_signals.cpp
+    backend/ports/rp2350/hal/config_flash.cpp
+    backend/ports/rp2350/hal/boot_mode.cpp
+    backend/ports/rp2350/usb/usb_host.cpp
+    backend/ports/rp2350/usb/usb_msc.cpp
+    PROPERTIES COMPILE_OPTIONS "-Wall;-Wextra;-Wframe-larger-than=750")
 
 # pico-sdk называет векторы исключений isr_svcall/isr_pendsv/isr_systick,
 # FreeRTOS-порт (GCC/ARM_CM33_NTZ) - SVC_Handler/PendSV_Handler/

@@ -1,45 +1,78 @@
 ; SPDX-License-Identifier: MIT
-; Склейщик трапа: адрес выборки -> адрес записи карты трапов.
+; Склейщики трапа: адрес выборки -> адрес записи карты трапов.
 ;
-; Живёт в блоке звука (pio2, база GPIO 16): пины шины ему нужны только
+; Живут в блоке звука (pio2, база GPIO 16): пины шины им нужны только
 ; A8..A13, а они в окне базы. Адрес выборки приходит от rom_trap (pio0)
-; каналом DMA, запись карты читает следующий канал; в ней указатель на
-; слово варианта или ноль - пустой триггер, цепочка стоит.
+; каналом DMA, записи карт читают каналы цепочки; в конце - указатель на
+; слово варианта или ноль, и ноль гасит цепочку пустым триггером.
 ;
-; Карт две:
-;   ниже 0x2000 - по адресу: входы и выходы DivMMC - отдельные точки;
-;   0x2000-0x3FFF - по странице 256 байт: там трап одно окно 3D00-3DFF.
+; Карта по адресу (ниже 0x2000) - двухуровневая:
+;   первый уровень по младшему байту (A0..A7) - он приходит очередью;
+;   второй по старшим битам (A8..A12) - их склейщик берёт с пинов.
+; Подтаблица заводится только тому младшему байту, у которого трап есть.
 ;
-; Адрес ещё на шине: склейщик работает через ~80 нс от спада RD, а Z80
-; держит адрес выборки до конца M1 (~570 нс при 3.5 МГц).
+; Карта 0x2000-0x3FFF - по странице 256 байт (окно 3Dxx). Она
+; одноуровневая и проходит разборщик насквозь: маршрут задан младшим битом
+; записи.
 ;
-;   X = база карты адресов >> 15, Y = база карты страниц >> 7 - ставит ядро
-;   до запуска, программа их не трогает.
+; Адрес ещё на шине: первый склейщик работает через ~80 нс от спада RD, а
+; Z80 держит адрес выборки до конца M1 (~570 нс при 3.5 МГц). Второй
+; проход читает пины позже первого - на нём запас по времени и проверяется.
+;
+;   X = база первого уровня >> 10, Y = база карты страниц >> 7 - ставит
+;   ядро до запуска, программа их не трогает.
 ;   IN_BASE = A8 (GPIO 16), JMP_PIN = A13 (GPIO 21).
 
 .pio_version rp2350
 
+; Выравнивание карт, оно же сдвиг базы в X и Y: первый уровень - 256
+; записей по 4 байта, подтаблица - 32 записи по 4 байта. Склейщик дописывает
+; к базе индекс со сдвигом на 2, поэтому база - адрес без этих разрядов.
+.define public TRAP_LO_BASE_SHIFT 10
+.define public TRAP_SUB_BASE_SHIFT 7
+
+; --- первый уровень и путь страницы ---
+;
+; Хвост у ветвей общий: и та, и другая дописывают два нуля масштаба и
+; отдают адрес. Слияние хвоста экономит две команды, а они в pio2 на счету.
 .program trap_join
 .wrap_target
 top:
     pull block                  ; A0..A13 от rom_trap
     jmp pin, page               ; A13: 0x2000-0x3FFF
     mov isr, x
-    in osr, 13                  ; A0..A12
-    in null, 2                  ; по 4 байта на запись
-    push
-    jmp top
+    in osr, 8                   ; A0..A7 - индекс первого уровня
+    jmp tail
 page:
     mov isr, y
     in pins, 5                  ; A8..A12 - страница
+tail:
+    in null, 2                  ; по 4 байта на запись
+    push
+.wrap
+
+; --- маршрут и второй уровень ---
+;
+; На входе - запись первого уровня (или карты страниц). Младший бит:
+;   1 - база подтаблицы >> 7, дописать старшими битами адреса;
+;   0 - готовый адрес ячейки, отдать как есть. Этим же проходит и "трапа
+;       нет": ноль уходит дальше и гасит цепочку пустым триггером.
+.program trap_route
+.wrap_target
+    pull block
+    out x, 1                    ; маршрут; OSR сдвигается вправо на бит
+    mov isr, osr
+    jmp !x, thru
+    in pins, 5                  ; A8..A12 - индекс подтаблицы
     in null, 2
+thru:
     push
 .wrap
 
 % c-sdk {
 #include "hardware/pio.h"
 static inline void trap_join_program_init(PIO pio, uint sm, uint offset, uint pin_a8, uint pin_a13,
-                                          uintptr_t addr_map, uintptr_t page_map) {
+                                          uintptr_t lo_map, uintptr_t page_map) {
     pio_sm_config c = trap_join_program_get_default_config(offset);
     sm_config_set_in_pins(&c, pin_a8);
     sm_config_set_jmp_pin(&c, pin_a13);
@@ -47,12 +80,22 @@ static inline void trap_join_program_init(PIO pio, uint sm, uint offset, uint pi
     sm_config_set_out_shift(&c, /*shift_right=*/true, /*autopull=*/false, 32);
     sm_config_set_clkdiv(&c, 1.0f);
     pio_sm_init(pio, sm, offset, &c);
-    // Базы карт - в X и Y до запуска.
-    pio_sm_put_blocking(pio, sm, (uint32_t)(addr_map >> 15));
+    // Базы карт - в X и Y до запуска. Сдвиги те же, что в склейке: первый
+    // уровень 8 бит индекса + 2 масштаба, страницы 5 + 2.
+    pio_sm_put_blocking(pio, sm, (uint32_t)(lo_map >> TRAP_LO_BASE_SHIFT));
     pio_sm_exec_wait_blocking(pio, sm, pio_encode_pull(false, false));
     pio_sm_exec_wait_blocking(pio, sm, pio_encode_mov(pio_x, pio_osr));
-    pio_sm_put_blocking(pio, sm, (uint32_t)(page_map >> 7));
+    pio_sm_put_blocking(pio, sm, (uint32_t)(page_map >> TRAP_SUB_BASE_SHIFT));
     pio_sm_exec_wait_blocking(pio, sm, pio_encode_pull(false, false));
     pio_sm_exec_wait_blocking(pio, sm, pio_encode_mov(pio_y, pio_osr));
+}
+
+static inline void trap_route_program_init(PIO pio, uint sm, uint offset, uint pin_a8) {
+    pio_sm_config c = trap_route_program_get_default_config(offset);
+    sm_config_set_in_pins(&c, pin_a8);
+    sm_config_set_in_shift(&c, /*shift_right=*/false, /*autopush=*/false, 32);
+    sm_config_set_out_shift(&c, /*shift_right=*/true, /*autopull=*/false, 32);
+    sm_config_set_clkdiv(&c, 1.0f);
+    pio_sm_init(pio, sm, offset, &c);
 }
 %}

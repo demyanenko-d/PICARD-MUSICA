@@ -15,6 +15,8 @@
 #include "core/model/song.h"
 #include "core/formats/byte_source.h"
 #include "core/memory/track_memory.h"
+#include "player/load/progressive_loader.h" // PlanArrays
+#include "player/load/sample_prefetch.h"
 
 namespace soundsinth::bank {
 struct Bank;
@@ -56,14 +58,12 @@ struct SessionLoadResult {
     // Отказ: причина последнего загрузчика.
     const char* error = nullptr;
     // Почему отказал каждый загрузчик, в порядке session_loader_name(). Одной
-    // последней причины мало: на файле с сигнатурой IMPM она "неизвестная
-    // или неподдерживаемая сигнатура MOD", настоящая не видна.
+    // последней причины мало: на файле с сигнатурой IMPM она "unknown or
+    // unsupported MOD signature", настоящая не видна.
     const char* attempt_errors[kLoaderCount] = {};
     // Сколько сэмплов собрал план, если вызывающий дал под него массивы.
-    // Собирается тем же проходом, что длительность: второй обход песни -
-    // это повторная распаковка строк, а у .mid весь трек через конвертер
-    // заново. Делит на префетч и сортирует вызывающий: граница префетча
-    // известна только ему.
+    // Делит на префетч и сортирует вызывающий: граница префетча известна
+    // только ему.
     //
     // plan_usable - проход дошёл до повтора или конца песни. Упёрся в
     // предел (строк, тиков, кадров) или буфера не было - план неполон, и
@@ -75,11 +75,12 @@ struct SessionLoadResult {
 // Сбрасывает mem и Song, пробует загрузчики по очереди, при успехе считает
 // длительность. Хосту ничего не сообщает. metadata_only: без PCM сэмплов,
 // их тянет load_track_sample(); длительность верна, она по паттернам.
-// plan_mem (может быть nullptr) - три массива плана подряд, как их кладёт
-// progressive_attach_plan: очередь, последние позиции, первые позиции. Дан -
-// план собирается проходом длительности, и второго обхода песни не нужно.
+// plan - массивы плана (plan_arrays_of, plan_arrays_in). Даны - план
+// собирается проходом длительности, и второго обхода песни не нужно.
+// use_map_out (может быть nullptr) - карта позиций к плану, блок страниц
+// PSRAM трека до его смены; words nullptr - места нет или план неполон.
 bool run_session_load(soundsinth::formats::ByteSource src, soundsinth::memory::TrackMemory& mem, soundsinth::model::Song& out_song, SessionLoadResult& result,
-                      bool metadata_only = false, uint16_t* plan_mem = nullptr, uint16_t plan_capacity = 0);
+                      bool metadata_only = false, const PlanArrays& plan = PlanArrays{}, UseMap* use_map_out = nullptr);
 
 // PCM одного сэмпла загрузчиком, которым разобран трек. Только после
 // run_session_load(metadata_only = true).

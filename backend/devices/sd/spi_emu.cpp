@@ -10,10 +10,11 @@
 #include <cstdio>
 #include <cstring>
 
-#include "platform/log.h"
-#include "platform/mono_time.h"
 #include "platform/compiler.h"
 #include "platform/hot_path.h"
+#include "platform/log.h"
+#include "platform/mono_time.h"
+
 #include "devices/sd/sd_protocol.h"
 #include "devices/storage/storage.h"
 #include "devices/storage/storage_host.h"
@@ -59,7 +60,7 @@ static_assert(kOwnerCount == devices::storage::kEmulatorCount, "the medium owner
 struct Card {
     bool card_ready = false; // ACMD41 прошла; CMD0 и init снимают
     Tx tx           = Tx::Idle;
-    Tx tx_prev      = Tx::Idle; // для детектора застревания (sd_spi_byte())
+    Tx tx_prev      = Tx::Idle; // для детектора застревания
     Tx after_resp   = Tx::Idle; // куда уйти, когда ответ отдан
     bool selected   = false;
 
@@ -103,10 +104,6 @@ struct Card {
     uint8_t small_idx    = 0;
 
     std::atomic<uint32_t> req{0};
-    // Заказ записи - одним словом: номер сектора и kReqValidBit. Ставит
-    // обработчик после CRC блока, гасит цикл, когда блок на носителе.
-    // Пока заказ стоит, занята только эта сторона: отдаёт 0x00 и
-    // команд не принимает, в том числе после снятия и нового выбора.
     // Подготовленная смена носителя. Готовит поток Core1, принимает
     // обработчик на своём такте: состояние автомата меняет один контекст.
     volatile bool media_dirty           = false;
@@ -115,8 +112,13 @@ struct Card {
     uint8_t new_csd[sd::kRegisterBytes] = {};
     uint16_t new_csd_crc                = 0;
 
+    // Заказ записи - одним словом: номер сектора и kReqValidBit. Ставит
+    // обработчик после CRC блока, гасит цикл, когда блок на носителе.
+    // Пока заказ стоит, занята только эта сторона: отдаёт 0x00 и
+    // команд не принимает, в том числе после снятия и нового выбора.
     std::atomic<uint32_t> write_req{0};
     volatile bool write_ok = true;
+    bool write_reject      = false;   // блок за концом носителя: ответ 0x0d
     uint8_t* wbuf          = nullptr; // блок этой стороны в s_wblocks
     uint32_t req_posted_us = 0;
     uint32_t token_polls   = 0;
@@ -128,6 +130,9 @@ struct Card {
 
     // Чей это автомат: нужно следу и счётчикам по сторонам.
     SdOwner who = SdOwner::None;
+    // Носитель стороны (devices::hal::Medium числом) - для замка писателя.
+    // Задаётся настройкой до подъёма автоматов и на ходу не меняется.
+    uint8_t medium = 0;
 
     // Повторный вход в один автомат. Обработчик чтения порта (0x60)
     // вытесняется записью (0x40) посреди такта, и оба такта идут по
@@ -152,11 +157,15 @@ struct Card {
 
 Card s_cards[kOwnerCount];
 
-// Писатель один: первая сторона, выдавшая CMD24/CMD25, пишет до перезагрузки.
-// У DivMMC и Z-Controller свои картины FAT, запись второй портит FAT первой, а
-// бит защиты от записи софт почти не смотрит. Поэтому чужой записи - R1 0x40
-// (parameter error): драйвер в фазу данных не идёт. Чтение не запрещено.
-SdOwner s_write_owner   = SdOwner::None;
+// Писатель на носитель один: первая сторона, выдавшая CMD24/CMD25, пишет на
+// него до перезагрузки. У DivMMC и Z-Controller свои картины FAT, запись
+// второй на тот же носитель портит FAT первой, а бит защиты от записи софт
+// почти не смотрит. Поэтому чужой записи - R1 0x40 (parameter error):
+// драйвер в фазу данных не идёт. Чтение не запрещено. На разных носителях
+// стороны друг другу не мешают.
+inline constexpr uint32_t kMediumCount = 2;
+SdOwner s_write_owner[kMediumCount]    = {SdOwner::None, SdOwner::None};
+static_assert(static_cast<uint32_t>(devices::hal::Medium::Usb) < kMediumCount, "writer lock is indexed by medium");
 uint32_t s_write_denied = 0; // сколько чужих записей отклонено
 
 // Накопительные счётчики обмена по владельцу.
@@ -172,6 +181,9 @@ uint32_t s_reads[kOwnerCount] = {}; // из них чтений сектора
 // хост упирается в таймаут: без счётчика "esxDOS встал" не отличить от
 // "карта сыплется" (там растут счётчики строки "sd: носитель:").
 uint32_t s_media_fail[kOwnerCount] = {};
+// Носитель не принял сектор записи. Хост узнаёт это только через CMD13,
+// которую esxDOS не спрашивает.
+uint32_t s_write_fail[kOwnerCount] = {};
 uint8_t s_last_cmd[kOwnerCount]    = {}; // последняя команда каждой стороны
 
 // --- След команд карты ---
@@ -222,9 +234,8 @@ void trace_push(const Card& c, uint8_t cmd, uint32_t arg, uint8_t resp, bool acm
 
 // --- Разбор команды ---
 
-// Сколько байт держится одна фаза обмена (детектор "оглох" в
-// sd_spi_byte()). С запасом больше самой длинной законной фазы (сектор
-// 512 байт плюс токен и CRC).
+// Сколько байт держится одна фаза обмена (детектор застревания). С запасом
+// больше самой длинной законной фазы (сектор 512 байт плюс токен и CRC).
 constexpr uint32_t kPhaseStuckBytes = 4096;
 uint32_t s_stuck_count              = 0;
 
@@ -269,6 +280,16 @@ constexpr uint32_t kReqSlotLsb  = 28;
 constexpr uint32_t kReqValidBit = 1u << 31;
 constexpr uint32_t kReqSlotBit  = 1u << kReqSlotLsb;
 constexpr uint32_t kReqLbaMask  = kReqSlotBit - 1u;
+
+SOUNDSINTH_ALWAYS_INLINE constexpr uint32_t make_req(uint32_t lba, uint8_t slot) {
+    return kReqValidBit | (slot ? kReqSlotBit : 0u) | lba;
+}
+SOUNDSINTH_ALWAYS_INLINE constexpr uint32_t req_lba(uint32_t req) {
+    return req & kReqLbaMask;
+}
+SOUNDSINTH_ALWAYS_INLINE constexpr uint8_t req_slot(uint32_t req) {
+    return (req & kReqSlotBit) ? 1u : 0u;
+}
 // Сколько заказ ждал, пока цикл Core1 его заберёт: это задержка, которую
 // видит хост, сверх чтения самого сектора. Наибольшее - за период строки
 // лога, число дольше kReqWaitSlowUs - с запуска.
@@ -282,6 +303,8 @@ uint32_t s_token_polls_max_ok = 0;
 uint32_t s_read_abandoned     = 0;
 uint32_t s_abandon_polls      = 0;
 uint32_t s_abandon_us         = 0;
+uint32_t s_abandon_lba        = 0; // сектор последнего брошенного чтения и сторона
+uint8_t s_abandon_owner       = 0;
 
 // Блок записи - в своём буфере: чтение, которое цикл взял до CMD24,
 // дописало бы сектор упреждения поверх блока хоста. Буфер свой у
@@ -375,7 +398,7 @@ void SOUNDSINTH_HOT_PATH(request_sector)(Card& c, uint32_t lba, uint8_t slot) {
     c.block_failed[slot].store(kNoFailure, std::memory_order_relaxed);
     if (lba > kReqLbaMask) return; // за 128 ГБ не ходим
     c.req_posted_us = platform::mono_us();
-    c.req.store(kReqValidBit | (slot ? kReqSlotBit : 0u) | lba, std::memory_order_release);
+    c.req.store(make_req(lba, slot), std::memory_order_release);
 }
 
 // Готовность выводится из буферов, а не хранится отдельным признаком.
@@ -494,8 +517,8 @@ void SOUNDSINTH_HOT_PATH(process_cmd)(Card& c) {
 
         case sd::kCmd24:
         case sd::kCmd25:
-            // Чужому писателю - отказ (s_write_owner).
-            if (s_write_owner != SdOwner::None && s_write_owner != c.who) {
+            // Чужому писателю того же носителя - отказ (s_write_owner).
+            if (s_write_owner[c.medium] != SdOwner::None && s_write_owner[c.medium] != c.who) {
                 ++s_write_denied;
                 respond1(c, sd::kR1ParamErr);
                 return;
@@ -504,7 +527,7 @@ void SOUNDSINTH_HOT_PATH(process_cmd)(Card& c) {
                 respond1(c, sd::kR1ParamErr);
                 return;
             }
-            s_write_owner = c.who;
+            s_write_owner[c.medium] = c.who;
             c.req.store(0, std::memory_order_relaxed); // упреждение уже не нужно
             c.lba        = arg;
             c.multi      = (cmd == sd::kCmd25);
@@ -522,7 +545,7 @@ void SOUNDSINTH_HOT_PATH(process_cmd)(Card& c) {
             // OCR: CCS=1 (адресация секторами); "питание поднято" и R1 готов - только
             // после ACMD41, до неё idle, как у настоящей карты ("CMD58 0x01, window
             // 40FF8000").
-            const uint8_t r3[5] = {c.card_ready ? sd::kR1Ready : sd::kR1Idle, static_cast<uint8_t>((c.card_ready ? sd::kOcrPowerUpBits : 0u) | sd::kOcrCcsBits),
+            const uint8_t r3[5] = {c.card_ready ? sd::kR1Ready : sd::kR1Idle, static_cast<uint8_t>((c.card_ready ? sd::kOcrPowerUpBit : 0u) | sd::kOcrCcsBit),
                                    0xff, 0x80, 0x00};
             respond(c, r3, 5);
             return;
@@ -539,8 +562,8 @@ void SOUNDSINTH_HOT_PATH(process_cmd)(Card& c) {
 }
 
 // Карта бросила операцию: снятие выбора или отъём шины у ушедшего
-// владельца. Как у настоящей карты: застряв в любой фазе, кроме приёма
-// команды, эмулятор оглох бы - из не-Idle начало команды не распознаётся.
+// владельца. Как у настоящей карты: из фазы не Idle начало команды не
+// распознаётся, и застрявший эмулятор перестаёт принимать команды.
 // Заказ на запись (write_req) не трогается: принятый блок дописывается
 // на носитель, чем бы хост ни занялся.
 SOUNDSINTH_ALWAYS_INLINE void abort_transfer(Card& c) {
@@ -548,6 +571,8 @@ SOUNDSINTH_ALWAYS_INLINE void abort_transfer(Card& c) {
         ++s_read_abandoned;
         s_abandon_polls = c.token_polls;
         s_abandon_us    = platform::mono_us() - c.req_posted_us;
+        s_abandon_lba   = c.lba;
+        s_abandon_owner = static_cast<uint8_t>(c.who);
     }
     c.token_polls = 0;
     c.cmd_idx     = 0;
@@ -580,7 +605,7 @@ uint8_t SOUNDSINTH_HOT_PATH(card_out)(const Card& c) {
         case Tx::ReadCrc:
             return (c.crc_idx == 0) ? static_cast<uint8_t>(c.block_crc_buf[c.cur] >> 8) : static_cast<uint8_t>(c.block_crc_buf[c.cur]);
         case Tx::WriteResp:
-            return sd::kDataRespAccepted; // принято
+            return c.write_reject ? sd::kDataRespWriteErr : sd::kDataRespAccepted;
         case Tx::WriteBusy:
             return write_pending(c) ? sd::kBusyByte : sd::kIdleByte;
         case Tx::BlockToken:
@@ -597,22 +622,21 @@ uint8_t SOUNDSINTH_HOT_PATH(card_out)(const Card& c) {
 void SOUNDSINTH_HOT_PATH(card_in)(Card& c, uint8_t mosi) {
     if (!c.selected || !c.present) return;
 
-    // --- Детектор "оглох" ---
+    // --- Детектор застревания ---
     //
-    // Застрявший эмулятор ошибочных ответов не даёт, и след в лог не
-    // печатается: фаза не Idle дольше 4096 байт (блок - 512 плюс токен и CRC)
-    // - зависание, в след идёт запись с плохим ответом. В Idle хост вправе
-    // гонять 0xFF сколько угодно.
+    // Фаза не Idle дольше kPhaseStuckBytes байт. Застрявший эмулятор ошибок
+    // не отдаёт, поэтому в след пишется запись с плохим ответом. В Idle хост
+    // вправе гонять 0xFF сколько угодно, в ReadToken и WriteBusy - ждать
+    // носитель (у них свой счёт token_polls). Фаза сверяется только на пороге: на
+    // обычном байте это лишние команды обработчика шины.
     if (c.tx != c.tx_prev) {
         c.tx_prev        = c.tx;
         c.phase_bytes    = 0;
         c.stuck_reported = false;
     } else if (c.tx != Tx::Idle) {
-        if (++c.phase_bytes > kPhaseStuckBytes && !c.stuck_reported) {
+        if (++c.phase_bytes > kPhaseStuckBytes && !c.stuck_reported && c.tx != Tx::ReadToken && c.tx != Tx::WriteBusy) {
             c.stuck_reported = true;
             ++s_stuck_count;
-            // Запись с плохим ответом: след печатается в лог тем же путём, что
-            // при настоящей ошибке.
             trace_push(c, kTraceStuckCmd, static_cast<uint32_t>(c.tx), kTraceStuckResp, false);
         }
     }
@@ -623,7 +647,7 @@ void SOUNDSINTH_HOT_PATH(card_in)(Card& c, uint8_t mosi) {
     // поток нет, настоящая карта принимает её в любой момент. Команду от
     // данных отличает старшая пара бит: при чтении хост тактирует шину
     // единицами, у команды это 01.
-    if (c.multi && (c.tx == Tx::ReadToken || c.tx == Tx::ReadData || c.tx == Tx::ReadCrc) && (mosi & sd::kCmdStartMask) == sd::kCmdStartBits) {
+    if (c.multi && (c.tx == Tx::ReadToken || c.tx == Tx::ReadData || c.tx == Tx::ReadCrc) && (mosi & sd::kCmdStartMask) == sd::kCmdStartValue) {
         c.multi = false;
         c.req.store(0, std::memory_order_relaxed);
         c.cmd[0]  = mosi;
@@ -635,7 +659,7 @@ void SOUNDSINTH_HOT_PATH(card_in)(Card& c, uint8_t mosi) {
     switch (c.tx) {
         case Tx::Idle:
             // Команда узнаётся по двум старшим битам: 01xxxxxx.
-            if ((mosi & sd::kCmdStartMask) == sd::kCmdStartBits) {
+            if ((mosi & sd::kCmdStartMask) == sd::kCmdStartValue) {
                 c.cmd[0]  = mosi;
                 c.cmd_idx = 1;
                 c.tx      = Tx::CmdRx;
@@ -682,10 +706,8 @@ void SOUNDSINTH_HOT_PATH(card_in)(Card& c, uint8_t mosi) {
                 if ((c.lba + 1u) < c.sectors) {
                     request_sector(c, c.lba + 1u, static_cast<uint8_t>(1u - c.cur));
                 }
-                // CRC здесь не считается, она посчитана в цикле при чтении сектора:
-                // четыре тысячи итераций в обработчике - десятки микросекунд, а Z80 на 3.5
-                // МГц выдаёт INI каждые 4.5 мкс, несколько чтений остались бы
-                // необслуженными.
+                // CRC посчитан в цикле при чтении сектора: в обработчике это
+                // около 15 мкс, а Z80 выдаёт INI каждые 4.5 мкс.
                 c.byte_idx = 0;
                 c.tx       = Tx::ReadData;
             }
@@ -713,7 +735,9 @@ void SOUNDSINTH_HOT_PATH(card_in)(Card& c, uint8_t mosi) {
             break;
 
         case Tx::WriteToken:
-            if (mosi == sd::kTokenStartBlock) {
+            // Токен блока у CMD24 - 0xfe, у CMD25 - 0xfc. Для CMD25 0xfe тоже
+            // берётся: в этой фазе он данными быть не может.
+            if (mosi == sd::kTokenStartBlock || (c.multi && mosi == sd::kTokenStartMulti)) {
                 c.byte_idx = 0;
                 c.tx       = Tx::WriteData;
             } else if (mosi == sd::kTokenStopTran) {
@@ -735,7 +759,14 @@ void SOUNDSINTH_HOT_PATH(card_in)(Card& c, uint8_t mosi) {
             // CRC хоста принимается без проверки: в SPI он не обязателен, отказ из-за
             // него ломал бы рабочие драйверы.
             if (++c.crc_idx >= 2) {
-                c.write_req.store(kReqValidBit | c.lba, std::memory_order_release);
+                // CMD25 дошёл до конца носителя: блок не пишется, ответ на
+                // данные - ошибка записи, CMD13 отдаёт её во втором байте.
+                c.write_reject = c.lba >= c.sectors;
+                if (c.write_reject) {
+                    c.write_ok = false;
+                } else {
+                    c.write_req.store(kReqValidBit | c.lba, std::memory_order_release);
+                }
                 c.tx = Tx::WriteResp;
             }
             break;
@@ -788,8 +819,9 @@ void sd_spi_emu_init() {
         c.who   = static_cast<SdOwner>(i);
         // Свойства носителя снимаются здесь, обработчик прерывания во флеш
         // за ними не ходит.
-        c.present = devices::storage::storage_emulator_present(static_cast<uint8_t>(i));
-        c.sectors = devices::storage::storage_emulator_sectors(static_cast<uint8_t>(i));
+        c.medium  = static_cast<uint8_t>(devices::storage::storage_emulator_medium(c.who));
+        c.present = devices::storage::storage_emulator_present(c.who);
+        c.sectors = devices::storage::storage_emulator_sectors(c.who);
         build_csd(c.csd, c.sectors);
         c.csd_crc    = sd::crc16(c.csd, kSmallBlockBytes);
         c.small      = c.csd;
@@ -809,14 +841,26 @@ void sd_spi_emu_init() {
         c.pend_tail = 0;
         c.step_busy = false;
         c.write_req.store(0, std::memory_order_relaxed);
-        c.write_ok    = true;
-        c.media_dirty = false;
-        c.wbuf        = s_wblocks[i];
+        c.write_ok     = true;
+        c.write_reject = false;
+        c.media_dirty  = false;
+        c.wbuf         = s_wblocks[i];
         abort_transfer(c);
     }
     // Состояние только что снято прямо из снимка: сверке на этом поколении
     // делать нечего.
     s_media_gen_seen = devices::storage::storage_media_generation();
+}
+
+// Поднят ли эмулятор, видно по буферу записи автомата: его назначает
+// только sd_spi_emu_init, до неё он пуст. Отдельного признака нет - он
+// сдвинул бы раскладку .bss под обработчиками шины.
+void sd_spi_emu_ensure_up() {
+    if (s_cards[0].wbuf == nullptr) sd_spi_emu_init();
+}
+
+uint32_t sd_spi_stuck_count() {
+    return s_stuck_count;
 }
 
 uint32_t sd_spi_media_failures(SdOwner who) {
@@ -836,22 +880,24 @@ void sd_spi_log_stats() {
     const uint32_t d_dm                      = s_cmds[dm] - s_last_cmds[dm];
     s_last_cmds[zc]                          = s_cmds[zc];
     s_last_cmds[dm]                          = s_cmds[dm];
-    // 320: строка выбора в худшем случае 264 байта, в буфер debug_logf на 192
+    // 320: строка выбора в худшем случае 305 байт, в буфер debug_logf на 192
     // не влезает.
     char sm[320];
-    std::snprintf(
-        sm, sizeof(sm),
-        "sd: selected zc=%u dm=%u writer=%s write_denied=%" PRIu32 " stuck=%" PRIu32 " pend=%" PRIu32 "/%" PRIu32 " | zctrl cmd=%" PRIu32 " (+%" PRIu32
-        ") rd=%" PRIu32 " nomedia=%" PRIu32 " last=%u | divmmc cmd=%" PRIu32 " (+%" PRIu32 ") rd=%" PRIu32 " nomedia=%" PRIu32 " last=%u\n",
-        s_cards[zc].selected ? 1u : 0u, s_cards[dm].selected ? 1u : 0u, owner_name(s_write_owner), s_write_denied, s_stuck_count, s_pend_used, s_pend_lost,
-        s_cmds[zc], d_zc, s_reads[zc], s_media_fail[zc], s_last_cmd[zc], s_cmds[dm], d_dm, s_reads[dm], s_media_fail[dm], s_last_cmd[dm]);
+    std::snprintf(sm, sizeof(sm),
+                  "sd: selected zc=%u dm=%u writer card=%s usb=%s write_denied=%" PRIu32 " stuck=%" PRIu32 " pend=%" PRIu32 "/%" PRIu32 " | zctrl cmd=%" PRIu32
+                  " (+%" PRIu32 ") rd=%" PRIu32 " nomedia=%" PRIu32 " wfail=%" PRIu32 " last=%u | divmmc cmd=%" PRIu32 " (+%" PRIu32 ") rd=%" PRIu32
+                  " nomedia=%" PRIu32 " wfail=%" PRIu32 " last=%u\n",
+                  s_cards[zc].selected ? 1u : 0u, s_cards[dm].selected ? 1u : 0u, owner_name(s_write_owner[0]), owner_name(s_write_owner[1]), s_write_denied,
+                  s_stuck_count, s_pend_used, s_pend_lost, s_cmds[zc], d_zc, s_reads[zc], s_media_fail[zc], s_write_fail[zc], s_last_cmd[zc], s_cmds[dm], d_dm,
+                  s_reads[dm], s_media_fail[dm], s_write_fail[dm], s_last_cmd[dm]);
     debug_log(sm);
     std::snprintf(sm, sizeof(sm), "sd: sector request waited for the loop max %" PRIu32 " us this period, over 5 ms %" PRIu32 " since boot\n",
                   s_req_wait_max_us, s_req_wait_slow);
     debug_log(sm);
     std::snprintf(sm, sizeof(sm),
-                  "sd: reads abandoned by host %" PRIu32 " (last: polls %" PRIu32 ", %" PRIu32 " us since request), token awaited max %" PRIu32 " polls\n",
-                  s_read_abandoned, s_abandon_polls, s_abandon_us, s_token_polls_max_ok);
+                  "sd: reads abandoned by host %" PRIu32 " (last: %s sector %" PRIu32 ", polls %" PRIu32 ", %" PRIu32
+                  " us since request), token awaited max %" PRIu32 " polls\n",
+                  s_read_abandoned, owner_name(static_cast<SdOwner>(s_abandon_owner)), s_abandon_lba, s_abandon_polls, s_abandon_us, s_token_polls_max_ok);
     debug_log(sm);
     s_req_wait_max_us = 0;
 }
@@ -907,8 +953,6 @@ void SOUNDSINTH_HOT_PATH(select_step)(Card& c, bool select) {
     c.selected = select;
 }
 
-// Разобрать очередь до пустоты и снять признак занятости. Повтор цикла -
-// на случай такта, пришедшего между последней проверкой и снятием.
 // Принять подготовленную смену носителя. Всё готовое - копирование
 // шестнадцати байт и двух слов: счёт CSD и CRC остаётся в потоке, во флеш
 // за ними обработчик не ходит.
@@ -924,21 +968,36 @@ void SOUNDSINTH_HOT_PATH(take_media)(Card& c) {
     // пройти CMD0 и ACMD41 заново, иначе он считает готовой ту, которой уже нет.
     c.card_ready  = false;
     c.media_dirty = false;
+    // Слоты держат сектора прежнего носителя: попадание в них после смены
+    // отдало бы хосту чужие данные. Заказ, взятый циклом до смены, объявит
+    // слот годным только со своим номером сектора.
+    c.block_valid[0].store(false, std::memory_order_relaxed);
+    c.block_valid[1].store(false, std::memory_order_relaxed);
+    c.block_failed[0].store(kNoFailure, std::memory_order_relaxed);
+    c.block_failed[1].store(kNoFailure, std::memory_order_relaxed);
     abort_transfer(c);
 }
 
-void SOUNDSINTH_HOT_PATH(drain_pending)(Card& c) {
+// Один такт автомата: выбор или байт. Общий для хозяина и для разбора
+// очереди - копия в горячем пути стоила бы полутора килобайт SRAM.
+SOUNDSINTH_NOINLINE void SOUNDSINTH_HOT_PATH(step_one)(Card& c, uint16_t e) {
+    if (c.media_dirty) take_media(c);
+    if (e & kPendSelect) {
+        select_step(c, (e & kPendOn) != 0u);
+    } else if (c.selected) {
+        c.last_rx = card_out(c);
+        card_in(c, static_cast<uint8_t>(e & 0xffu));
+    }
+}
+
+// Разобрать очередь до пустоты и снять признак занятости. Повтор цикла -
+// на случай такта, пришедшего между последней проверкой и снятием.
+SOUNDSINTH_NOINLINE void SOUNDSINTH_HOT_PATH(drain_pending)(Card& c) {
     do {
         while (c.pend_tail != c.pend_head) {
-            if (c.media_dirty) take_media(c);
             const uint16_t e = c.pend[c.pend_tail];
             c.pend_tail      = static_cast<uint8_t>((c.pend_tail + 1u) & (kPendLen - 1u));
-            if (e & kPendSelect) {
-                select_step(c, (e & kPendOn) != 0u);
-            } else if (c.selected) {
-                c.last_rx = card_out(c);
-                card_in(c, static_cast<uint8_t>(e & 0xffu));
-            }
+            step_one(c, e);
         }
         c.step_busy = false;
         if (c.pend_tail == c.pend_head) return;
@@ -946,22 +1005,32 @@ void SOUNDSINTH_HOT_PATH(drain_pending)(Card& c) {
     } while (true);
 }
 
-// Свой такт тоже идёт через очередь. Так код такта остаётся в одном
-// месте: вторая копия в горячем пути стоила бы полутора килобайт SRAM,
-// потому что обе живут в памяти, а не во флеше.
+// Свободный автомат: такт исполняет пришедший сам, затем разбирает то, что
+// за это время положили вытеснившие. Занятый: такт в очередь. В очередь
+// кладёт только вытеснивший, а его самого никто не вытесняет - писатель
+// головы один, и вытеснение посреди pend_push невозможно.
+SOUNDSINTH_NOINLINE void SOUNDSINTH_HOT_PATH(run_or_queue)(Card& c, uint16_t e) {
+    if (c.step_busy) {
+        pend_push(c, e);
+        ++s_pend_used;
+        return;
+    }
+    c.step_busy = true;
+    step_one(c, e);
+    drain_pending(c);
+}
+
 void SOUNDSINTH_HOT_PATH(sd_spi_select)(SdOwner who, bool select) {
     // Арбитра шины нет: у каждой стороны свой кристалл. Держит одна
     // выбранной сколько угодно - второй это не мешает ничем.
     Card* const pc = card_of(who);
     if (pc == nullptr) return;
-    Card& c = *pc;
-    pend_push(c, static_cast<uint16_t>(kPendSelect | (select ? kPendOn : 0u)));
-    if (c.step_busy) {
-        ++s_pend_used;
-        return;
-    }
-    c.step_busy = true;
-    drain_pending(c);
+    run_or_queue(*pc, static_cast<uint16_t>(kPendSelect | (select ? kPendOn : 0u)));
+}
+
+uint8_t SOUNDSINTH_HOT_PATH(sd_spi_latch)(SdOwner who) {
+    const Card* const pc = card_of(who);
+    return pc != nullptr ? *const_cast<const volatile uint8_t*>(&pc->last_rx) : sd::kIdleByte;
 }
 
 uint8_t SOUNDSINTH_HOT_PATH(sd_spi_byte)(SdOwner who, uint8_t mosi) {
@@ -969,8 +1038,12 @@ uint8_t SOUNDSINTH_HOT_PATH(sd_spi_byte)(SdOwner who, uint8_t mosi) {
     // Автомата у стороны нет - 0xFF, как на пустой шине.
     if (pc == nullptr) return sd::kIdleByte;
     Card& c = *pc;
-    // Не выбрана - 0xFF, как ведущий на невыбранной карте.
-    if (!c.selected) return sd::kIdleByte;
+    // Не выбрана - 0xFF, как ведущий на невыбранной карте. Защёлка тоже:
+    // это ответ последнего обмена, и по ней пишется ячейка порта.
+    if (!c.selected) {
+        c.last_rx = sd::kIdleByte;
+        return sd::kIdleByte;
+    }
 
     // Быстрый путь потоковых фаз: байт из буфера, инкремент индекса - и всё.
     //
@@ -981,37 +1054,48 @@ uint8_t SOUNDSINTH_HOT_PATH(sd_spi_byte)(SdOwner who, uint8_t mosi) {
     //
     // Последний байт фазы идёт общим путём: там смена фазы, заказ
     // следующего сектора и прочие решения. Счётчик байтов фазы тут не
-    // двигается: детектор "оглох" срабатывает после 4096 байт одной
+    // двигается: детектор застревания срабатывает после 4096 байт одной
     // фазы, а здесь их заведомо не больше 512.
+    //
+    // Индекс двигается под признаком занятости: вытеснивший посреди чтения
+    // и записи индекса иначе продвинул бы тот же индекс, и хост получил бы
+    // байт дважды. Его такт ляжет в очередь и разберётся сразу после.
     if (!c.step_busy && !c.media_dirty && c.pend_tail == c.pend_head && c.present && c.byte_idx + 1u < devices::storage::kSectorBytes) {
         // CMD12 приходит посреди потока и отличается от данных старшей парой
         // бит: её быстрый путь обязан пропустить к общему, иначе она уйдёт в буфер.
-        if (c.tx == Tx::ReadData && !(c.multi && (mosi & sd::kCmdStartMask) == sd::kCmdStartBits)) {
+        if (c.tx == Tx::ReadData && !(c.multi && (mosi & sd::kCmdStartMask) == sd::kCmdStartValue)) {
+            c.step_busy      = true;
             const uint8_t rx = c.block[c.cur][c.byte_idx];
             ++c.byte_idx;
-            c.last_rx = rx;
+            c.last_rx   = rx;
+            c.step_busy = false;
+            if (c.pend_tail != c.pend_head) {
+                c.step_busy = true;
+                drain_pending(c);
+            }
             return rx;
         }
         if (c.tx == Tx::WriteData && c.wbuf != nullptr) {
+            c.step_busy        = true;
             c.wbuf[c.byte_idx] = mosi;
             ++c.byte_idx;
-            c.last_rx = sd::kIdleByte;
+            c.last_rx   = sd::kIdleByte;
+            c.step_busy = false;
+            if (c.pend_tail != c.pend_head) {
+                c.step_busy = true;
+                drain_pending(c);
+            }
             return sd::kIdleByte;
         }
     }
-    pend_push(c, mosi);
     // Такт пришёл в занятый автомат: он ждёт в очереди, а вытеснивший
     // получает прежнее содержимое защёлки. У Z-Controller защёлка и так
     // конвейерная, у DivMMC байт доедет следующим обменом.
-    if (c.step_busy) {
-        ++s_pend_used;
-        return c.last_rx;
-    }
-    c.step_busy = true;
-    drain_pending(c);
-    // После разбора очереди отдаётся защёлка, а не свой байт: вытеснивший
-    // такт уже случился, и его ответ - последний. Иначе он пропал бы, а
-    // хост получил бы байт предыдущего обмена дважды.
+    //
+    // Свободный автомат: после разбора очереди отдаётся защёлка, а не свой
+    // байт: вытеснивший такт уже случился, и его ответ - последний. Иначе он
+    // пропал бы, а хост получил бы байт предыдущего обмена дважды.
+    run_or_queue(c, mosi);
     return c.last_rx;
 }
 
@@ -1026,8 +1110,8 @@ SOUNDSINTH_NOINLINE void refresh_media_changed(uint32_t gen) {
     bool deferred = false;
     for (uint32_t i = 0; i < kOwnerCount; ++i) {
         Card& c                = s_cards[i];
-        const bool present     = devices::storage::storage_emulator_present(static_cast<uint8_t>(i));
-        const uint32_t sectors = devices::storage::storage_emulator_sectors(static_cast<uint8_t>(i));
+        const bool present     = devices::storage::storage_emulator_present(static_cast<SdOwner>(i));
+        const uint32_t sectors = devices::storage::storage_emulator_sectors(static_cast<SdOwner>(i));
         if (present == c.present && sectors == c.sectors) continue;
         if (c.media_dirty) { // прошлая смена ещё не принята
             deferred = true;
@@ -1081,8 +1165,9 @@ void SOUNDSINTH_HOT_PATH(sd_spi_task)() {
         Card& wc          = s_cards[w];
         const uint32_t wr = wc.write_req.load(std::memory_order_acquire);
         if (wr == 0u || wc.wbuf == nullptr) continue;
-        const uint32_t lba = wr & kReqLbaMask;
-        wc.write_ok        = devices::storage::storage_write(static_cast<uint8_t>(w), lba, wc.wbuf);
+        const uint32_t lba = req_lba(wr);
+        wc.write_ok        = devices::storage::storage_write(static_cast<SdOwner>(w), lba, wc.wbuf);
+        if (!wc.write_ok) ++s_write_fail[w];
         // Слот со старыми данными этого сектора больше не годен. Занята
         // только писавшая сторона, вторая в этот момент вправе ждать токен
         // на тот же сектор - ей заказ переставляется заново, иначе она
@@ -1090,15 +1175,15 @@ void SOUNDSINTH_HOT_PATH(sd_spi_task)() {
         //
         // Носитель у сторон бывает разный: гасится слот только там, где
         // он тот же, иначе чужое чтение теряло бы упреждение зря.
-        const devices::hal::Medium wm = devices::storage::storage_emulator_medium(static_cast<uint8_t>(w));
+        const devices::hal::Medium wm = devices::storage::storage_emulator_medium(static_cast<SdOwner>(w));
         for (uint32_t i = 0; i < kOwnerCount; ++i) {
             Card& c = s_cards[i];
-            if (i != w && devices::storage::storage_emulator_medium(static_cast<uint8_t>(i)) != wm) continue;
+            if (i != w && devices::storage::storage_emulator_medium(static_cast<SdOwner>(i)) != wm) continue;
             for (uint8_t slot = 0; slot < 2; ++slot) {
                 if (c.block_lba[slot] != lba) continue;
                 c.block_valid[slot].store(false, std::memory_order_relaxed);
                 if (c.tx == Tx::ReadToken && c.lba == lba && c.cur == slot) {
-                    c.req.store(kReqValidBit | (slot ? kReqSlotBit : 0u) | lba, std::memory_order_release);
+                    c.req.store(make_req(lba, slot), std::memory_order_release);
                 }
             }
         }
@@ -1120,9 +1205,9 @@ void SOUNDSINTH_HOT_PATH(sd_spi_task)() {
             const uint32_t waited = platform::mono_us() - c.req_posted_us;
             if (waited > s_req_wait_max_us) s_req_wait_max_us = waited;
             if (waited > kReqWaitSlowUs) ++s_req_wait_slow;
-            const uint32_t lba = req & kReqLbaMask;
-            const uint8_t slot = (req & kReqSlotBit) ? 1u : 0u;
-            if (devices::storage::storage_emulator_read(static_cast<uint8_t>(&c - s_cards), lba, c.block[slot])) {
+            const uint32_t lba = req_lba(req);
+            const uint8_t slot = req_slot(req);
+            if (devices::storage::storage_emulator_read(static_cast<SdOwner>(&c - s_cards), lba, c.block[slot])) {
                 // Считается здесь, в цикле, до объявления блока годным:
                 // обработчику остаётся только отдавать байты.
                 c.block_crc_buf[slot] = sd::crc16(c.block[slot], devices::storage::kSectorBytes);

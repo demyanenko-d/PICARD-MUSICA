@@ -14,6 +14,10 @@ void platform::boot_reboot(const BootRequest&) {
     std::abort();
 }
 
+void platform::boot_reboot_saving(BootRequest, uint32_t, const uint8_t*, uint32_t) {
+    std::abort();
+}
+
 bool platform::boot_request_take(BootRequest&) {
     return false;
 }

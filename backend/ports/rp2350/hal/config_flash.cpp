@@ -11,9 +11,10 @@
 
 #include "hardware/flash.h"
 #include "hardware/sync.h"
-#include "pico/platform.h"
+#include "pico.h"
 
 #include "core/config/config_store.h"
+
 #include "firmware_config.h"
 #include "psram/psram_driver.h"
 

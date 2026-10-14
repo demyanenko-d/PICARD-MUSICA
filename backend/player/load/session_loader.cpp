@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 #include "player/load/session_loader.h"
 
+#include <cstring>
 #include <iterator>
 #include <new>
 #include <type_traits>
@@ -42,7 +43,7 @@ void* s_service_user                    = nullptr;
 bool midi_load(soundsinth::formats::ByteSource src, soundsinth::memory::TrackMemory& mem, soundsinth::model::Song& out, const char** error_out,
                bool metadata_only) {
     // Сигнатура проверяется до банка: иначе на плате без банка каждый
-    // .it и .mod получал бы первой строкой отказа "нет банка".
+    // .it и .mod получал бы первой строкой отказа "instrument bank not flashed".
     uint8_t head[4] = {};
     if (!src.seek(src.self, 0) || src.read(src.self, head, sizeof(head)) != sizeof(head) || !soundsinth::formats::midi::sniff(head, sizeof(head))) {
         if (error_out) *error_out = "no MThd signature";
@@ -89,6 +90,23 @@ constexpr bool loaders_in_format_order() {
 }
 static_assert(loaders_in_format_order(), "kLoaders are in TrackFormat order");
 
+// Карта позиций - блоком страниц PSRAM после заморозки, до первого
+// сэмпла: страницы вернёт смена трека. false - места нет.
+bool take_use_map(soundsinth::memory::PsramStore& psram, const soundsinth::model::Song& song, UseMap& out) {
+    out                  = use_map_layout(song.sample_count, song.order_count);
+    const uint32_t bytes = use_map_bytes(out);
+    if (bytes == 0) return false;
+    const uint32_t pages                       = (bytes + soundsinth::memory::kPsramPageBytes - 1u) / soundsinth::memory::kPsramPageBytes;
+    const soundsinth::memory::PsramBlock block = soundsinth::memory::psram_alloc(psram.alloc, static_cast<uint16_t>(pages));
+    if (!block.valid()) {
+        out = UseMap{};
+        return false;
+    }
+    out.words = reinterpret_cast<uint32_t*>(psram.base + static_cast<uint32_t>(block.first) * soundsinth::memory::kPsramPageBytes);
+    std::memset(out.words, 0, bytes);
+    return true;
+}
+
 } // namespace
 
 const char* session_loader_name(uint8_t i) {
@@ -105,8 +123,9 @@ void session_loader_set_service(soundsinth::engine::ServiceFn fn, void* user) {
 }
 
 bool run_session_load(soundsinth::formats::ByteSource src, soundsinth::memory::TrackMemory& mem, soundsinth::model::Song& out_song, SessionLoadResult& result,
-                      bool metadata_only, uint16_t* plan_mem, uint16_t plan_capacity) {
+                      bool metadata_only, const PlanArrays& plan, UseMap* use_map_out) {
     result = SessionLoadResult{};
+    if (use_map_out != nullptr) *use_map_out = UseMap{};
     for (uint8_t i = 0; i < kLoaderCount; ++i) {
         const Loader& loader = kLoaders[i];
         soundsinth::memory::track_memory_reset_for_new_track(mem);
@@ -124,13 +143,14 @@ bool run_session_load(soundsinth::formats::ByteSource src, soundsinth::memory::T
             result.attempt_errors[i] = nullptr;
             result.format            = loader.format;
             uint8_t* walk = soundsinth::memory::scratch_take(mem.scratch, soundsinth::memory::Scratch::DurationPass, soundsinth::memory::kDurationPassBytes);
-            // План собирается этим же проходом, если вызывающий дал массивы:
-            // строки те же, а второй обход песни у .mid - весь трек через
-            // конвертер заново.
             PlanCollector collector;
-            const bool collect = plan_mem != nullptr && plan_capacity != 0;
+            // Сэмплов больше ёмкости массивов - плана нет: массивы last_use и
+            // first_use идут по номеру сэмпла, и запись ушла бы за буфер
+            // загрузчика (за ним PsramStore). Такой трек грузится целиком.
+            const bool collect = plan.indices != nullptr && plan.capacity != 0 && out_song.sample_count <= plan.capacity;
             if (collect) {
-                plan_collect_begin(collector, out_song, plan_mem, plan_capacity, plan_mem + plan_capacity, plan_mem + 2u * plan_capacity, 0);
+                plan_collect_begin(collector, out_song, plan.indices, plan.capacity, plan.last_use, plan.first_use);
+                if (use_map_out != nullptr && take_use_map(mem.psram, out_song, *use_map_out)) collector.use_map = use_map_out;
             }
             // Не влезло - длительность неизвестна (0): трек играет, конец
             // определяется по song_ended.
@@ -148,6 +168,7 @@ bool run_session_load(soundsinth::formats::ByteSource src, soundsinth::memory::T
                 collect && walk != nullptr &&
                 (result.duration.stop == soundsinth::engine::DurationStop::Repeat || result.duration.stop == soundsinth::engine::DurationStop::SongEnd);
             result.plan_count = result.plan_usable ? collector.count : 0u;
+            if (!result.plan_usable && use_map_out != nullptr) *use_map_out = UseMap{};
             return true;
         }
     }
@@ -159,8 +180,8 @@ bool run_session_load(soundsinth::formats::ByteSource src, soundsinth::memory::T
     return false;
 }
 
-// Без повтора, намеренно: повтор читает сэмпл заново, а у WC прыжок
-// назад - перемотка файла в начало и посекторное чтение вперёд. На файле
+// Без повтора, намеренно: повтор читает сэмпл заново, а у Wild Commander
+// прыжок назад - перемотка файла в начало и посекторное чтение вперёд. На файле
 // в 6 МБ это десятки секунд на каждый прыжок, и догрузка встаёт при живом
 // звуке. Повтор после вытеснения (фоновая догрузка) дешёв: место
 // проверяется до чтения, не влезающий сэмпл отказывает, не читая.

@@ -18,10 +18,11 @@ namespace soundsinth::engine {
 class VoiceArbiter {
 public:
     // Пул NNA: слот i - channels[channel_count + i] и голос микшера с тем же
-    // индексом. Каналов не больше SOUNDSINTH_MAX_VOICES, поэтому за ними
+    // индексом. Каналов не больше SOUNDSINTH_MAX_CHANNELS, поэтому за ними
     // всегда есть kPool слотов.
     static constexpr uint8_t kPool = SOUNDSINTH_MAX_NNA_VOICES;
-    static_assert(SOUNDSINTH_MAX_SLOTS >= SOUNDSINTH_MAX_VOICES + SOUNDSINTH_MAX_NNA_VOICES, "the full NNA pool comes after the channels");
+    static_assert(SOUNDSINTH_MAX_SLOTS >= SOUNDSINTH_MAX_CHANNELS + SOUNDSINTH_MAX_NNA_VOICES, "the full NNA pool comes after the channels");
+    static_assert(SOUNDSINTH_MAX_VOICES <= SOUNDSINTH_MAX_SLOTS, "more voices than slots to sound from");
     static_assert(SOUNDSINTH_MAX_SLOTS <= UINT8_MAX, "the slot index is a byte");
     static_assert(SOUNDSINTH_MAX_NNA_VOICES >= 1, "the NNA pool is not empty: slot selection always finds room");
 

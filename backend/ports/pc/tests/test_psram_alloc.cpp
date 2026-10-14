@@ -20,7 +20,109 @@ bool block_inside(const memory::PsramBlock& b, uint16_t page_count) {
 
 } // namespace
 
+// Первый подходящий ищется по словам карты занятости, а не по разрядам.
+// Пропуск слова не меняет ответ, в том числе когда слово кончается
+// посреди прогона.
+void first_fit_is_not_changed_by_word_skipping() {
+    std::printf("test_psram_alloc_first_fit_across_words\n");
+
+    // Ровно первая свободная: занято всё до 70-й страницы, то есть два
+    // слова целиком и шесть разрядов третьего.
+    {
+        memory::PsramAlloc a;
+        memory::psram_alloc_reset(a, 256);
+        memory::PsramBlock head = memory::psram_alloc(a, 70);
+        CHECK_EQ(static_cast<int>(head.first), 0);
+        memory::PsramBlock one = memory::psram_alloc(a, 1);
+        CHECK_EQ(static_cast<int>(one.first), 70);
+    }
+
+    // Прогон через границу слова: дыра с 30-й по 33-ю, то есть кончается
+    // в следующем слове. Четыре страницы обязаны лечь именно в неё.
+    {
+        memory::PsramAlloc a;
+        memory::psram_alloc_reset(a, 256);
+        memory::PsramBlock a1 = memory::psram_alloc(a, 30);  // 0..29
+        memory::PsramBlock a2 = memory::psram_alloc(a, 4);   // 30..33
+        memory::PsramBlock a3 = memory::psram_alloc(a, 100); // 34..133
+        CHECK_EQ(static_cast<int>(a2.first), 30);
+        memory::psram_alloc_free(a, a2);
+        memory::PsramBlock fill = memory::psram_alloc(a, 4);
+        CHECK_EQ(static_cast<int>(fill.first), 30);
+        CHECK_EQ(static_cast<int>(fill.pages), 4);
+        (void)a1;
+        (void)a3;
+    }
+
+    // Дыра уже просьбы: прогон обязан быть отвергнут и взят дальше, за
+    // занятым хвостом.
+    {
+        memory::PsramAlloc a;
+        memory::psram_alloc_reset(a, 256);
+        memory::PsramBlock b1 = memory::psram_alloc(a, 32); // 0..31, слово целиком
+        memory::PsramBlock b2 = memory::psram_alloc(a, 3);  // 32..34
+        memory::PsramBlock b3 = memory::psram_alloc(a, 60); // 35..94
+        memory::psram_alloc_free(a, b2);                    // дыра 32..34
+        memory::PsramBlock big = memory::psram_alloc(a, 5);
+        CHECK_EQ(static_cast<int>(big.first), 95);
+        (void)b1;
+        (void)b3;
+    }
+
+    // Все страницы заняты словами целиком - просьба отвергается, а не
+    // отдаёт мусорное начало.
+    {
+        memory::PsramAlloc a;
+        memory::psram_alloc_reset(a, 64);
+        memory::PsramBlock all = memory::psram_alloc(a, 64);
+        CHECK_EQ(static_cast<int>(all.first), 0);
+        memory::PsramBlock none = memory::psram_alloc(a, 1);
+        CHECK(!none.valid());
+    }
+}
+
+// Отметка "пережить смену трека" держит копию блока. Значит расширение и
+// усечение обязаны поправить и её: иначе после расширения отметка помнит
+// старый размер, и на смене трека прирост достанется новому треку, пока
+// владелец продолжает в него писать.
+void kept_block_follows_resize() {
+    std::printf("test_psram_alloc_kept_follows_block_resize\n");
+
+    // Расширение: после смены трека обязаны вернуться ВСЕ страницы блока.
+    {
+        memory::PsramAlloc a;
+        memory::psram_alloc_reset(a, 256);
+        memory::PsramBlock b = memory::psram_alloc(a, 10);
+        CHECK(memory::psram_alloc_keep(a, b));
+        CHECK(memory::psram_alloc_extend(a, b, 6));
+        CHECK_EQ(static_cast<int>(b.pages), 16);
+
+        memory::psram_alloc_release_track(a, 256);
+        CHECK_EQ(static_cast<int>(memory::psram_alloc_free_pages(a)), 256 - 16);
+        // Следующая просьба не должна лечь поверх отмеченного блока.
+        memory::PsramBlock n = memory::psram_alloc(a, 4);
+        CHECK(n.first >= b.first + b.pages);
+    }
+
+    // Усечение: лишнее не должно числиться занятым после смены трека.
+    {
+        memory::PsramAlloc a;
+        memory::psram_alloc_reset(a, 256);
+        memory::PsramBlock b = memory::psram_alloc(a, 20);
+        CHECK(memory::psram_alloc_keep(a, b));
+        memory::psram_alloc_shrink(a, b, 5);
+        CHECK_EQ(static_cast<int>(b.pages), 5);
+
+        memory::psram_alloc_release_track(a, 256);
+        CHECK_EQ(static_cast<int>(memory::psram_alloc_free_pages(a)), 256 - 5);
+        memory::PsramBlock n = memory::psram_alloc(a, 4);
+        CHECK_EQ(static_cast<int>(n.first), 5);
+    }
+}
+
 void run_psram_alloc_tests() {
+    kept_block_follows_resize();
+    first_fit_is_not_changed_by_word_skipping();
     std::printf("test_psram_alloc_basics\n");
     {
         memory::PsramAlloc a;

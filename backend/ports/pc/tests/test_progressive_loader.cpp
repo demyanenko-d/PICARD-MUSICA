@@ -189,6 +189,44 @@ void test_evict_farthest_over_cap() {
     CHECK_EQ(e.pl->evicted, 0u);
 }
 
+// evict_capped считает только тех, кого цикл вытеснения дошёл проверить
+// на занятость: у каждого из трёх выборов жертвы свой порядок проверок.
+// Сэмплы 40-43 за картой занятых шириной 32.
+void test_evict_capped_counting() {
+    std::printf("test_progressive_evict_capped_counting\n");
+    {
+        // Без карты: позиция ещё впереди - до занятости не доходит; после
+        // первой жертвы цикл кончается.
+        Env e;
+        e.resident(40, 1, 1);
+        e.resident(41, 1, 9);
+        e.resident(5, 1, 1);
+        e.resident(42, 1, 1);
+        CHECK(player::load::progressive_evict_one(*e.pl, *e.mem, 3, e.in_use(32)));
+        CHECK(memory::sample_cache_find(e.mem->sample_cache, 5) == nullptr);
+        CHECK_EQ(e.pl->evict_capped, 1u);
+    }
+    {
+        // Карта позиций: ближе текущего лучшего - до занятости не доходит;
+        // цикл идёт до конца каталога.
+        Env e;
+        uint32_t words[128] = {};
+        e.pl->use_map       = player::load::use_map_layout(64, 20);
+        e.pl->use_map.words = words;
+        for (const uint16_t idx : {40, 41, 6, 42, 43})
+            e.resident(idx, 1, 0);
+        player::load::use_map_mark(e.pl->use_map, 40, 15); // через 12
+        player::load::use_map_mark(e.pl->use_map, 41, 4);  // через 1
+        player::load::use_map_mark(e.pl->use_map, 6, 17);  // через 14
+        player::load::use_map_mark(e.pl->use_map, 42, 19); // через 16
+        player::load::use_map_mark(e.pl->use_map, 43, 13); // через 10
+        player::load::use_map_mark(e.pl->use_map, 5, 10);  // загружаемый: через 7
+        CHECK(player::load::progressive_evict_one(*e.pl, *e.mem, 3, e.in_use(32), 5));
+        CHECK(memory::sample_cache_find(e.mem->sample_cache, 6) == nullptr);
+        CHECK_EQ(e.pl->evict_capped, 2u);
+    }
+}
+
 // Загрузка: страниц на сэмпл pages; отказ, пока свободных меньше. Считает вызовы.
 struct Loader {
     memory::TrackMemory* mem = nullptr;
@@ -438,54 +476,6 @@ void test_retry_only_after_useful_eviction() {
     }
 }
 
-// Живой поток: запросы по событиям, жертва - дольше всех не звучавший,
-// звучащий не вытесняется.
-void test_demand() {
-    std::printf("test_progressive_demand\n");
-    Env e;
-    player::load::progressive_start_demand(*e.pl);
-    Loader l{e.mem.get(), 2, 0};
-    CHECK(player::load::progressive_load_next(*e.pl, *e.mem, 0, e.in_use(), &Loader::load, &l) == player::load::ProgressiveStep::Waiting);
-
-    // Повторный запрос не встаёт в очередь второй раз.
-    CHECK(player::load::progressive_request(*e.pl, 5));
-    CHECK(player::load::progressive_request(*e.pl, 5));
-    CHECK(player::load::progressive_request(*e.pl, 7));
-    CHECK(!player::load::progressive_request(*e.pl, player::load::kProgressiveMaxSamples));
-    uint16_t got = 0;
-    CHECK(player::load::progressive_load_next(*e.pl, *e.mem, 0, e.in_use(), &Loader::load, &l, &got) == player::load::ProgressiveStep::Loaded);
-    CHECK_EQ(got, 5u);
-    CHECK(player::load::progressive_load_next(*e.pl, *e.mem, 0, e.in_use(), &Loader::load, &l, &got) == player::load::ProgressiveStep::Loaded);
-    CHECK_EQ(got, 7u);
-    CHECK(player::load::progressive_load_next(*e.pl, *e.mem, 0, e.in_use(), &Loader::load, &l) == player::load::ProgressiveStep::Waiting);
-    CHECK_EQ(l.calls, 2u);
-    // Уже резидентный: запрос проходит без загрузки.
-    CHECK(player::load::progressive_request(*e.pl, 5));
-    CHECK(player::load::progressive_load_next(*e.pl, *e.mem, 0, e.in_use(), &Loader::load, &l) == player::load::ProgressiveStep::Loaded);
-    CHECK_EQ(l.calls, 2u);
-
-    // Места нет: 5 звучал позже 7 - вытесняется 7.
-    leave_free(e.mem->psram, 0);
-    e.in_use_bits[0] = 1u << 5;
-    player::load::progressive_note_in_use(*e.pl, *e.mem, e.in_use(), 10);
-    e.in_use_bits[0] = 0;
-    CHECK(player::load::progressive_request(*e.pl, 9));
-    CHECK(player::load::progressive_load_next(*e.pl, *e.mem, 0, e.in_use(), &Loader::load, &l, &got) == player::load::ProgressiveStep::Loaded);
-    CHECK_EQ(got, 9u);
-    CHECK(memory::sample_cache_find(e.mem->sample_cache, 7) == nullptr);
-    CHECK(memory::sample_cache_find(e.mem->sample_cache, 5) != nullptr);
-    CHECK_EQ(e.pl->evicted, 1u);
-
-    // Звучащие не вытесняются: оба заняты - отказ.
-    e.in_use_bits[0] = (1u << 5) | (1u << 9);
-    player::load::progressive_note_in_use(*e.pl, *e.mem, e.in_use(), 20);
-    CHECK(player::load::progressive_request(*e.pl, 11));
-    CHECK(player::load::progressive_load_next(*e.pl, *e.mem, 0, e.in_use(), &Loader::load, &l) == player::load::ProgressiveStep::Failed);
-    CHECK(memory::sample_cache_find(e.mem->sample_cache, 5) != nullptr);
-    CHECK(memory::sample_cache_find(e.mem->sample_cache, 9) != nullptr);
-    CHECK_EQ(e.pl->plan_failed, 1u);
-}
-
 } // namespace
 
 // Упреждение не ломает порядок плана. План отсортирован по смещению в
@@ -519,11 +509,11 @@ void run_progressive_loader_tests() {
     test_evict_one_branches();
     test_load_next_steps();
     test_retry_only_after_useful_eviction();
-    test_demand();
     test_lead_keeps_plan_order();
     test_use_map();
     test_evict_farthest();
     test_evict_farthest_over_cap();
+    test_evict_capped_counting();
     test_plan_rescan();
     test_plan_collect_stays_in_capacity();
 }

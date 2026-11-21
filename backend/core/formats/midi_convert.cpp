@@ -2,7 +2,6 @@
 #include "core/formats/midi_convert.h"
 
 #include <cmath>
-#include <cstdio>
 #include <new>
 #include <type_traits>
 
@@ -70,7 +69,6 @@ void init_song_header(Song& out, Grid grid, uint32_t tracker_tempo) {
     // Core1 (около 250 байт). Деструктор тривиален.
     static_assert(std::is_trivially_destructible_v<Song>, "Song is constructed over the previous one");
     new (&out) Song();
-    std::snprintf(out.title, sizeof(out.title), "MIDI");
     out.frequency_model = soundsinth::model::FrequencyModel::Linear;
     // Доезд громкости 5 мс вместо 1.
     out.volume_ramp_samples  = 220;

@@ -27,6 +27,7 @@ let end = 0;
 if (mapFile && fs.existsSync(mapFile)) {
     // Строки карты вида: _CODE   00006000    00001085 = 4229. bytes
     const lines = fs.readFileSync(mapFile, 'utf8').split(/\r?\n/);
+    const areas = new Map();
     for (const l of lines) {
         const m = l.match(/^(\S+)\s+([0-9A-F]{8})\s+([0-9A-F]{8})\s+=/);
         if (!m) continue;
@@ -35,8 +36,17 @@ if (mapFile && fs.existsSync(mapFile)) {
         const size = parseInt(sizeHex, 16);
         if (size === 0) continue;
         if (addr < start) continue;
+        areas.set(name, { name, addr, size });
         const e = addr + size;
         if (e > end) end = e;
+    }
+    // Область по своему адресу (-b) компоновщик не сторожит: код, доросший
+    // до неё, молча ляжет поверх.
+    const sorted = [...areas.values()].sort((a, b) => a.addr - b.addr);
+    for (let i = 1; i < sorted.length; ++i) {
+        const p = sorted[i - 1], c = sorted[i];
+        if (p.addr + p.size > c.addr)
+            throw new Error(`overlap: ${p.name} ends at 0x${(p.addr + p.size).toString(16)}, ${c.name} starts at 0x${c.addr.toString(16)}`);
     }
 }
 

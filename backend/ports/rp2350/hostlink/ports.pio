@@ -15,8 +15,8 @@
 ;                  цепочке DMA
 ;   port_join      выбор ячейки ответа по записи таблицы: готовый адрес или
 ;                  страница на 256 байт по старшей половине адреса
-;   bus_wr         захват записи в порт и - в режиме DivMMC - в память ниже
-;                  0x4000, будит ядро
+;   bus_wr         захват записи в порт и - в режимах DivMMC и TR-DOS - в
+;                  память ниже 0x4000, будит ядро
 ;   rom_serve      автомат выдачи байта: выставляет байт и открывает буфер
 ;
 ; "Порт не наш" решает склейщик: нулевую запись таблицы он отбрасывает и
@@ -36,12 +36,15 @@
 ; массивов берётся отсюда же.
 .define public PORT_TABLE_BASE_SHIFT 10
 
+; Флаг блока pio2: port_join_hold держит /WAIT, пока ядро его не снимет.
+.define public PORT_HOLD_IRQ 0
+
 ; Сколько подряд подтверждений нужно, чтобы признать событие на шине.
 ; Итерация цикла подтверждения port_detect - 3 инструкции, 10 нс при 300
 ; МГц.
 ;
-; 5 подтверждений - около 60 нс непрерывной проверки, иголке столько не
-; продержаться. 15 (около 160 нс на каждом из двух мест - в начале и в
+; 5 подтверждений - около 60 нс непрерывной проверки, короткой помехе
+; столько не продержаться. 15 (около 160 нс на каждом из двух мест - в начале и в
 ; конце цикла) отнимают время у цикла с обоих концов.
 .define PORT_CONFIRM 5
 
@@ -70,8 +73,39 @@ pconfirm:
     in null, 2                  ; по 4 байта на запись
     push
 
-    ; Снятие IORQ_N - двумя проверками с выдержкой: иголка
+    ; Снятие IORQ_N - двумя проверками с выдержкой: короткая помеха
     ; короче выдержки невидима, повторного разбора цикла нет.
+    wait 1 gpio Z80_IORQ_N_GPIO [IORQ_SETTLE]
+    wait 1 gpio Z80_IORQ_N_GPIO
+.wrap
+
+; --- port_detect_dos: то же, таблица выбирается флагом DOS ---
+;
+; Режимы без DivMMC. Таблиц две по 1 КБ подряд: при DOS - первая, без DOS -
+; вторая; разряд 10 адреса записи - ~DOS. Порты Beta Disk отвечают только
+; при DOS, остальные записи в таблицах одинаковы.
+;
+; Слово уходит автопушем: в pio1 с TR-DOS рядом bus_wr с веткой памяти, и
+; команды на счету.
+;
+;   STATUS = флаг IRQ_DOS блока pio0: все единицы - DOS включён
+;   X      = база пары таблиц >> 11
+.program port_detect_dos
+
+.wrap_target
+dppoll:
+    set y, PORT_CONFIRM
+dpconfirm:
+    wait 0 gpio Z80_IORQ_N_GPIO
+    jmp pin, dppoll
+    jmp y--, dpconfirm
+
+    mov y, ~status              ; ноль при DOS
+    in x, (31 - PORT_TABLE_BASE_SHIFT)
+    in y, 1                     ; разряд 10: таблица
+    in pins, 8
+    in null, 2                  ; 32 разряда - автопуш
+
     wait 1 gpio Z80_IORQ_N_GPIO [IORQ_SETTLE]
     wait 1 gpio Z80_IORQ_N_GPIO
 .wrap
@@ -89,6 +123,21 @@ static inline void port_detect_program_init(PIO pio, uint sm, uint offset, uint 
 
     // X = porttab_base >> PORT_TABLE_BASE_SHIFT, до запуска, вне основного цикла.
     pio_sm_put_blocking(pio, sm, (uint32_t)(table_base >> PORT_TABLE_BASE_SHIFT));
+    pio_sm_exec_wait_blocking(pio, sm, pio_encode_pull(false, false));
+    pio_sm_exec_wait_blocking(pio, sm, pio_encode_mov(pio_x, pio_osr));
+}
+
+static inline void port_detect_dos_program_init(PIO pio, uint sm, uint offset, uint pin_rd_n, uint pin_a0, uintptr_t pair_base,
+                                                uint status_irq) {
+    pio_sm_config c = port_detect_dos_program_get_default_config(offset);
+    sm_config_set_in_pins(&c, pin_a0);
+    sm_config_set_jmp_pin(&c, pin_rd_n);
+    sm_config_set_mov_status(&c, STATUS_IRQ_SET, status_irq);
+    sm_config_set_in_shift(&c, /*shift_right=*/false, /*autopush=*/true, 32);
+    sm_config_set_out_shift(&c, /*shift_right=*/false, /*autopull=*/false, 32);
+    sm_config_set_clkdiv(&c, 1.0f);
+    pio_sm_init(pio, sm, offset, &c);
+    pio_sm_put_blocking(pio, sm, (uint32_t)(pair_base >> (PORT_TABLE_BASE_SHIFT + 1)));
     pio_sm_exec_wait_blocking(pio, sm, pio_encode_pull(false, false));
     pio_sm_exec_wait_blocking(pio, sm, pio_encode_mov(pio_x, pio_osr));
 }
@@ -110,7 +159,7 @@ static inline void port_detect_program_init(PIO pio, uint sm, uint offset, uint 
 ;       делят младший байт.
 ;
 ; Ноль - порт не наш: ISR не трогается, отдавать нечего, автомат ждёт
-; следующей записи. Как у rom_join.
+; следующей записи.
 ;
 ; Адрес ещё на шине: склейщик работает через ~80 нс от начала цикла, а Z80
 ; держит адрес до конца IORQ.
@@ -146,10 +195,55 @@ static inline void port_join_program_init(PIO pio, uint sm, uint offset, uint pi
 }
 %}
 
+; --- port_join_hold: склейщик TR-DOS, ещё и удержание чтения ---
+;
+; Маршруты port_join и третий: страница с базой 0 (настоящей там нет) -
+; удержать. /WAIT вниз и флаг PORT_HOLD_IRQ ядру; байт в очередь выдачи
+; кладёт ядро, оно же снимает флаг, и /WAIT отпущен. Адреса склейщик не
+; отдаёт: байт ещё не готов. Z80 смотрит /WAIT на спаде такта TW, около
+; 430 нс от спада IORQ, склейщик успевает за ~100.
+;
+; Удержание - перед top и проваливается в него: перехода не нужно, и
+; программа на две команды длиннее port_join. Только TR-DOS: в прочих
+; режимах /WAIT ставится программно. Старт автомата - с top.
+;
+;   IN_BASE = A8 (GPIO 16), side-set - направление /WAIT (GPIO34, уровень 0)
+.program port_join_hold
+.side_set 1 opt pindirs
+
+hold:
+    irq wait PORT_HOLD_IRQ side 1 ; /WAIT вниз, ждать ядро
+.wrap_target
+public top:
+    out y, 31           side 0  ; /WAIT отпущен; адрес ячейки или база >> 8
+    out x, 1                    ; маршрут (автоподхват: 31 + 1 = 32)
+    jmp !x, direct
+    jmp !y, hold                ; база 0 - удержать
+    in y, 24                    ; база страницы
+    in pins, 8                  ; A8..A15 - смещение, 32-й разряд - автопуш
+.wrap
+direct:
+    jmp !y, top                 ; порт не наш
+    in y, 32                    ; адрес ячейки как есть - автопуш
+    jmp top
+
+% c-sdk {
+static inline void port_join_hold_program_init(PIO pio, uint sm, uint offset, uint pin_a8, uint pin_wait_n) {
+    pio_sm_config c = port_join_hold_program_get_default_config(offset);
+    sm_config_set_in_pins(&c, pin_a8);
+    sm_config_set_sideset_pins(&c, pin_wait_n);
+    sm_config_set_in_shift(&c, /*shift_right=*/false, /*autopush=*/true, 32);
+    sm_config_set_out_shift(&c, /*shift_right=*/true, /*autopull=*/true, 32);
+    sm_config_set_clkdiv(&c, 1.0f);
+    pio_sm_init(pio, sm, offset + port_join_hold_offset_top, &c);
+}
+%}
+
 ; --- Запись: один автомат на записи в память и в порты ---
 ;
-; Нужен для ОЗУ DivMMC на 0x2000-0x3FFF (без захвата записи страница
-; мертва) и порта 0xE3, которым DivMMC управляют.
+; Нужен для ОЗУ на 0x2000-0x3FFF - DivMMC и навигатора образов (без
+; захвата записи страница мертва) - и порта 0xE3, которым переключают их
+; банки.
 ;
 ; Ждать спада WR, а не MREQ: на спаде MREQ (середина T1) WR ещё высокий,
 ; цикл записи был бы пропущен; к спаду WR (середина T2) годны и адрес, и
@@ -161,6 +255,9 @@ static inline void port_join_program_init(PIO pio, uint sm, uint offset, uint pi
 ;
 ; push noblock: не успело ядро - запись теряется, но шина не задерживается
 ; (задержка сломала бы чтение по тем же линиям).
+;
+; Ядро будит непустая очередь (источник прерывания блока), а не флаг IRQ:
+; на команду меньше, а в pio1 рядом с ним port_detect_dos.
 ;
 ;   IN_BASE = 0 (весь порт ввода)
 .program bus_wr
@@ -184,7 +281,6 @@ public mem:                     ; без эмуляции памяти здес�
 take:
     in pins, 32                 ; IORQ, адрес и данные разом
     push noblock
-    irq set 0                   ; будим обработчик на ядре
 public done:
     wait 1 gpio Z80_WR_N_GPIO   ; конец записи
 .wrap
@@ -200,6 +296,37 @@ static inline void bus_wr_program_init(PIO pio, uint sm, uint offset) {
     sm_config_set_out_shift(&c, /*shift_right=*/true, /*autopull=*/false, 32);
     // Приёмная очередь вдвое глубже: передающая не нужна, объединение
     // бесплатно и удваивает запас на задержку входа в обработчик.
+    sm_config_set_fifo_join(&c, PIO_FIFO_JOIN_RX);
+    sm_config_set_clkdiv(&c, 1.0f);
+    pio_sm_init(pio, sm, offset, &c);
+}
+%}
+
+; --- bus_wr_ports: bus_wr без ветки памяти ---
+;
+; Режимы без эмуляции памяти. Флаг IRQ будит ядро и при своём ПЗУ: там
+; очередь вычерпывает канал DMA, и непустой она почти не бывает.
+.program bus_wr_ports
+
+.wrap_target
+    wait 0 gpio Z80_WR_N_GPIO [31]
+    mov osr, pins
+    out null, Z80_IORQ_N_GPIO
+    out y, 1                    ; Y = IORQ_N
+    jmp y--, wdone              ; единица: память
+    in pins, 32
+    push noblock
+    irq set 0
+wdone:
+    wait 1 gpio Z80_WR_N_GPIO
+.wrap
+
+% c-sdk {
+static inline void bus_wr_ports_program_init(PIO pio, uint sm, uint offset) {
+    pio_sm_config c = bus_wr_ports_program_get_default_config(offset);
+    sm_config_set_in_pins(&c, 0);
+    sm_config_set_in_shift(&c, /*shift_right=*/false, /*autopush=*/false, 32);
+    sm_config_set_out_shift(&c, /*shift_right=*/true, /*autopull=*/false, 32);
     sm_config_set_fifo_join(&c, PIO_FIFO_JOIN_RX);
     sm_config_set_clkdiv(&c, 1.0f);
     pio_sm_init(pio, sm, offset, &c);
@@ -243,7 +370,7 @@ late:
     mov pins, osr               ; байт в выходной регистр (пины ещё входы)
     mov pindirs, !null  side 0  ; D0..D7 на выход и буфер открыт, атомарно
 
-    ; Конец цикла - подтверждение, а не одна проверка: иголка на RD_N
+    ; Конец цикла - подтверждение, а не одна проверка: короткая помеха на RD_N
     ; выглядела бы как "Z80 защёлкнул", данные снялись бы, а он читал бы
     ; неподведённую шину. Пока идёт подтверждение,
     ; данные выставлены.

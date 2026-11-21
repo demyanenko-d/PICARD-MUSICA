@@ -1,0 +1,189 @@
+; SPDX-License-Identifier: MIT
+; Своё ПЗУ Пентагона (64 КБ, четыре страницы по 16 КБ) из памяти платы.
+;
+; Страница - как у Пентагона: (DOS ? 0 : 2) + бит 4 порта 7FFD. В памяти
+; образ разложен иначе: адрес байта = база | бит 4 << 15 | DOS << 14 |
+; A0..A13, база выровнена на 64 КБ. Раскладку делает тот, кто кладёт образ.
+;
+;   pentagon_rom   ловит чтение памяти ниже 0x4000 и отдаёт адрес байта
+;                  цепочке DMA к rom_serve; выборка команды выше 0x3FFF
+;                  гасит DOS
+;   dos_enter      выборка команды из 0x3Dxx при бите 4 = 1 включает DOS
+;   paging_filter  (блок звука) копии записей в порты: запись в 7FFD
+;                  сразу даёт pentagon_rom новое слово базы и ставит флаг
+;                  бита 4 для dos_enter
+;   dos_drive      (блок звука) ведёт DOS_N по флагу DOS
+;
+; DOS - флаг IRQ блока pio0: ставит dos_enter, гасит pentagon_rom и ядро по
+; сбросу машины. Бит 4 ядро не ведёт, кроме сброса и закрытого порта:
+; прерывание на запись в 7FFD опаздывает, а Пентагон меняет страницу к
+; следующей выборке.
+.pio_version rp2350
+.define public PENTAGON_Z80_M1_N_GPIO 3
+.define public PENTAGON_Z80_WR_N_GPIO 4
+.define public PENTAGON_Z80_RD_N_GPIO 5
+.define public PENTAGON_Z80_MREQ_N_GPIO 7
+.define public IRQ_DOS 5
+.define public PENTAGON_IRQ_ROM48 7
+; Подтверждение начала цикла: без него ложный цикл
+; кладёт лишний адрес в очередь rom_serve.
+.define MREQ_CONFIRM 1
+
+; --- Отдача байта ---
+;
+;   IN_BASE = A0 (GPIO 8): mov osr, pins кладёт A0 в разряд 0, M1_N (GPIO 3)
+;             - в разряд 27
+;   JMP_PIN = RD_N
+;   STATUS  = флаг IRQ_DOS: все единицы - DOS включён
+;   X       = (база >> 15) | бит 4, слово из очереди, пустая очередь - прежнее
+.program pentagon_rom
+high:
+    ; Выше 0x3FFF - не наше. Выборка команды там гасит DOS.
+    out null, 11                ; до M1_N
+    out y, 1
+    jmp y--, done               ; чтение данных: DOS прежний
+    irq clear IRQ_DOS
+.wrap_target
+done:
+    wait 1 gpio PENTAGON_Z80_MREQ_N_GPIO ; конец цикла
+public poll:
+    set y, MREQ_CONFIRM
+confirm:
+    wait 0 gpio PENTAGON_Z80_MREQ_N_GPIO
+    wait 1 gpio PENTAGON_Z80_WR_N_GPIO   ; не запись
+    jmp pin, poll               ; RD_N высокий: регенерация
+    jmp y--, confirm
+    pull noblock                ; новая база, если её положил фильтр или ядро
+    mov x, osr
+    mov osr, pins
+    out null, 14                ; A0..A13
+    out y, 2                    ; A14, A15
+    jmp y--, high
+    ; Задержка - запас против dos_enter: на выборке из 0x3Dxx флаг DOS он
+    ; ставит к девятому такту после спада RD, и этот же цикл должен уйти
+    ; уже со страницы TR-DOS.
+    in x, 17 [3]                ; база и бит 4
+    mov y, status
+    in y, 1                     ; DOS
+    in pins, 14                 ; A0..A13, 32-й разряд - автопуш
+.wrap
+
+; --- Вход в DOS ---
+;
+;   IN_BASE = A0, JMP_PIN = M1_N, STATUS = флаг PENTAGON_IRQ_ROM48, Y = 0x3D
+;
+; Адрес снимается сразу за спадом RD, и после каждой выборки - ожидание
+; конца M1. Без него та же выборка разбирается заново по адресу
+; регенерации (I:R): при I = 0x3F переход 0x31 - 0x3F читается как 0x3D, и
+; DOS включается посреди ПЗУ 48.
+.program dos_enter
+.wrap_target
+    wait 0 gpio PENTAGON_Z80_M1_N_GPIO
+    wait 0 gpio PENTAGON_Z80_RD_N_GPIO   ; адрес установился
+    mov osr, pins
+    jmp pin, skip               ; M1 снят: не выборка
+    mov x, status
+    jmp !x, skip                ; ПЗУ 128: окно 0x3Dxx не TR-DOS
+    out null, 8
+    out x, 8                    ; A8..A15
+    jmp x != y, skip
+    irq set IRQ_DOS
+skip:
+    wait 1 gpio PENTAGON_Z80_M1_N_GPIO   ; конец выборки
+.wrap
+
+; --- Бит 4 порта 7FFD ---
+;
+; Блок звука. Слова - копии снимков bus_wr (GPIO 0..31, только записи в
+; порт): A1 - разряд 9, A15 - 23, D4 - 28. Порт 7FFD у Пентагона - A15 = 0
+; и A1 = 0. По записи - слово базы (X << 1 | D4, X = база >> 16) в очередь,
+; канал DMA несёт его в очередь pentagon_rom; и флаг PENTAGON_IRQ_ROM48 в
+; pio0 (для pio2 это следующий блок).
+.program paging_filter
+.wrap_target
+top:
+    pull block
+    out null, 9
+    out y, 1                    ; A1
+    jmp y--, top
+    out null, 13
+    out y, 1                    ; A15
+    jmp y--, top
+    out null, 4                 ; разряд 0 OSR - D4
+    in x, 31
+    in osr, 1                   ; автопуш: слово базы
+    ; Сначала снять, потом поставить: флаг на миг ноль посреди записи в
+    ; порт, выборки команды в это время нет.
+    irq next clear PENTAGON_IRQ_ROM48
+    out y, 1
+    jmp !y, top
+    irq next set PENTAGON_IRQ_ROM48
+.wrap
+
+; --- Вывод DOS_N ---
+;
+; Блок звука, окно выводов 16..47. STATUS - флаг IRQ_DOS блока pio0: чтение
+; флага его не гасит.
+.program dos_drive
+.wrap_target
+    mov x, status
+    mov pins, ~x                ; DOS включён - на выводе ноль
+.wrap
+
+% c-sdk {
+#include "hardware/pio.h"
+
+static inline void pentagon_rom_program_init(PIO pio, uint sm, uint offset, uint pin_a0, uint pin_rd_n, uint32_t base_word) {
+    pio_sm_config c = pentagon_rom_program_get_default_config(offset);
+    sm_config_set_in_pins(&c, pin_a0);
+    sm_config_set_jmp_pin(&c, pin_rd_n);
+    sm_config_set_mov_status(&c, STATUS_IRQ_SET, IRQ_DOS);
+    sm_config_set_out_shift(&c, /*shift_right=*/true, /*autopull=*/false, 32);
+    sm_config_set_in_shift(&c, /*shift_right=*/false, /*autopush=*/true, 32);
+    sm_config_set_clkdiv(&c, 1.0f);
+    pio_sm_init(pio, sm, offset + pentagon_rom_offset_poll, &c);
+    pio_sm_put_blocking(pio, sm, base_word);
+    pio_sm_exec_wait_blocking(pio, sm, pio_encode_pull(false, false));
+    pio_sm_exec_wait_blocking(pio, sm, pio_encode_mov(pio_x, pio_osr));
+}
+
+static inline void dos_enter_program_init(PIO pio, uint sm, uint offset, uint pin_a0, uint pin_m1_n, uint8_t window_hi) {
+    pio_sm_config c = dos_enter_program_get_default_config(offset);
+    sm_config_set_in_pins(&c, pin_a0);
+    sm_config_set_jmp_pin(&c, pin_m1_n);
+    sm_config_set_mov_status(&c, STATUS_IRQ_SET, PENTAGON_IRQ_ROM48);
+    sm_config_set_out_shift(&c, /*shift_right=*/true, /*autopull=*/false, 32);
+    sm_config_set_clkdiv(&c, 1.0f);
+    pio_sm_init(pio, sm, offset, &c);
+    pio_sm_put_blocking(pio, sm, window_hi);
+    pio_sm_exec_wait_blocking(pio, sm, pio_encode_pull(false, false));
+    pio_sm_exec_wait_blocking(pio, sm, pio_encode_mov(pio_y, pio_osr));
+}
+
+// X = база >> 16: слово базы - X << 1 | D4.
+static inline void paging_filter_program_init(PIO pio, uint sm, uint offset, uint32_t base_hi) {
+    pio_sm_config c = paging_filter_program_get_default_config(offset);
+    sm_config_set_out_shift(&c, /*shift_right=*/true, /*autopull=*/false, 32);
+    sm_config_set_in_shift(&c, /*shift_right=*/false, /*autopush=*/true, 32);
+    sm_config_set_clkdiv(&c, 1.0f);
+    pio_sm_init(pio, sm, offset, &c);
+    pio_sm_put_blocking(pio, sm, base_hi);
+    pio_sm_exec_wait_blocking(pio, sm, pio_encode_pull(false, false));
+    pio_sm_exec_wait_blocking(pio, sm, pio_encode_mov(pio_x, pio_osr));
+}
+
+// Пин передаётся автомату уже в неактивном уровне: сперва выходной регистр
+// и направление, пока пин ещё у SIO, и только потом сам пин.
+static inline void dos_drive_program_init(PIO pio, uint sm, uint offset, uint pin_dos_n) {
+    pio_sm_config c = dos_drive_program_get_default_config(offset);
+    sm_config_set_out_pins(&c, pin_dos_n, 1);
+    sm_config_set_set_pins(&c, pin_dos_n, 1);
+    // Флаг следующего блока по кругу: для pio2 это pio0.
+    sm_config_set_mov_status(&c, STATUS_IRQ_SET, PIO_SM0_EXECCTRL_STATUS_N_VALUE_IRQ_NEXTPIO | IRQ_DOS);
+    sm_config_set_clkdiv(&c, 1.0f);
+    pio_sm_init(pio, sm, offset, &c);
+    pio_sm_exec(pio, sm, pio_encode_set(pio_pins, 1));
+    pio_sm_set_consecutive_pindirs(pio, sm, pin_dos_n, 1, true);
+    pio_gpio_init(pio, pin_dos_n);
+}
+%}

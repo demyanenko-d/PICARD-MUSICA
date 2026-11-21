@@ -53,8 +53,10 @@ option(SOUNDSINTH_BUILD_TESTS  "Build unit tests" OFF)
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../../platform    ${CMAKE_BINARY_DIR}/platform)
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../../lib/fatfs   ${CMAKE_BINARY_DIR}/lib_fatfs)
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../../lib/hidparser ${CMAKE_BINARY_DIR}/lib_hidparser)
+add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../../lib/ymfm    ${CMAKE_BINARY_DIR}/lib_ymfm)
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../../core       ${CMAKE_BINARY_DIR}/core)
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../../devices     ${CMAKE_BINARY_DIR}/devices)
+add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../../net         ${CMAKE_BINARY_DIR}/net)
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../../player      ${CMAKE_BINARY_DIR}/player)
 # Счётчики цены для тестов (обходы цепочки страниц); в прошивке их нет.
 target_compile_definitions(soundsinth_core PUBLIC SOUNDSINTH_TEST_COUNTERS=1)
@@ -99,6 +101,7 @@ add_library(platform_pc STATIC
     fatfs_diskio.cpp
     fatfs_byte_source.cpp
     usb_host_stub.cpp
+    bus_worker_stub.cpp
     config_flash_stub.cpp
     boot_mode_stub.cpp
     log_stdout.cpp

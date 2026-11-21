@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: MIT
 #include "devices/hid/joystick.h"
 
-#include "devices/hal/z80_ports.h"
 #include "platform/log.h"
+
+#include "devices/hal/z80_ports.h"
 
 namespace devices::hid {
 namespace {
@@ -33,9 +34,22 @@ void publish() {
     s_bits = bits;
     if (attached()) hal::z80_port_set_read(kJoystickPort, bits);
     // На каждое изменение: строк столько же, сколько нажатий и отпусканий.
-    // Держит ли плата порт - главное, чем отказ "игра не слушается" отличается
-    // от "игра не опрашивает Kempston".
+    // По port held видно, занят ли порт ответом: игра не слушается или не
+    // опрашивает Kempston.
     debug_logf("hid: kempston bits %02X (keys %02X, pad %02X), port held: keys %u pad %u\n", bits, s_keys, s_pad, s_keys_held ? 1u : 0u, s_pad_held ? 1u : 0u);
+}
+
+// Источник занимает порт или отпускает его. Отпущенный источник гасит свои
+// разряды; порт снимается, когда его не держит никто.
+void hold(bool& held, uint8_t& source, bool on) {
+    held = on;
+    if (on) {
+        hal::z80_port_set_read(kJoystickPort, s_bits);
+        return;
+    }
+    source = 0;
+    publish();
+    if (!attached()) hal::z80_port_clear_read(kJoystickPort);
 }
 
 } // namespace
@@ -62,27 +76,19 @@ uint8_t joystick_state() {
 }
 
 void joystick_attach() {
-    s_pad_held = true;
-    hal::z80_port_set_read(kJoystickPort, s_bits);
+    hold(s_pad_held, s_pad, true);
 }
 
 void joystick_detach() {
-    s_pad_held = false;
-    s_pad      = 0;
-    publish();
-    if (!attached()) hal::z80_port_clear_read(kJoystickPort);
+    hold(s_pad_held, s_pad, false);
 }
 
 void joystick_keys_attach() {
-    s_keys_held = true;
-    hal::z80_port_set_read(kJoystickPort, s_bits);
+    hold(s_keys_held, s_keys, true);
 }
 
 void joystick_keys_detach() {
-    s_keys_held = false;
-    s_keys      = 0;
-    publish();
-    if (!attached()) hal::z80_port_clear_read(kJoystickPort);
+    hold(s_keys_held, s_keys, false);
 }
 
 bool joystick_keys_held() {

@@ -12,6 +12,7 @@
         .module kbd
         .globl  _fw_kbd_scan
         .globl  _fw_kbd_get
+        .globl  _fw_kbd_take
         .globl  _fw_kbd_wait
         .globl  _fw_kbd_flush
         .globl  _fw_kbd_matrix
@@ -39,6 +40,9 @@ kbd_rep_row:    .ds     1
 kbd_rep_bit:    .ds     1
 kbd_rep_timer:  .ds     1
 
+kbd_caps:       .ds     1       ; CAPS SHIFT нажат прямо сейчас
+kbd_sym:        .ds     1       ; SYMBOL SHIFT нажат прямо сейчас
+
         .area   _CODE
 
 ;; Опросить клавиатуру и сложить новые нажатия в кольцо.
@@ -63,6 +67,14 @@ kbd_row:
         ld      b, a
         dec     d
         jr      nz, kbd_row
+        ;; Полуряд 0 - ещё раз, последним. CAPS SHIFT с клавишей (стрелка,
+        ;; Esc) клавиатура USB ставит одним изменением; изменение между
+        ;; чтением полуряда 0 и полуряда клавиши давало бы клавишу без CAPS.
+        ld      b, #0xFE
+        in      a, (c)
+        ld      hl, #_fw_kbd_matrix
+        and     (hl)
+        ld      (hl), a
 
         ;; Модификаторы: CAPS SHIFT - полуряд 0 бит 0, SYMBOL SHIFT -
         ;; полуряд 7 бит 1.
@@ -70,6 +82,10 @@ kbd_row:
         cpl
         and     #0x01
         ld      (kbd_caps), a
+        ld      a, (_fw_kbd_matrix+7)
+        cpl
+        and     #0x02
+        ld      (kbd_sym), a
 
         ;; Перебрать все сорок позиций и найти те, которых в прошлый раз
         ;; не было.
@@ -164,12 +180,23 @@ kbd_emit_bit:
         add     a, d
         ld      l, a
         ld      h, #0
+        ;; С SYMBOL SHIFT - знак из своей таблицы, CAPS SHIFT тогда не
+        ;; учитывается.
         ld      de, #kbd_table
+        ld      a, (kbd_sym)
+        or      a
+        jr      z, kbd_emit_plain
+        ld      de, #kbd_sym_table
+kbd_emit_plain:
         add     hl, de
         ld      a, (hl)
         or      a
-        jr      z, kbd_emit_shift       ; сами шифты клавишами не считаем
-        call    kbd_apply_caps
+        jr      z, kbd_emit_shift       ; шифты и клавиши без знака не в счёт
+        ld      b, a
+        ld      a, (kbd_sym)
+        or      a
+        ld      a, b
+        call    z, kbd_apply_caps
         call    kbd_arm_repeat
         call    kbd_push
 kbd_emit_done:
@@ -190,33 +217,28 @@ kbd_emit_shift:
         ld      (kbd_rep_code), a
         jr      kbd_emit_done
 
-;; Взвести автоповтор на клавишу с кодом A; A сохраняется.
+;; Взвести автоповтор на клавишу с кодом A; A сохраняется, C портится.
 ;;
 ;; Повторяются только стрелки: удержанный Enter запускал бы трек снова и
 ;; снова, а пробел - листал треки. Любая другая клавиша повтор снимает.
 kbd_arm_repeat:
-        push    af
-        xor     a
-        ld      (kbd_rep_code), a
-        pop     af
-        cp      #8              ; 8..11 - влево, вправо, вниз, вверх
-        ret     c
-        push    af
-        cp      #12
-        jr      nc, kbd_arm_done
-        pop     af
-        ld      (kbd_rep_code), a
-        push    af
+        ld      c, a
+        sub     #8
+        cp      #4              ; 8..11 - влево, вправо, вниз, вверх
+        ld      a, #0
+        jr      nc, kbd_arm_code
         ld      a, #KBD_REP_DELAY
         ld      (kbd_rep_timer), a
-kbd_arm_done:
-        pop     af
+        ld      a, c
+kbd_arm_code:
+        ld      (kbd_rep_code), a
+        ld      a, c
         ret
 
 ;; Учесть CAPS SHIFT: стрелки, Esc, забой и заглавные буквы.
 ;;
 ;; Стрелок на клавиатуре нет физически: все программы читают их как
-;; CAPS SHIFT с цифрами.
+;; CAPS SHIFT с цифрами. Портит B, C, HL.
 kbd_apply_caps:
         ld      c, a
         ld      a, (kbd_caps)
@@ -224,32 +246,15 @@ kbd_apply_caps:
         ld      a, c
         ret     z
 
-        cp      #0x35           ; "5" -> влево
-        jr      nz, kbd_c6
-        ld      a, #8
-        ret
-kbd_c6: cp      #0x36           ; "6" -> вниз
-        jr      nz, kbd_c7
-        ld      a, #10
-        ret
-kbd_c7: cp      #0x37           ; "7" -> вверх
-        jr      nz, kbd_c8
-        ld      a, #11
-        ret
-kbd_c8: cp      #0x38           ; "8" -> вправо
-        jr      nz, kbd_c0
-        ld      a, #9
-        ret
-kbd_c0: cp      #0x30           ; "0" -> забой
-        jr      nz, kbd_csp
-        ld      a, #12
-        ret
-kbd_csp:
-        cp      #0x20           ; пробел -> Esc
-        jr      nz, kbd_cup
-        ld      a, #27
-        ret
-kbd_cup:
+        ld      hl, #kbd_caps_table
+        ld      b, #6
+kbd_caps_next:
+        cp      (hl)
+        inc     hl
+        jr      z, kbd_caps_hit
+        inc     hl
+        djnz    kbd_caps_next
+
         ;; Буквы с CAPS SHIFT - заглавные.
         cp      #0x61
         ret     c
@@ -257,9 +262,21 @@ kbd_cup:
         ret     nc
         and     #0xDF
         ret
+kbd_caps_hit:
+        ld      a, (hl)
+        ret
 
-;; Положить код A в кольцо. Полное кольцо роняет самое старое нажатие:
-;; если приложение задумалось, свежая клавиша нужнее давней.
+;; Пары "клавиша с CAPS SHIFT - код".
+kbd_caps_table:
+        .db     0x35, 8         ; "5" -> влево
+        .db     0x36, 10        ; "6" -> вниз
+        .db     0x37, 11        ; "7" -> вверх
+        .db     0x38, 9         ; "8" -> вправо
+        .db     0x30, 12        ; "0" -> забой
+        .db     0x20, 27        ; пробел -> Esc
+
+;; Положить код A в кольцо. В полном кольце теряется самое старое
+;; нажатие, а не новое.
 kbd_push:
         ld      c, a
         ld      a, (kbd_head)
@@ -269,14 +286,12 @@ kbd_push:
         ld      hl, #kbd_tail
         cp      (hl)
         jr      nz, kbd_push_ok
-        ;; Догнали хвост - подвинем его.
-        ld      a, (kbd_tail)
+        ;; Догнали хвост - подвинем его на шаг дальше головы.
+        ld      b, a
         inc     a
         and     #KBD_RING-1
-        ld      (kbd_tail), a
-        ld      a, (kbd_head)
-        inc     a
-        and     #KBD_RING-1
+        ld      (hl), a
+        ld      a, b
 kbd_push_ok:
         ld      (kbd_head), a
         ld      d, #0
@@ -291,11 +306,17 @@ kbd_push_ok:
 ;; попасть между чтением хвоста и его записью - значит потерять клавишу.
 _fw_kbd_get::
         di
+        call    _fw_kbd_take
+        ei
+        ret
+
+;; То же без di/ei: для того, кто опрашивает клавиатуру сам при запрещённых
+;; прерываниях.
+_fw_kbd_take::
         ld      a, (kbd_tail)
         ld      hl, #kbd_head
         cp      (hl)
         jr      nz, kbd_get_have
-        ei
         xor     a
         ret
 kbd_get_have:
@@ -308,7 +329,6 @@ kbd_get_have:
         inc     a
         and     #KBD_RING-1
         ld      (kbd_tail), a
-        ei
         ld      a, c
         ret
 
@@ -330,11 +350,6 @@ _fw_kbd_flush::
         ei
         ret
 
-        .area   _DATA
-kbd_caps:       .ds     1       ; CAPS SHIFT нажат прямо сейчас
-
-        .area   _CODE
-
 ;; Сорок клавиш в порядке опроса: полуряд за полурядом, бит за битом.
 ;; Ноль - это сами шифты, они клавишами не считаются.
 kbd_table:
@@ -346,3 +361,16 @@ kbd_table:
         .db     0x70, 0x6F, 0x69, 0x75, 0x79      ; p o i u y
         .db     0x0D, 0x6C, 0x6B, 0x6A, 0x68      ; ENTER l k j h
         .db     0x20, 0,    0x6D, 0x6E, 0x62      ; SPACE SS m n b
+
+;; Знаки с SYMBOL SHIFT, как на клавишах Спектрума. Ноль - у клавиши знака
+;; нет (там слово Бейсика). На месте фунта - обратный апостроф: в шрифте
+;; Спектрума это и есть фунт.
+kbd_sym_table:
+        .db     0,    0x3A, 0x60, 0x3F, 0x2F      ; CS  : фунт ? /
+        .db     0x7E, 0x7C, 0x5C, 0x7B, 0x7D      ; ~ | обратная косая { }
+        .db     0,    0,    0,    0x3C, 0x3E      ; q w e < >
+        .db     0x21, 0x40, 0x23, 0x24, 0x25      ; ! @ # $ %
+        .db     0x5F, 0x29, 0x28, 0x27, 0x26      ; _ ) ( ' &
+        .db     0x22, 0x3B, 0,    0x5D, 0x5B      ; " ; i ] [
+        .db     0x0D, 0x3D, 0x2B, 0x2D, 0x5E      ; ENTER = + - ^
+        .db     0x20, 0,    0x2E, 0x2C, 0x2A      ; SPACE SS . , *

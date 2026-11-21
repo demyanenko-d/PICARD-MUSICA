@@ -7,16 +7,22 @@
 |---|---|
 | `build.bat` | полная сборка: прошивки в `release/picard/`, программы Z80 в `release/` |
 | `build_plugin.bat` | плагин Wild Commander -> `release/UMPLAYER.WMF` и `SD/WC/` |
-| `build_trdos.bat` | приложение TR-DOS -> `release/UNIMOD.$C`, `release/UNIMOD.sna` |
+| `build_trdos.bat` | приложение TR-DOS -> `release/ugly.$c`, `release/ugly.sna` |
 | `build_z80fw.bat` | тесты библиотеки Z80 -> `frontend/z80_fw/obj/*.bin` |
+| `build_config_rom.bat` | ПЗУ конфигуратора -> заголовок образа в прошивке |
+| `build_nav_rom.bat` | ПЗУ меню образов дисков -> заголовок образа в прошивке |
 | `build_sd.bat` | образ SD-карты из `SD/` -> `build/sd.img` |
-| `flash_zc.cmd` | собрать и записать на плату прошивку с эмуляцией Z-Controller |
-| `flash_plain.cmd` | то же без неё |
+| `flash_zc.cmd` | собрать и записать прошивку на плату |
+| `flash_plain.cmd` | то же; прошивка одна, скрипт оставлен для старых привычек |
 | `flash_bank.cmd` | записать банк инструментов отдельной областью флеш-памяти |
 
 Прошивка пишется по SWD через отладочный щуп. Аргумент `bootsel` у
 `flash_zc.cmd` и `flash_plain.cmd` переключает на запись через кнопку
 BOOTSEL, когда щупа нет под рукой.
+
+Образы ПЗУ конфигуратора и меню образов дисков лежат в прошивке
+заголовками. После правки `frontend/config_rom` или `frontend/nav_rom`
+запустите их скрипт до сборки прошивки, иначе в плату уйдёт прежний образ.
 
 Подкаталог `tools/` - то, что эти скрипты зовут: упаковщики образов
 (`ihx2wmf.js`, `mkhobeta.js`, `mksna.js`, `cutbin.js`,

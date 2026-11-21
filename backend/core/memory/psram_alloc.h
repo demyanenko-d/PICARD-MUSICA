@@ -45,8 +45,9 @@ struct PsramBlock {
 inline constexpr uint32_t kPsramAllocWords = (kMaxSamplePageCount + 31u) / 32u;
 
 // Блоков, переживающих смену трека. Их немного и они наперечёт: кэш
-// носителей, таблицы банка с карты, приёмник модуля GS.
-inline constexpr uint32_t kPsramKeepBlocks = 8;
+// носителей, таблицы банка с карты, приёмник модуля GS, образы Beta Disk
+// (по блоку на дисковод), кольца журнала, карты USB.
+inline constexpr uint32_t kPsramKeepBlocks = 16;
 
 struct PsramAlloc {
     // Сколько страниц под распределением. Меньше kMaxSamplePageCount

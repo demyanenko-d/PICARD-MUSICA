@@ -35,6 +35,7 @@ __force_inline void direct_cmd(uint32_t tx) {
     qmi_hw->direct_csr |= QMI_DIRECT_CSR_ASSERT_CS1N_BITS;
     qmi_hw->direct_tx   = tx;
     while (qmi_hw->direct_csr & QMI_DIRECT_CSR_BUSY_BITS) {
+        tight_loop_contents();
     }
     qmi_hw->direct_csr &= ~QMI_DIRECT_CSR_ASSERT_CS1N_BITS;
     for (int i = 0; i < kCsHighNops; ++i) {
@@ -84,6 +85,7 @@ void __not_in_flash_func(psram_init)() {
 
     qmi_hw->direct_csr = (kDirectClkdiv << QMI_DIRECT_CSR_CLKDIV_LSB) | QMI_DIRECT_CSR_EN_BITS;
     while (qmi_hw->direct_csr & QMI_DIRECT_CSR_BUSY_BITS) {
+        tight_loop_contents();
     }
 
     // Шаг 0: QUAD_END в quad-ширине - выйти из QPI, если чип уже в нём после
@@ -142,7 +144,7 @@ uint16_t hash16(uint16_t x) {
 constexpr uint32_t kWordCount = kSelftestWords;
 static_assert(kWordCount * sizeof(uint16_t) == 256u, "the selftest is 256 bytes");
 
-// Во флеше, как и psram_selftest: прямого режима QMI самотест не включает,
+// Во флеше: прямого режима QMI самотест не включает,
 // ходит через XIP-алиас. Запись в M1 разрешила psram_init.
 void selftest_write(uint16_t start) {
     volatile uint16_t* base = reinterpret_cast<volatile uint16_t*>(kXipBase);

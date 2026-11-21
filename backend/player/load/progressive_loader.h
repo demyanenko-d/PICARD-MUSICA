@@ -28,14 +28,6 @@ inline constexpr uint16_t kProgressiveMaxSamples = 810;
 // Память трёх массивов плана.
 inline constexpr uint32_t kProgressivePlanBytes = 3u * kProgressiveMaxSamples * sizeof(uint16_t);
 
-// Кольцо заказов живого потока (ProgressiveSource::Demand) - степень
-// двойки: голова и хвост свободно бегущие, заворачиваются маской, и
-// переполнение счётчика обязано попадать на границу кольца. Потолок плана
-// степенью двойки быть не обязан: там очередь линейная.
-inline constexpr uint16_t kDemandRingCapacity = 512;
-static_assert((kDemandRingCapacity & (kDemandRingCapacity - 1u)) == 0, "the request ring is a power of two");
-static_assert(kDemandRingCapacity <= kProgressiveMaxSamples, "the ring lives in the same plan arrays");
-
 // Памяти вдоволь, пока свободно больше 1/kAmpleFreeDivisor зоны сэмплов:
 // тогда упреждения нет.
 inline constexpr uint32_t kAmpleFreeDivisor = 4;
@@ -45,18 +37,6 @@ inline constexpr uint16_t kMaxEvictRetries = 32;
 
 // Записей плана за шаг повторного прохода.
 inline constexpr uint16_t kRescanPerStep = 4;
-
-// Откуда запросы и кого вытеснять.
-//   Plan   - файл: что и когда прозвучит, известно заранее (план по
-//            позициям order); жертва - сэмпл, нужный позже всех (по карте
-//            позиций), без карты - отыгравший.
-//   Demand - живой поток: будущего нет; запросы по событиям
-//            (progressive_request), жертва - дольше всех не звучавший.
-// Каталог, загрузка, повтор после вытеснения и карта занятых - общие.
-//
-// Demand - задел под живой MIDI: на плате его пока не зовёт никто, живой
-// сеанс ходит своим кольцом заказов и без вытеснения.
-enum class ProgressiveSource : uint8_t { Plan, Demand };
 
 // Три массива плана по capacity элементов: очередь, последние и первые
 // позиции order по номеру сэмпла. indices nullptr - массивов нет.
@@ -76,11 +56,6 @@ struct ProgressiveLoader {
     // plan_next, конец plan_count. last_use и first_use - по номеру сэмпла:
     // последняя позиция order, где он звучит (жертва вытеснения без карты
     // позиций), и первая ("когда понадобится?", граница упреждения).
-    //
-    // Demand: plan_indices - кольцо запросов (голова plan_next, хвост
-    // plan_count, по модулю kDemandRingCapacity). last_use - когда сэмпл
-    // звучал или загружен в последний раз (часы progressive_note_in_use),
-    // first_use - kSampleNeverUsed, если сэмпла нет в кольце.
     uint16_t* plan_indices   = nullptr;
     uint16_t* plan_last_use  = nullptr;
     uint16_t* plan_first_use = nullptr;
@@ -99,9 +74,6 @@ struct ProgressiveLoader {
     // по самому дальнему следующему использованию, повторный проход
     // возвращает только нужное в пределах упреждения. Нет - по last_use.
     UseMap use_map;
-    ProgressiveSource source = ProgressiveSource::Plan;
-    // Demand: часы последнего progressive_note_in_use.
-    uint16_t clock = 0;
     // Упреждение фоновой догрузки в позициях order: 0 - без упреждения
     // (весь план подряд). У платы - только у .mid.
     uint16_t lead_positions = 0;
@@ -178,23 +150,10 @@ inline bool progressive_eviction_blocked(bool position_goes_back, uint32_t total
 // Загрузить сэмпл index в память трека. reason_out - причина отказа.
 using ProgressiveLoadFn = bool (*)(void* user, uint16_t sample_index, const char** reason_out);
 
-// Перевести в Demand: кольцо пусто, ни один сэмпл не звучал. Массивы уже
-// привязаны (progressive_attach_plan).
-void progressive_start_demand(ProgressiveLoader& pl);
-
-// Demand: поставить сэмпл в очередь загрузки. Уже в очереди - true без
-// второй записи. false - индекс за планом или кольцо полно.
-bool progressive_request(ProgressiveLoader& pl, uint16_t sample_index);
-
-// Demand: отметить звучащие сэмплы временем now (единицы выбирает
-// вызывающий, сравнение по модулю 2^16: старше 65535 единиц считается
-// свежим - жертва неоптимальна, не опасна). Звать перед шагом загрузки.
-void progressive_note_in_use(ProgressiveLoader& pl, const soundsinth::memory::TrackMemory& mem, const SamplesInUse& in_use, uint16_t now);
-
 // Вытеснить один сэмпл, которого не держат голоса. Plan с картой позиций:
 // самый дальний по следующему использованию; без карты - отыгравший,
-// последняя позиция, где он звучит, меньше order_pos. Demand: дольше всех
-// не звучавший, order_pos не нужен. false - вытеснять нечего.
+// последняя позиция, где он звучит, меньше order_pos. false - вытеснять
+// нечего.
 // incoming - сэмпл, ради которого место: с картой позиций жертва нужна
 // позже него, иначе вытеснение лишь меняет одну молчащую ноту на другую.
 bool progressive_evict_one(ProgressiveLoader& pl, soundsinth::memory::TrackMemory& mem, uint16_t order_pos, const SamplesInUse& in_use,
@@ -203,8 +162,8 @@ bool progressive_evict_one(ProgressiveLoader& pl, soundsinth::memory::TrackMemor
 enum class ProgressiveStep : uint8_t {
     Loaded,  // очередной сэмпл загружен (или уже был в памяти)
     Failed,  // не влез и после вытеснения - будет молчать
-    Waiting, // своевременных нет - ждать позицию; Demand - очередь пуста
-    Done,    // план кончился (у Demand не бывает)
+    Waiting, // своевременных нет - ждать позицию
+    Done,    // план кончился
 };
 
 // Один шаг догрузки. loaded_index - какой сэмпл обработан (Loaded/Failed).

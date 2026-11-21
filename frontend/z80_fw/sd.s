@@ -1,106 +1,178 @@
-;; sd.s - карта SD через Z-Controller, только чтение.
+;; sd.s - карта SD через Z-Controller или DivMMC, только чтение.
 ;;
-;; Порты (сверено с драйвером SD из TS-BIOS, pff/diskio.c):
+;; Устройства (_sd_use):
 ;;
-;;   0x57  запись = отдать байт MOSI, чтение = такт вхолостую и вернуть MISO
-;;   0x77  запись: бит 1 = SSEL, 0 выбирает карту; чтение: бит 1 = карта на месте
+;;   0  Z-Controller  0x57 данные, 0x77 выбор: бит 1 = 0 выбирает карту
+;;   1  DivMMC, карта 1  0xEB данные, 0xE7 выбор: бит 0 = 0
+;;   2  DivMMC, карта 2  0xEB данные, 0xE7 выбор: бит 1 = 0
+;;
+;; Порт данных у обоих конвейерный: запись отдаёт байт MOSI, чтение
+;; возвращает MISO прошлого обмена и запускает такт вхолостую.
 ;;
 ;; Соглашение: всё через регистры, стек не трогаем без нужды. Возврат
 ;; ошибки - флаг переноса (CY=1 плохо, CY=0 хорошо), так дешевле всего
-;; проверять у вызывающего.
+;; проверять у вызывающего. Порт данных - в C: у каждой точки входа своя
+;; загрузка (sd_port).
 
         .module sd
         .globl  _sd_init
+        .globl  _sd_use
+        .globl  _sd_dev
         .globl  _sd_read_sector
         .globl  _sd_read_sector_to_port
         .globl  _sd_type
         .globl  _sd_read_multi_to_port
         .globl  _sd_multi_count
 
-SD_DAT  .equ    0x57
-SD_CTL  .equ    0x77
+SD_DEVS .equ    3
 
-;; Порт данных платы. Единственное место, где номер порта повторён:
-;; вообще его знает только BUS_PORT_DAT в common/bus_client.h, но чтение
-;; сектора идёт прямо в порт мимо клиента, а ассемблер заголовок не
-;; подключает. Меняешь там - меняй и тут.
+;; Порт данных платы, то же число, что BUS_PORT_DAT клиента шины: чтение
+;; сектора идёт в порт мимо клиента, а заголовок Си ассемблер не берёт.
 BUS_DAT .equ    0x67
 
-;; Биты типа карты. Важен только CT_BLOCK: у карт с блочной адресацией
-;; аргумент чтения - номер сектора, у старых - байтовое смещение.
+;; _sd_type после _sd_init: 0 - карта не поднята; CT_BLOCK - аргумент чтения
+;; номер сектора; SDSC (байтовая адресация) - поднята, но читать её
+;; sd_cmd_lba не умеет.
 CT_BLOCK .equ   0x08
+CT_BYTE  .equ   0x04
 
         .area   _DATA
+;; Устройство, с которым работают все вызовы. Ноль после запуска -
+;; Z-Controller.
+_sd_dev::
+        .ds     1
 _sd_type::
         .ds     1
+;; Порты и выбор устройства _sd_dev - копия строки sd_devs.
+sd_dat:
+        .ds     1
+sd_ctl:
+        .ds     1
+sd_sel:
+        .ds     1
+sd_desel:
+        .ds     1
+;; _sd_type каждого устройства, пока работают с другим.
+sd_types:
+        .ds     SD_DEVS
 sd_arg:                         ; аргумент команды, старший байт первым
         .ds     4
 
 ;; Сколько секторов забрать одной командой CMD18.
 _sd_multi_count::
         .ds     1
+sd_left:                        ; сколько осталось в пачке CMD18
+        .ds     1
 
         .area   _CODE
 
+;; Порт данных, порт выбора, выбрать, снять выбор.
+sd_devs:
+        .db     0x57, 0x77, 0x01, 0x03
+        .db     0xEB, 0xE7, 0xFE, 0xFF
+        .db     0xEB, 0xE7, 0xFD, 0xFF
+
+;; -- Устройство --
+;;
+;; Вход: A = устройство (0..2), чужой номер - Z-Controller. Карта
+;; устройства, поднятая раньше, остаётся поднятой: _sd_type у каждого свой.
+;; Портит HL, DE, BC.
+_sd_use::
+        cp      #SD_DEVS
+        jr      c, sd_use_dev
+        xor     a
+sd_use_dev:
+        ld      c, a
+        ld      b, #0
+        ld      a, (_sd_dev)
+        cp      #SD_DEVS        ; память не обнулена - прежнего нет
+        jr      nc, sd_use_load
+        ld      hl, #sd_types
+        ld      e, a
+        ld      d, b
+        add     hl, de
+        ld      a, (_sd_type)
+        ld      (hl), a         ; запомнить тип прежнего
+sd_use_load:
+        ld      a, c
+        ld      (_sd_dev), a
+        ld      hl, #sd_types
+        add     hl, bc
+        ld      a, (hl)
+        ld      (_sd_type), a
+        ld      hl, #sd_devs
+        add     hl, bc
+        add     hl, bc
+        add     hl, bc
+        add     hl, bc
+        ld      de, #sd_dat
+        ld      bc, #4
+        ldir
+        ret
+
+;; C = порт данных.
+sd_port:
+        ld      a, (sd_dat)
+        ld      c, a
+        ret
+
 ;; -- Примитивы --
 
-sd_cs_on:                       ; выбрать карту (бит 1 = 0)
-        ld      a, #0x01
-        out     (SD_CTL), a
+;; Байт A в порт выбора. C (порт данных) сохраняется.
+sd_ctl_out:
+        push    bc
+        ld      b, a
+        ld      a, (sd_ctl)
+        ld      c, a
+        out     (c), b
+        pop     bc
         ret
 
-sd_cs_off:                      ; снять выбор (бит 1 = 1)
-        ld      a, #0x03
-        out     (SD_CTL), a
-        ret
-
-;; Отпустить шину: снять выбор и дать карте такт, иначе она остаётся с
-;; недоговорённым байтом на линии.
+;; Отпустить шину: снять выбор и выдать байт 0xFF - карта освобождает MISO
+;; только по тактам после снятия выбора. Вход: C = порт данных.
 sd_release:
-        call    sd_cs_off
+        ld      a, (sd_desel)
+        call    sd_ctl_out
         ld      a, #0xFF
-        out     (SD_DAT), a
+        out     (c), a
         ret
 
-;; Холостые такты: B штук.
+;; Холостые такты: B штук. Вход: C = порт данных.
 sd_skip:
         ld      a, #0xFF
 sd_skip_loop:
-        out     (SD_DAT), a
+        out     (c), a
         djnz    sd_skip_loop
         ret
 
 ;; -- Команда --
 ;;
-;; Вход:  C  = код команды (уже с битом 0x40)
+;; Вход:  E  = код команды (уже с битом 0x40), C = порт данных
 ;;        sd_arg = аргумент, старший байт первым
 ;; Выход: A  = ответ R1, CY=1 если карта не ответила вовсе
 ;;
-;; Последовательность в точности как у драйвера tsbios: снять выбор,
-;; такт, выбрать, такт, шесть байт, потом до десяти попыток дождаться
-;; байта с погашенным старшим битом.
+;; Последовательность: снять выбор, такт, выбрать, такт, шесть байт,
+;; потом до десяти попыток дождаться байта с погашенным старшим битом.
 sd_cmd:
-        call    sd_cs_off
+        call    sd_release
+        ld      a, (sd_sel)
+        call    sd_ctl_out
         ld      a, #0xFF
-        out     (SD_DAT), a
-        call    sd_cs_on
-        ld      a, #0xFF
-        out     (SD_DAT), a
+        out     (c), a
 
-        ld      a, c
-        out     (SD_DAT), a
+        out     (c), e
 
         ld      hl, #sd_arg
         ld      b, #4
 sd_cmd_arg:
         ld      a, (hl)
-        out     (SD_DAT), a
+        out     (c), a
         inc     hl
         djnz    sd_cmd_arg
 
         ;; CRC настоящий нужен только двум командам - до инициализации
         ;; карта его проверяет. Дальше ей всё равно, шлём заглушку.
-        ld      a, c
+        ld      a, e
         cp      #0x40           ; CMD0
         jr      z, sd_crc_cmd0
         cp      #0x48           ; CMD8
@@ -113,11 +185,11 @@ sd_crc_cmd0:
 sd_crc_cmd8:
         ld      a, #0x87
 sd_crc_out:
-        out     (SD_DAT), a
+        out     (c), a
 
         ld      b, #10
 sd_cmd_wait:
-        in      a, (SD_DAT)
+        in      a, (c)
         bit     7, a
         jr      z, sd_cmd_ok    ; старший бит погас - это ответ
         djnz    sd_cmd_wait
@@ -142,12 +214,17 @@ sd_arg_zero:
 
 ;; -- Инициализация --
 ;;
-;; Выход: CY=0 успех, _sd_type заполнен; CY=1 карта не поднялась.
+;; Карта устройства _sd_dev. Выход: CY=0 успех, _sd_type заполнен; CY=1
+;; карта не поднялась.
 _sd_init::
+        ld      a, (_sd_dev)
+        call    _sd_use         ; порты устройства: после запуска их ещё нет
+        call    sd_port
         xor     a
         ld      (_sd_type), a
 
-        call    sd_cs_off
+        ld      a, (sd_desel)   ; снять выбор
+        call    sd_ctl_out
         ld      b, #250         ; 0xFF пачкой, чтобы карта проснулась
         call    sd_skip
         ld      b, #250
@@ -155,7 +232,7 @@ _sd_init::
 
         ;; CMD0 - уйти в простой. Ответ обязан быть ровно 0x01.
         call    sd_arg_zero
-        ld      c, #0x40
+        ld      e, #0x40
         call    sd_cmd
         jr      c, sd_init_fail
         cp      #0x01
@@ -167,71 +244,73 @@ _sd_init::
         ld      (hl), #0x01
         inc     hl
         ld      (hl), #0xAA
-        ld      c, #0x48
+        ld      e, #0x48
         call    sd_cmd
         jr      c, sd_init_fail
         cp      #0x01
         jr      nz, sd_init_fail
 
         ;; Хвост R7: четыре байта, значимы последние два.
-        in      a, (SD_DAT)
-        in      a, (SD_DAT)
-        in      a, (SD_DAT)
+        in      a, (c)
+        in      a, (c)
+        in      a, (c)
         cp      #0x01
         jr      nz, sd_init_fail
-        in      a, (SD_DAT)
+        in      a, (c)
         cp      #0xAA
         jr      nz, sd_init_fail
 
-        ;; ACMD41 с битом HCS, пока карта не выйдет из простоя.
-        ld      de, #0x8000     ; счётчик попыток: с запасом, но не вечно
+        ;; ACMD41 с битом HCS, пока карта не выйдет из простоя. Счётчик
+        ;; попыток - на стеке: E занят командой, HL - аргументом.
+        ld      hl, #0x8000     ; с запасом, но не вечно
 sd_init_acmd:
+        push    hl
         call    sd_arg_zero
-        ld      c, #0x77        ; CMD55
+        ld      e, #0x77        ; CMD55
         call    sd_cmd
-        jr      c, sd_init_fail
+        jr      c, sd_init_fail_pop
 
         call    sd_arg_zero
         ld      hl, #sd_arg
         ld      (hl), #0x40     ; бит 30 = HCS: "умею блочную адресацию"
-        ld      c, #0x69        ; CMD41
+        ld      e, #0x69        ; CMD41
         call    sd_cmd
+        pop     hl
         jr      c, sd_init_fail
         or      a
         jr      z, sd_init_ready
-        dec     de
-        ld      a, d
-        or      e
+        dec     hl
+        ld      a, h
+        or      l
         jr      nz, sd_init_acmd
         jr      sd_init_fail
 
 sd_init_ready:
         ;; CMD58 - прочитать OCR и узнать, блочная адресация или байтовая.
         call    sd_arg_zero
-        ld      c, #0x7A
+        ld      e, #0x7A
         call    sd_cmd
         jr      c, sd_init_fail
         or      a
         jr      nz, sd_init_fail
 
-        in      a, (SD_DAT)     ; старший байт OCR, бит 6 = CCS
+        in      a, (c)          ; старший байт OCR, бит 6 = CCS
         and     #0x40
-        jr      z, sd_init_byte_addr
         ld      a, #CT_BLOCK
+        jr      nz, sd_init_type
+        ld      a, #CT_BYTE
+sd_init_type:
         ld      (_sd_type), a
-        jr      sd_init_tail
-sd_init_byte_addr:
-        ld      a, #0x04        ; SDv2, но адресация байтовая
-        ld      (_sd_type), a
-sd_init_tail:
-        in      a, (SD_DAT)     ; дочитать OCR
-        in      a, (SD_DAT)
-        in      a, (SD_DAT)
+        in      a, (c)          ; дочитать OCR
+        in      a, (c)
+        in      a, (c)
 
         call    sd_release
         or      a               ; CY=0
         ret
 
+sd_init_fail_pop:
+        pop     hl
 sd_init_fail:
         call    sd_release
         xor     a
@@ -244,19 +323,13 @@ sd_init_fail:
 ;; Вход:  DEHL = номер сектора (DE старшее слово), IX = куда положить 512 байт
 ;; Выход: CY=0 успех
 ;;
-;; Портит B: у INIR он счётчик, в sd_pump512 - счётчик витков. Держать в B
-;; что-то своё через вызов нельзя.
-;; Общее начало: выдать CMD17 и дождаться токена данных. После возврата с
-;; CY=0 карта готова отдать ровно 512 байт. Оно одно у чтения в память и у
-;; чтения прямо в порт.
-sd_read_start:
-        ;; Аргумент: у блочной адресации это номер сектора как есть, у
-        ;; байтовой пришлось бы умножать на 512 - пока поддерживаем только
-        ;; блочную, остальное отсекаем.
-        ld      a, (_sd_type)
-        and     #CT_BLOCK
-        jr      z, sd_read_fail
+;; Портит B и C: у INIR они счётчик и порт, в sd_pump512 - счётчик витков и
+;; порт. Держать в них что-то своё через вызов нельзя.
 
+;; Команда чтения E (CMD17, CMD18) с номером сектора DEHL. CY=0 - карта
+;; команду приняла (R1 = 0). Без блочной адресации команда не идёт. На
+;; выходе C = порт данных.
+sd_cmd_lba:
         ld      a, d
         ld      (sd_arg+0), a
         ld      a, e
@@ -265,34 +338,53 @@ sd_read_start:
         ld      (sd_arg+2), a
         ld      a, l
         ld      (sd_arg+3), a
-
-        ld      c, #0x51        ; CMD17
+        ld      e, c
+        call    sd_port
+        ld      a, (_sd_type)
+        and     #CT_BLOCK
+        scf
+        ret     z
         call    sd_cmd
-        jr      c, sd_read_fail
+        ret     c
         or      a
-        jr      nz, sd_read_fail
+        ret     z
+        scf
+        ret
 
-        ;; Ждём токен данных. Пока карта думает, она шлёт 0xFF.
+;; Дождаться токена данных: пока карта думает, она шлёт 0xFF. CY=0 -
+;; пришёл 0xFE, за ним 512 байт; иной байт или тишина - CY=1.
+sd_wait_token:
         ld      de, #0x4000
-sd_read_token:
-        in      a, (SD_DAT)
-        cp      #0xFF
-        jr      nz, sd_read_got_token
+sd_token_loop:
+        in      a, (c)
+        cp      #0xFE
+        ret     z
+        inc     a
+        scf
+        ret     nz
         dec     de
         ld      a, d
         or      e
-        jr      nz, sd_read_token
-        jr      sd_read_fail
-sd_read_got_token:
-        cp      #0xFE
-        jr      nz, sd_read_fail
-        or      a               ; CY=0
+        jr      nz, sd_token_loop
+        scf
+        ret
+
+;; CMD17 и токен. После CY=0 карта отдаёт ровно 512 байт; при отказе шина
+;; уже отпущена.
+sd_read_start:
+        ld      c, #0x51        ; CMD17
+        call    sd_cmd_lba
+        call    nc, sd_wait_token
+        ret     nc
+sd_read_fail:
+        call    sd_release
+        scf
         ret
 
 ;; Общий хвост: дочитать CRC и отпустить шину.
 sd_read_finish:
-        in      a, (SD_DAT)     ; CRC - не считаем, карта уже проверила
-        in      a, (SD_DAT)
+        in      a, (c)          ; CRC - не считаем, карта уже проверила
+        in      a, (c)
         call    sd_release
         or      a
         ret
@@ -303,11 +395,10 @@ _sd_read_sector::
 
         ;; 512 байт двумя INIR по 256. INIR - 21 такт на байт, кладёт по (HL)
         ;; и адресует порт через C: приёмник переезжает из IX в HL, наружу
-        ;; интерфейс тот же. B попадает на A8-A15, Z-Controller смотрит
+        ;; интерфейс тот же. B попадает на A8-A15, оба интерфейса смотрят
         ;; только младший байт адреса.
         push    ix
         pop     hl
-        ld      c, #SD_DAT
         ld      b, #0           ; 0 = 256 итераций
         inir
         ld      b, #0
@@ -315,11 +406,6 @@ _sd_read_sector::
         push    hl              ; вернуть IX туда, куда доехал приёмник
         pop     ix
         jp      sd_read_finish
-
-sd_read_fail:
-        call    sd_release
-        scf
-        ret
 
 ;; -- Чтение сектора прямо в порт платы, мимо памяти -------------------
 ;;
@@ -334,13 +420,13 @@ _sd_read_sector_to_port::
 ;; 512 байт с карты прямо в порт платы. Вызывается и одиночным чтением, и
 ;; многосекторным - один цикл на оба, чтобы они не разъехались.
 ;;
-;; Пара стоит 22 такта: IN A,(n) 11 плюс OUT (n),A 11.
+;; Пара стоит 23 такта: IN A,(C) 12 плюс OUT (n),A 11.
 
 sd_pump512:
         ld      b, #8           ; 8 витков по 64 байта = 512
 sd_rsp_loop:
         .rept   64
-        in      a, (SD_DAT)
+        in      a, (c)
         out     (BUS_DAT), a
         .endm
         ;; Не djnz: его дальность 128 байт, а тело витка - 256. Пара
@@ -359,49 +445,24 @@ sd_rsp_loop:
 ;; CMD12. Чтение по одному сектору стоит команды и ожидания токена на
 ;; каждый, это 2.1 такта на байт.
 ;;
-;; Счётчик секторов - в памяти: B занят счётчиком витков sd_pump512.
+;; Счётчик секторов - в sd_left: B занят счётчиком витков sd_pump512, C -
+;; портом, DE - ожиданием токена.
 _sd_read_multi_to_port::
-        ld      a, (_sd_type)
-        and     #CT_BLOCK
-        jr      z, sd_multi_fail
-
-        ld      a, d
-        ld      (sd_arg+0), a
-        ld      a, e
-        ld      (sd_arg+1), a
-        ld      a, h
-        ld      (sd_arg+2), a
-        ld      a, l
-        ld      (sd_arg+3), a
-
         ld      c, #0x52        ; CMD18
-        call    sd_cmd
-        jr      c, sd_multi_fail
-        or      a
-        jr      nz, sd_multi_fail
+        call    sd_cmd_lba
+        jp      c, sd_read_fail
+        ld      a, (_sd_multi_count)
+        ld      (sd_left), a
 
 sd_multi_block:
         ;; Токен ждём перед каждым блоком: карта вправе задуматься между
         ;; ними, и молча считать, что данные уже пошли, нельзя.
-        ld      de, #0x4000
-sd_multi_token:
-        in      a, (SD_DAT)
-        cp      #0xFF
-        jr      nz, sd_multi_got
-        dec     de
-        ld      a, d
-        or      e
-        jr      nz, sd_multi_token
-        jr      sd_multi_stop_fail
-sd_multi_got:
-        cp      #0xFE
-        jr      nz, sd_multi_stop_fail
-
+        call    sd_wait_token
+        jr      c, sd_multi_stop_fail
         call    sd_pump512
-        in      a, (SD_DAT)     ; CRC
-        in      a, (SD_DAT)
-
-        ld      hl, #_sd_multi_count
+        in      a, (c)          ; CRC
+        in      a, (c)
+        ld      hl, #sd_left
         dec     (hl)
         jr      nz, sd_multi_block
 
@@ -413,19 +474,15 @@ sd_multi_stop_fail:
         call    sd_multi_stop
         scf
         ret
-sd_multi_fail:
-        call    sd_release
-        scf
-        ret
 
 ;; Остановить поток и дождаться, пока карта отпустит линию.
 sd_multi_stop:
         call    sd_arg_zero
-        ld      c, #0x4C        ; CMD12
+        ld      e, #0x4C        ; CMD12
         call    sd_cmd
         ld      de, #0x4000
 sd_multi_busy:
-        in      a, (SD_DAT)
+        in      a, (c)
         cp      #0xFF
         jr      z, sd_multi_idle
         dec     de

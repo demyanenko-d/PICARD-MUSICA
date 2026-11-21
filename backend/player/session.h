@@ -28,12 +28,12 @@
 
 #include <cstdint>
 
+#include "player/config.h"
 #include "player/load/bus_byte_source.h"
-#include "player/protocol/host_protocol.h"
 #include "player/load/progressive_loader.h"
 #include "player/load/sample_prefetch.h"
 #include "player/load/session_loader.h"
-#include "player/config.h"
+#include "player/protocol/host_protocol.h"
 
 namespace player {
 
@@ -41,8 +41,16 @@ struct SessionOrchestrator {
     explicit SessionOrchestrator(player::protocol::HostProtocol& p) : protocol(p) {}
 
     player::protocol::HostProtocol& protocol;
-    bool session_pending         = false;
-    bool aborted                 = false;
+
+    // Пишут колбэки протокола (on_session_start, on_reset) изнутри
+    // HostProtocol::poll(), а его крутит каждое ожидание загрузки: поля
+    // меняются посреди run_session_load и шага догрузки. Читать заново при
+    // каждой проверке, в локальные не копировать.
+    bool session_pending = false;
+    bool reset_by_host   = false; // RESET хоста после начала сессии
+    bool playing         = false; // трек загружен и мог начать играть (звать ли set_position)
+    bool background_load = false; // идёт шаг догрузки плана: позицию хосту шлёт и ожидание данных
+
     uint32_t pending_file_length = 0;
     // Стратегию обхода файла выбирает хост (параметр команды начала
     // сессии): Wild Commander платит за прыжок назад перечитыванием файла с
@@ -52,30 +60,43 @@ struct SessionOrchestrator {
     // фоновая догрузка тянет данные уже после старта звука тем же
     // источником. on_reset передаётся сюда.
     player::load::BusByteSource* current_bus_source = nullptr;
-    alignas(player::load::BusByteSource) unsigned char bus_source_storage[sizeof(player::load::BusByteSource)];
+    alignas(player::load::BusByteSource) uint8_t bus_source_storage[sizeof(player::load::BusByteSource)];
 
-    bool playing   = false; // трек загружен и мог начать играть (звать ли set_position)
-    bool host_here = true;  // клиент хоста опрашивает порт состояния (для строки лога)
+    bool host_here = true; // клиент хоста опрашивает порт состояния (для строки лога)
+    // Виды телеметрии, заказанные хостом в начале сеанса (kTelemetry*).
+    uint8_t telemetry = 0;
+    // Кадров затухания перед концом трека.
+    uint32_t end_fade = 0;
     // Итог связи этой сессии уже в журнале (конец плана или отказ); нет -
     // его печатает старт следующей сессии. До первой сессии печатать нечего.
     bool link_reported = true;
-    // Самый долгий шаг фоновой догрузки сессии и его сэмпл - в строку конца
-    // плана.
-    uint32_t longest_step_us     = 0;
-    uint16_t longest_step_sample = 0;
-    // Последний шаг повторного прохода по плану (мкс): проход идёт не чаще
-    // kRescanIntervalUs.
-    uint32_t last_rescan_us = 0;
+    // Когда хосту ушла позиция (мкс) и номер метров Core0, отданных
+    // последними (shared::g_meter_seq).
+    uint32_t last_position_us = 0;
+    uint32_t meter_seq        = 0;
 
-    // Итог фазы A сессии: формат, длительность прохода (по ней виден конец
-    // трека), причины отказа каждого загрузчика - для отчёта о провале. В
-    // объекте, а не на стеке Core1.
-    player::load::SessionLoadResult load_result;
-    // План и состояние фоновой догрузки: очередь сэмплов, их первые и
-    // последние позиции, упреждение (lead_positions - из
-    // SOUNDSINTH_MIDI_PREFETCH_SECONDS, только у .mid), счётчики отказов и
-    // вытеснений.
-    player::load::ProgressiveLoader plan;
+    // Состояние трека: close_session_source снимает его целиком.
+    struct Track {
+        // Самый долгий шаг фоновой догрузки и его сэмпл - в строку конца
+        // плана.
+        uint32_t longest_step_us     = 0;
+        uint16_t longest_step_sample = 0;
+        // Ended хосту уже выставлен; кадр позиции уходит хосту по
+        // изменению, повторять set_position() не нужно.
+        bool ended_notified = false;
+        // Последний шаг повторного прохода по плану (мкс): проход идёт не
+        // чаще kRescanIntervalUs.
+        uint32_t last_rescan_us = 0;
+        // Итог фазы A: формат, длительность прохода (по ней виден конец
+        // трека), причины отказа каждого загрузчика - для отчёта о провале.
+        // В объекте, а не на стеке Core1.
+        player::load::SessionLoadResult load_result;
+        // План и состояние фоновой догрузки: очередь сэмплов, их первые и
+        // последние позиции, упреждение (lead_positions - из
+        // SOUNDSINTH_MIDI_PREFETCH_SECONDS, только у .mid), счётчики отказов
+        // и вытеснений.
+        player::load::ProgressiveLoader plan;
+    } track;
 };
 
 // Колбэки протокола: их ставит порт, когда поднимает связь.

@@ -27,14 +27,23 @@ uint8_t s_drives   = 0;
 // потока, поэтому ни атомиков, ни барьеров тут не нужно.
 bool s_busy = false;
 bool s_ok   = false;
+// Обмен брошен по сроку, а колбэка не было: стек ещё может дописать в
+// буфер, отданный ему. Новых обменов нет, пока колбэк не придёт или
+// устройство не отключат.
+bool s_abandoned = false;
 
 // Дольше этого устройство не отвечает, только если его выдернули: у
-// флешки сектор идёт единицы миллисекунд.
+// флешки сектор идёт около миллисекунды.
 constexpr uint32_t kTimeoutUs = 2u * 1000u * 1000u;
 
 MscStats s_stats{};
 
 bool on_complete(uint8_t, const tuh_msc_complete_data_t* cb_data) {
+    if (s_abandoned) { // опоздавший колбэк брошенного обмена: буфер свободен
+        s_abandoned = false;
+        ++s_stats.late;
+        return true;
+    }
     s_ok   = cb_data != nullptr && cb_data->csw != nullptr && cb_data->csw->status == 0u;
     s_busy = false;
     return true;
@@ -48,7 +57,8 @@ bool wait_done() {
         tuh_task();
         yield_to_bus();
         if (platform::mono_us() - start > kTimeoutUs) {
-            s_busy = false;
+            s_busy      = false;
+            s_abandoned = true;
             ++s_stats.timeouts;
             debug_log("usb: disk did not answer, transfer abandoned\n");
             return false;
@@ -62,6 +72,10 @@ bool wait_done() {
 // Не встраивается: тело около 270 байт флеша, а входов два.
 SOUNDSINTH_NOINLINE bool transfer(uint32_t lba, uint32_t count, void* buf, bool write) {
     if (s_addr == 0 || buf == nullptr || count == 0) return false;
+    if (s_abandoned) {
+        ++s_stats.failed;
+        return false; // буфер прошлого обмена ещё может быть у стека
+    }
     if (s_busy) {
         ++s_stats.reentry;
         ++s_stats.failed;
@@ -117,9 +131,8 @@ void msc_task() {
     // точкой, где появится фоновая работа с диском.
     //
     // Длинных обменов здесь быть не должно: момент появления диска -
-    // середина перечисления следующего устройства. Замерочная
-    // самопроверка на шестнадцать чтений занимала виток на 29 мс, и
-    // клавиатура в это окно не попадала вовсе.
+    // середина перечисления следующего устройства. Шестнадцать чтений
+    // занимают виток на 29 мс, и клавиатура в это окно не попадает.
 }
 
 bool msc_present() {
@@ -140,6 +153,12 @@ uint8_t msc_drive_count() {
 
 bool msc_read_run(uint32_t lba, uint32_t count, uint8_t* dst) {
     return transfer(lba, count, dst, false);
+}
+
+// Обмен идёт (вложенный вызов из его ожидания получил бы отказ) или брошенный
+// ещё держит буфер.
+bool msc_busy() {
+    return s_busy || s_abandoned;
 }
 
 bool msc_write(uint32_t lba, const uint8_t* src) {
@@ -176,9 +195,10 @@ void tuh_msc_mount_cb(uint8_t dev_addr) {
 void tuh_msc_umount_cb(uint8_t dev_addr) {
     if (s_drives > 0) --s_drives;
     if (dev_addr != s_addr) return;
-    s_addr    = 0;
-    s_sectors = 0;
-    s_busy    = false;
+    s_addr      = 0;
+    s_sectors   = 0;
+    s_busy      = false;
+    s_abandoned = false;
     devices::hal::media_state_publish(devices::hal::Medium::Usb);
     debug_logf("usb: disk %u detached\n", dev_addr);
 }

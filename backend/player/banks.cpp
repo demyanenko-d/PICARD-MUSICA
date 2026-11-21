@@ -33,21 +33,26 @@ void banks_open(const uint8_t* flash_blob, uint32_t flash_bytes) {
     }
     bank_err = nullptr;
     if (bank_sd_open(shared::g_bank)) {
-        player::load::session_loader_set_bank(&shared::g_bank);
+        load::session_loader_set_bank(&shared::g_bank);
         // Таблицы банка лежат в конце чипа (kBankTableOffset): хранилище
         // трека ужимается ниже них. Пока трек не загружен, это безопасно:
         // список свободных страниц пересобирается, выделять из него ещё
         // некому.
         soundsinth::memory::psram_set_track_bytes(shared::g_track_memory.psram, soundsinth::memory::kBankTableOffset);
-        debug_logf("boot: track storage shrunk to %" PRIu32 " KB to fit bank tables%s\n", soundsinth::memory::kBankTableOffset / 1024u,
-                   shared::g_track_memory.psram.alloc.kept_lost != 0 ? ", PERMANENT BLOCK LOST" : "");
+        // Треку - всё ниже таблиц, кроме постоянных блоков (кэш носителей,
+        // Beta Disk, диск ZX-Art, кольца): печатается остаток, а не граница.
+        const auto& psram   = shared::g_track_memory.psram;
+        const uint32_t left = (soundsinth::memory::psram_sample_page_count(psram) + psram.track.pages) * soundsinth::memory::kPsramPageBytes;
+        debug_logf("boot: track storage %" PRIu32 " KB below bank tables at %" PRIu32 " KB%s\n", left / 1024u, soundsinth::memory::kBankTableOffset / 1024u,
+                   psram.alloc.kept_lost != 0 ? ", PERMANENT BLOCK LOST" : "");
     } else if (soundsinth::bank::bank_open(flash_blob, flash_bytes, shared::g_bank, &bank_err)) {
-        player::load::session_loader_set_bank(&shared::g_bank);
+        load::session_loader_set_bank(&shared::g_bank);
         debug_logf("boot: bank %s, instruments %u, samples %u\n", shared::g_bank.header->name, static_cast<unsigned>(shared::g_bank.header->instrument_count),
                    static_cast<unsigned>(shared::g_bank.header->sample_count));
     } else {
         debug_logf("boot: no bank (%s) - .mid unavailable, the rest works\n", bank_err ? bank_err : "reason not given");
     }
+    shared::g_banks_ready.store(true, std::memory_order_release);
 }
 
 } // namespace player

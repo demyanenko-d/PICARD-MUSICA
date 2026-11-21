@@ -793,20 +793,33 @@ void test_empty_pattern_and_order_skip() {
     memory::track_memory_destroy(mem);
 }
 
-// Автовибрато инструмента не воспроизводится - считается при глубине не 0.
+// Автовибрато инструмента: поля уходят в дескрипторы его сэмплов, рабочим
+// считается при ненулевых глубине и скорости.
 void test_autovibrato_counted() {
     std::printf("test_xm_autovibrato_counted\n");
+    constexpr size_t kVibType  = 345; // байты расширенного заголовка инструмента
+    constexpr size_t kVibSweep = 346;
     constexpr size_t kVibDepth = 347;
+    constexpr size_t kVibRate  = 348;
     for (const uint8_t depth : {uint8_t(0), uint8_t(4)}) {
         std::vector<uint8_t> f = build_synthetic_xm();
+        f[kVibType]            = 1; // прямоугольник
+        f[kVibSweep]           = 5;
         f[kVibDepth]           = depth;
+        f[kVibRate]            = 7;
         memory::TrackMemory mem;
         memory::track_memory_create(mem);
         Song song;
         formats::MemoryByteSource src(f.data(), static_cast<uint32_t>(f.size()));
         CHECK(formats::xm::load(src.as_byte_source(), mem, song, nullptr));
-        CHECK_EQ(soundsinth::model::g_tracker_load_stats.ignored_autovibrato, static_cast<uint16_t>(depth ? 1 : 0));
+        CHECK_EQ(soundsinth::model::g_tracker_load_stats.autovibrato, static_cast<uint16_t>(depth ? 1 : 0));
         CHECK_EQ(soundsinth::model::g_tracker_load_stats.samples_failed, static_cast<uint16_t>(0));
+        if (song.sample_count > 0) {
+            CHECK_EQ(song.samples[0].vib_depth, depth);
+            CHECK_EQ(song.samples[0].vib_rate, static_cast<uint8_t>(7));
+            CHECK_EQ(song.samples[0].vib_sweep, static_cast<uint8_t>(5));
+            CHECK(song.samples[0].vib_type == soundsinth::model::SampleDescriptor::VibType::Square);
+        }
         memory::track_memory_destroy(mem);
     }
 }

@@ -7,7 +7,7 @@
 ;;
 ;;   0xC000  слово: сколько записей
 ;;   0xC002  слово: докуда доросли данные
-;;   0xC004  записи подряд, вверх:
+;;   0xC004  записи подряд, вверх, в том же виде, что _fat_ent_* в памяти:
 ;;              +0  атрибуты
 ;;              +1  первый кластер (4)
 ;;              +5  размер (4)
@@ -17,9 +17,14 @@
 ;;
 ;; Данные растут снизу вверх, указатели сверху вниз. Встретились - каталог
 ;; в страницу не поместился, _fat_dir_full = 1.
+;;
+;; Перед каждой записью зовётся подпрограмма из _fat_dir_hook, если там не
+;; ноль (большой каталог читается секундами). Ей нельзя трогать карту и
+;; окно 0xC000; регистры она портит любые, кроме IX.
 
         .module dir
         .globl  _fat_dir_load
+        .globl  _fat_dir_hook
         .globl  _fat_dir_get
         .globl  _fat_dir_count
         .globl  _fat_dir_full
@@ -29,9 +34,9 @@
         .globl  _fat_ent_attr
         .globl  _fat_ent_clus
         .globl  _fat_ent_size
-        .globl  _fat_page_set
         .globl  _fat_page_dir
-        .globl  _fat_port_shadow
+        .globl  fat_page_enter
+        .globl  fat_page_leave
 
 DIR_COUNT .equ  0xC000
 DIR_DATA  .equ  0xC002
@@ -42,9 +47,9 @@ DIR_INDEX .equ  0xFFFE
 
 _fat_dir_count::.ds     2       ; сколько записей уложилось
 _fat_dir_full:: .ds     1       ; 1 - каталог в страницу не поместился
+_fat_dir_hook:: .ds     2       ; 0 или подпрограмма приложения перед записью
 fd_index:       .ds     2       ; куда класть следующий указатель
-fd_saved:       .ds     1       ; какая страница была до нас
-fd_len:         .ds     2
+fd_len:         .ds     2       ; длина записи: 9 и имя с нулём
 
         .area   _CODE
 
@@ -58,11 +63,8 @@ _fat_dir_load::
         ld      hl, #0
         ld      (_fat_dir_count), hl
 
-        ld      a, (_fat_port_shadow)
-        and     #0x07
-        ld      (fd_saved), a
         ld      a, (_fat_page_dir)
-        call    _fat_page_set
+        call    fat_page_enter
 
         ld      hl, #DIR_FIRST
         ld      (DIR_DATA), hl
@@ -72,6 +74,10 @@ _fat_dir_load::
         ld      (DIR_COUNT), hl
 
 fdl_next:
+        ld      hl, (_fat_dir_hook)
+        ld      a, h
+        or      l
+        call    nz, fdl_hook
         call    _fat_dir_next
         jr      c, fdl_io
         or      a
@@ -92,22 +98,23 @@ fdl_next:
 fdl_done:
         ld      hl, (_fat_dir_count)
         ld      (DIR_COUNT), hl
-        ld      a, (fd_saved)
-        call    _fat_page_set
+        call    fat_page_leave
         or      a
         ret
 
 fdl_io:
-        ld      a, (fd_saved)
-        call    _fat_page_set
+        call    fat_page_leave
         scf
         ret
 
+fdl_hook:
+        jp      (hl)
+
 ;; Уложить очередную запись. CY=1 - места больше нет.
 fdl_put:
-        ;; Длина имени с нулём.
+        ;; Длина записи: 9 байт полей и имя с нулём.
         ld      hl, #_fat_ent_name
-        ld      bc, #0
+        ld      bc, #9
 fdp_len:
         ld      a, (hl)
         inc     hl
@@ -119,42 +126,30 @@ fdp_len:
         ;; Хватит ли места: данные плюс запись плюс два байта указателя не
         ;; должны дойти до указателей.
         ld      hl, (DIR_DATA)
-        ld      bc, (fd_len)
         add     hl, bc
-        ld      bc, #9+2
-        add     hl, bc
+        inc     hl
+        inc     hl
         ld      de, (fd_index)
         or      a
         sbc     hl, de
         jr      nc, fdp_full
 
-        ;; Заголовок записи.
-        ld      hl, (DIR_DATA)
-        ld      de, (fd_index)
-        ld      a, l            ; указатель на неё; через (DE) ходит только A
-        ld      (de), a
-        inc     de
-        ld      a, h
-        ld      (de), a
-        ld      de, (fd_index)
-        dec     de
-        dec     de
-        ld      (fd_index), de
-
-        ld      a, (_fat_ent_attr)
-        ld      (hl), a
+        ;; Указатель на запись.
+        ld      de, (DIR_DATA)
+        ld      hl, (fd_index)
+        ld      (hl), e
         inc     hl
-        ld      de, #_fat_ent_clus
-        call    fdp_copy4
-        ld      de, #_fat_ent_size
-        call    fdp_copy4
+        ld      (hl), d
+        dec     hl
+        dec     hl
+        dec     hl
+        ld      (fd_index), hl
 
-        ld      de, #_fat_ent_name
+        ;; Сама запись: поля и имя.
+        ld      hl, #_fat_ent_attr
         ld      bc, (fd_len)
-        ex      de, hl
-        ldir                    ; имя вместе с нулём
-        ex      de, hl
-        ld      (DIR_DATA), hl
+        ldir
+        ld      (DIR_DATA), de
 
         ld      hl, (_fat_dir_count)
         inc     hl
@@ -164,16 +159,6 @@ fdp_len:
 
 fdp_full:
         scf
-        ret
-
-fdp_copy4:
-        ld      b, #4
-fdp_c4:
-        ld      a, (de)
-        ld      (hl), a
-        inc     hl
-        inc     de
-        djnz    fdp_c4
         ret
 
 ;; Достать запись номер HL в _fat_ent_*.
@@ -192,11 +177,8 @@ _fat_dir_get::
         scf
         ret
 fdg_ok:
-        ld      a, (_fat_port_shadow)
-        and     #0x07
-        ld      (fd_saved), a
         ld      a, (_fat_page_dir)
-        call    _fat_page_set
+        call    fat_page_enter
 
         ;; Указатель на запись лежит по 0xFFFE - i*2.
         add     hl, hl
@@ -209,15 +191,10 @@ fdg_ok:
         ld      d, (hl)
         ex      de, hl          ; HL -> сама запись
 
-        ld      a, (hl)
-        ld      (_fat_ent_attr), a
-        inc     hl
-        ld      de, #_fat_ent_clus
-        call    fdg_copy4
-        ld      de, #_fat_ent_size
-        call    fdg_copy4
-
-        ld      de, #_fat_ent_name
+        ;; Поля, затем имя до нуля.
+        ld      de, #_fat_ent_attr
+        ld      bc, #9
+        ldir
 fdg_name:
         ld      a, (hl)
         ld      (de), a
@@ -226,18 +203,6 @@ fdg_name:
         or      a
         jr      nz, fdg_name
 
-        ld      a, (fd_saved)
-        call    _fat_page_set
+        call    fat_page_leave
         or      a
-        ret
-
-;; (DE) <- (HL), 4 байта.
-fdg_copy4:
-        ld      b, #4
-fdg_c4:
-        ld      a, (hl)
-        ld      (de), a
-        inc     hl
-        inc     de
-        djnz    fdg_c4
         ret

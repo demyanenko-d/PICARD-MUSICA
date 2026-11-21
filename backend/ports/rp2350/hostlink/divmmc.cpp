@@ -12,16 +12,14 @@
 
 #include "hardware/structs/timer.h"
 
-#include "bus_setup.h"
 #include "platform/log.h"
+#include "platform/compiler.h"
+
+#include "bus_setup.h"
 // SOUNDSINTH_DIVMMC_TRDOS_TRAP (без него окно 3D00 выпадает молча) и
 // SOUNDSINTH_DIVMMC_TRACE. Ключи нужны препроцессору ниже, поэтому явно,
 // а не транзитом через divmmc.h.
 #include "firmware_config.h"
-#include "platform/compiler.h"
-
-#include "devices/sd/spi_emu.h"
-
 // Образы ПЗУ во флеше: DivMMC и конфигуратор настроек.
 #include "rom_image_config.h"
 #include "rom_image_divmmc.h"
@@ -40,10 +38,8 @@ constexpr uint32_t kBanks = PAGE_TAB_BANKS;
 // Начало региона 1 (ОЗУ DivMMC, 0x2000-0x3FFF).
 constexpr uint16_t kRegion1Base = 0x2000;
 static_assert((kBanks & (kBanks - 1u)) == 0, "the bank number is masked out of port 0xE3");
-// Своя входная секция: скаляры выше стоят перед выровненным массивом, и в
-// общем лумпе .bss этого файла они стоили бы набивку до его границы.
-// Выравнивание держит alignas, секция только уводит массив из лумпа.
-alignas(256) __attribute__((section(".bss.divmmc_ram"))) uint8_t s_ram[kBanks][8192];
+static_assert(kBanks == std::size(bus_divmmc_ram), "the linker script reserves 16 banks");
+constexpr auto& s_ram        = bus_divmmc_ram;
 constexpr uint32_t kRamBytes = sizeof(s_ram);
 
 bool s_by_port = false; // CONMEM, бит 7 порта 0xE3
@@ -118,9 +114,9 @@ __force_inline void trace_event(TraceKind, uint16_t) {}
 
 // Точки входа и окно выхода DivMMC. Один список на установку и на
 // самопроверку: точка, добавленная только в одно место, не проверилась бы.
-constexpr uint16_t kEnterTraps[] = {0x0000u, 0x0008u, 0x0038u, 0x0066u, 0x04C6u, 0x0562u};
-constexpr uint16_t kExitFirst    = 0x1FF8u;
-constexpr uint16_t kExitLast     = 0x1FFFu;
+constexpr uint16_t kEnterTraps[] = {0x0000u, 0x0008u, 0x0038u, 0x0066u, 0x04c6u, 0x0562u};
+constexpr uint16_t kExitFirst    = 0x1ff8u;
+constexpr uint16_t kExitLast     = 0x1fffu;
 
 // Карта трапов цепочки DMA: точки входа и окно выхода - по адресу, окно BDI
 // - страницей.
@@ -164,7 +160,7 @@ void build_trap_map() {
 #endif
     // Где трапа нет, путь обязан давать ноль. 0x07F8 совпадает с окном
     // выхода по разрядам A0..A10.
-    for (const uint16_t a : {0x0001u, 0x0007u, 0x0100u, 0x07F8u, 0x0FF8u, 0x1000u, 0x1FF7u}) {
+    for (const uint16_t a : {0x0001u, 0x0007u, 0x0100u, 0x07f8u, 0x0ff8u, 0x1000u, 0x1ff7u}) {
         if (rom_emu_trap_resolve(a) != 0u) {
             panic("divmmc: 0x%04x traps though it must not", static_cast<unsigned>(a));
         }
@@ -175,19 +171,6 @@ void build_trap_map() {
 // регистр C: искать в младшем байте.
 constexpr uint8_t kPortDivMmc = 0xe3;
 
-// Порты карты у DivMMC:
-//   0xE7 запись - бит 0 выбирает кристалл, ноль выбирает;
-//   0xEB запись - байт карте;
-//   0xEB чтение - байт от карты, операция запускает следующий обмен.
-// Отличие от Z-Controller - номера и бит выбора (там бит 1). Разбор и
-// эмуляция карты общие.
-constexpr uint8_t kPortSdCtrl = 0xe7;
-constexpr uint8_t kPortSdData = 0xeb;
-
-// Выбрана ли карта. Пока не выбрана, записи в порт данных игнорируются,
-// как на шине SPI.
-bool s_sd_active = false;
-
 // Копия образа ПЗУ в SRAM (оригинал - константа во флеше): цепочка DMA
 // отвечает из SRAM, из флеша машина падает. Выравнивание на 256 байт
 // обязательно: таблица страниц хранит базу >> 8.
@@ -196,7 +179,7 @@ bool s_sd_active = false;
 // 3DFD в стек и уходит в ПЗУ машины) попадает на наш C9 в том же цикле:
 // M1 - разряд индекса таблицы страниц, выборка команды в окне 3D00-3DFF
 // идёт из нашей памяти, чтение данных - из ПЗУ машины.
-alignas(256) __attribute__((section(".bss.divmmc_rom"))) uint8_t s_rom[8192];
+alignas(256) SOUNDSINTH_BUSMEM("rom") uint8_t s_rom[kZ80BankBytes];
 
 // Из флеша читается один memcpy, когда машина стоит в сбросе. В режиме
 // конфигуратора берётся другой образ: механизм подстановки тот же, ПЗУ
@@ -287,8 +270,7 @@ void __not_in_flash_func(apply_mapping)() {
 // переключить её посреди: выход esxDOS пишет 0xE3 и через около 21
 // такта выбирает 1FFA (ПЗУ 0x005D, 0x0D0C). Состояние читается после
 // ожидания конца цикла - трап, пришедший в ожидании, уже учтён; вклинился
-// после чтения - X детектора пишется заново, в обход запомненного
-// варианта. Иначе состояние "снято", а таблица (и с ней ROM_BLK) "стоит" до
+// после чтения - X детектора пишется заново. Иначе состояние "снято", а таблица (и с ней ROM_BLK) "стоит" до
 // следующего трапа входа: машина выходила бы в память DivMMC при погашенном
 // ПЗУ.
 void __not_in_flash_func(apply_mapping_from_port)(bool bank_only) {
@@ -297,7 +279,7 @@ void __not_in_flash_func(apply_mapping_from_port)(bool bank_only) {
     // оттуда смены не заметит, а чтение следующей командой из 0x2000-0x3FFF
     // (копирование между банками: out (e3),a / ld a,(hl)) обязано уже видеть
     // новый банк - запаса до него около 1 мкс на 3.5 МГц. Ожидание конца
-    // цикла съедало половину. Смена подстановки ждёт, как трап.
+    // цикла съедает половину. Смена подстановки ждёт, как трап.
     if (!bank_only) wait_memory_read_end();
     // Подставлено ли, с перечитыванием s_by_port из памяти: после ожидания
     // и после записи варианта, когда между чтениями мог сработать трап.
@@ -312,46 +294,15 @@ void __not_in_flash_func(apply_mapping_from_port)(bool bank_only) {
         if (now == on) return;
         on = now;
         ++s_remaps;
-        rom_emu_force_pages(pagetab_variant(on));
-    }
-}
-
-// Ответ карты в ячейку порта данных. Ячейку пишут обработчики записи и
-// чтения порта; вытесненный между обменом и записью положил бы свой, более
-// ранний ответ поверх свежего. Запись повторяется, пока ячейка не совпадёт
-// с ответом последнего исполненного обмена.
-void __not_in_flash_func(sd_answer)(uint8_t value) {
-    for (;;) {
-        port_answer(kPortSdData, value);
-        const uint8_t now = devices::sd::sd_spi_latch(devices::sd::SdOwner::DivMmc);
-        if (now == value) return;
-        value = now;
+        rom_emu_select_pages(pagetab_variant(on));
     }
 }
 
 } // namespace
 
-// Порт данных карты - следующий байт SPI (как у Z-Controller).
-void __not_in_flash_func(divmmc_on_port_read)(uint8_t port) {
-    if (port != kPortSdData) {
-        // Не наш порт - разбирает плагин.
-        dispatch_port_read_done(port);
-        return;
-    }
-    sd_answer(devices::sd::sd_spi_byte(devices::sd::SdOwner::DivMmc, 0xff));
-}
-
 void divmmc_reset() {
     build_trap_map();
     build_rom();
-
-    // Эмулятор SD общий с Z-Controller; в режиме DivMMC его поднимает этот
-    // сброс.
-    devices::sd::sd_spi_emu_init();
-    s_sd_active = false;
-    devices::sd::sd_spi_select(devices::sd::SdOwner::DivMmc, false);
-    // Первый ответ до обмена - 0xFF, как у незанятой шины SPI.
-    port_answer(kPortSdData, 0xffu);
 
     std::memset(s_ram, 0, kRamBytes);
     build_pagetabs();
@@ -388,21 +339,10 @@ void __not_in_flash_func(divmmc_on_bus_write)(uint32_t raw) {
         return;
     }
 
-    // Порты карты - только в ветке портов: запись в память с тем же младшим
-    // байтом (0x20E7) иначе ушла бы эмулятору карты как байт SPI.
+    // Чужой порт, и порты карт тоже, - общему разбору портов. Только в ветке
+    // портов: запись в память с тем же младшим байтом (0x20E7) иначе ушла
+    // бы эмулятору карты как байт SPI.
     const uint8_t port = port_of(raw);
-    if (port == kPortSdCtrl) {
-        s_sd_active = (data & 0x01u) == 0u;
-        devices::sd::sd_spi_select(devices::sd::SdOwner::DivMmc, s_sd_active);
-        return;
-    }
-    if (port == kPortSdData) {
-        if (s_sd_active) sd_answer(devices::sd::sd_spi_byte(devices::sd::SdOwner::DivMmc, data));
-        return;
-    }
-
-    // Чужой порт - плагину: в режиме DivMMC у него нет своих автоматов шины,
-    // его порты обслуживает этот путь.
     if (port != kPortDivMmc) {
         dispatch_port_write(port, data);
         return;
@@ -446,9 +386,11 @@ uint32_t divmmc_remaps() {
 
 void divmmc_log_stats() {
     // divmmc: подстановка (1 - ПЗУ машины закрыто), банк, адрес последней
-    // выборки.
-    debug_logf("divmmc: mapped %d, bank %u | fetch %08" PRIX32 " | E3 repeats %" PRIu32 " | queue peak %" PRIu32 "/8\n", static_cast<int>(divmmc_mapped()),
-               static_cast<unsigned>(divmmc_bank()), last_memory_read_ptr(), divmmc_remaps(), bus_wr_peak());
+    // выборки. Без эмуляции ПЗУ этих чисел нет.
+    if (rom_emu_enabled()) {
+        debug_logf("divmmc: mapped %d, bank %u | fetch %08" PRIX32 " | E3 repeats %" PRIu32 " | queue peak %" PRIu32 "/8\n", static_cast<int>(divmmc_mapped()),
+                   static_cast<unsigned>(divmmc_bank()), last_memory_read_ptr(), divmmc_remaps(), bus_wr_peak());
+    }
     // Ноль - ни одна отметка опоздания не потеряна.
     debug_logf("bus: late queue full %" PRIu32 "\n", bus_measurements().serve_late_full);
 }
@@ -483,6 +425,13 @@ uint8_t* config_rom_page() {
 
 uint32_t config_rom_page_bytes() {
     return sizeof(s_ram[0]);
+}
+
+// Своё ПЗУ Пентагона - банки 0-7 ОЗУ DivMMC: без DivMMC они не заняты.
+// Границу 64 КБ проверяет компоновщик.
+uint8_t* pentagon_rom_block() {
+    static_assert(kRamBytes == 2u * kPentagonRomBytes, "the ROM block is banks 0-7, BDI code is banks 8-15");
+    return &s_ram[0][0];
 }
 
 } // namespace bus

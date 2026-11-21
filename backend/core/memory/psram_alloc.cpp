@@ -167,11 +167,13 @@ void psram_alloc_shrink(PsramAlloc& a, PsramBlock& block, uint16_t pages) {
 void psram_alloc_free(PsramAlloc& a, PsramBlock& block) {
     if (!block.valid()) return;
     // Свободная страница внутри возвращаемого блока значит, что блок
-    // возвращают второй раз или он налез на чужой. Учёт после этого врёт.
+    // возвращают второй раз или он налез на чужой: биты и счёт свободных
+    // остаются как были, чужие страницы не освобождаются.
     for (uint16_t i = 0; i < block.pages; ++i) {
         if (!page_busy(a, static_cast<uint16_t>(block.first + i))) {
             ++a.double_free;
-            break;
+            block = PsramBlock{};
+            return;
         }
     }
     mark(a, block.first, block.pages, false);

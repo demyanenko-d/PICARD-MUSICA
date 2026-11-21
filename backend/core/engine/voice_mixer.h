@@ -120,6 +120,10 @@ public:
     int32_t* chorus_bus   = nullptr; // то же для хоруса
     int32_t* discard_l    = nullptr;
     int32_t* discard_r    = nullptr;
+    // Буферы каналов стойки чипов: канал n - stream_base + n * stream_stride,
+    // отсчёты текущего батча с нуля. Стойка наполняет их до mix().
+    const int16_t* stream_base = nullptr;
+    uint32_t stream_stride     = 0;
 
     // --- Команды тика на голос слота ---
 
@@ -137,6 +141,16 @@ public:
         voice_trigger_prepared(voices[slot], psram, sample, first_page, checkpoint_first_page, start, hermite);
         ramp[slot].restart = true;
         filter_state[slot] = FilterState{};
+    }
+
+    // Голос слота играет канал стойки channel: разгон с тишины, фильтр с нуля.
+    void trigger_stream(uint8_t slot, uint16_t channel) {
+        voices[slot]            = Voice{};
+        voices[slot].active     = true;
+        voices[slot].stream     = true;
+        voices[slot].first_page = channel;
+        ramp[slot].restart      = true;
+        filter_state[slot]      = FilterState{};
     }
 
     // Высота звучащего голоса готовым шагом Q16.16: считает её тик, здесь
@@ -207,7 +221,10 @@ public:
         uint64_t sum = 0;
         for (uint8_t k = 0; k < active_count; ++k) {
             const uint8_t idx = active[k];
-            if (voices[idx].active) sum += voice_cost_ns(voices[idx].resident_encoding, voices[idx].step, filter_coeffs[idx].active);
+            if (!voices[idx].active) continue;
+            // Голос стойки не читает PSRAM: только база и фильтр.
+            sum += voices[idx].stream ? SOUNDSINTH_VOICE_COST_BASE_NS + (filter_coeffs[idx].active ? SOUNDSINTH_VOICE_COST_FILTER_NS : 0u)
+                                      : voice_cost_ns(voices[idx].resident_encoding, voices[idx].step, filter_coeffs[idx].active);
         }
         // Волновое гашение стоит как живой голос: оно читает сэмпл тем же
         // декодером. Замороженное - одно умножение, в счёт не идёт.

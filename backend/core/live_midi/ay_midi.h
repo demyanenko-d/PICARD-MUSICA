@@ -22,6 +22,9 @@ namespace soundsinth::midi_in {
 
 class SerialBits {
 public:
+    // Кадр посреди байта забыт; счётчик ошибок остаётся.
+    void reset() { count_ = 0, shift_ = 0; }
+
     // Бит линии. true - получен байт (в out).
     bool feed(bool line, uint8_t& out) {
         if (count_ == 0) {
@@ -64,6 +67,8 @@ inline constexpr uint8_t kMidiOutBit     = 1u << 2;
 
 class AyPortA {
 public:
+    void reset() { reg_ = 0xFF; }
+
     // Запись в порт AY. true - бит линии MIDI (в line).
     bool feed(uint16_t write, bool& line) {
         const auto value = static_cast<uint8_t>(write & 0xFFu);
@@ -122,6 +127,10 @@ public:
 
     uint32_t skipped_bytes() const { return skipped_; }
 
+    // Running status, недособранное сообщение и SysEx забыты; счётчик
+    // пропущенных остаётся.
+    void reset() { status_ = 0, have_ = 0, in_sysex_ = false, sysex_ready_ = false, sysex_len_ = 0; }
+
 private:
     uint8_t status_            = 0; // running status, 0 - нет
     uint8_t data_[2]           = {};
@@ -167,6 +176,15 @@ public:
         const bool got = parser_.feed(byte, out);
         sysex_ready_   = parser_.sysex_ready();
         return got;
+    }
+
+    // Разбор с нуля: прошлый поток посреди кадра или сообщения не доберёт
+    // новое. Счётчики байт и ошибок остаются.
+    void reset() {
+        port_.reset();
+        bits_.reset();
+        parser_.reset();
+        sysex_ready_ = false;
     }
 
     // Этой записью дошло до конца сообщение SysEx.

@@ -33,6 +33,7 @@ add_executable(soundsinth_tests
     test_sample_pack.cpp
     test_bank_pcm_source.cpp
     test_mixbus_limiter.cpp
+    test_mixbus_level.cpp
     test_mod_loader.cpp
     test_fatfs_mod.cpp
     test_s3m_loader.cpp
@@ -69,16 +70,36 @@ add_executable(soundsinth_tests
     test_gs_midi_sched.cpp
     test_gs_fx_player.cpp
     test_gs_bridge.cpp
+    test_ay_chip.cpp
+    test_sn_chip.cpp
+    test_saa_chip.cpp
+    test_stream_voice.cpp
+    test_ay_live.cpp
+    test_saa_live.cpp
+    test_dac_live.cpp
+    test_vgm.cpp
+    test_inflate.cpp
     host_link_stub.cpp
     test_ay_midi.cpp
     test_debug_ring.cpp
     test_config.cpp
     test_config_apply.cpp
+    test_fat_check.cpp
     test_hid.cpp
     test_hid_parser.cpp
+    test_vdisk.cpp
+    test_bdi.cpp
+    test_fdc.cpp
+    test_bdi_media.cpp
+    test_config_term.cpp
+    vg93_ref/vg93w.cpp
+    vg93_ref/beta_disk.cpp
+    vg93_ref/disk_image.cpp
+    vg93_ref/mfm.cpp
+    test_zxart.cpp
     third_party/libxmp_itsex.cpp
 )
-target_link_libraries(soundsinth_tests PRIVATE platform_pc libxmp::xmp_static)
+target_link_libraries(soundsinth_tests PRIVATE platform_pc soundsinth_net libxmp::xmp_static)
 
 # Эмулятор карты, её протокол и порты Z-Controller приходят из библиотеки
 # устройств. Тест реализует их контракты сам: шину SPI (на том конце линии

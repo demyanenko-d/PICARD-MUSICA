@@ -29,6 +29,7 @@ constexpr uint32_t kBlockWords = BufferPool::kFramesPerBuffer;
 struct I2sSinkState {
     BufferPool* pool        = nullptr;
     uint32_t sample_rate_hz = 0;
+    uint64_t rate_mhz       = 0; // фактическая частота по делителю
 
     PIO pio                 = nullptr;
     uint sm                 = 0;
@@ -209,9 +210,12 @@ void hw_init_i2s(I2sSinkState& s) {
     sm_config_set_fifo_join(&cfg, PIO_FIFO_JOIN_TX);
 
     // 16 бит x 2 канала, 2 такта автомата на бит -> 64 такта на стерео-кадр.
-    const float sys_clk = static_cast<float>(clock_get_hz(clk_sys));
-    const float freq_sm = static_cast<float>(s.sample_rate_hz) * 64.0f;
-    sm_config_set_clkdiv(&cfg, sys_clk / freq_sm);
+    // Делитель в 1/256 - ближайший: sys * 256 / (rate * 64). Частоту, которая
+    // из него выходит, берут часы живых устройств.
+    const uint64_t sys_hz = clock_get_hz(clk_sys);
+    const uint32_t div256 = static_cast<uint32_t>((sys_hz * 4u + s.sample_rate_hz / 2u) / s.sample_rate_hz);
+    sm_config_set_clkdiv_int_frac8(&cfg, div256 >> 8, static_cast<uint8_t>(div256 & 0xffu));
+    s.rate_mhz = sys_hz * 4000u / div256;
 
     static constexpr uint kI2sPins[3] = {kI2sData, kI2sBck, kI2sWs};
     for (uint pin : kI2sPins) {
@@ -302,13 +306,17 @@ void dma_init(I2sSinkState& s) {
 
     irq_set_exclusive_handler(DMA_IRQ_NUM(bus::DMA_IRQ_INDEX_AUDIO), dma_irq_handler);
     // Наивысший приоритет, совместимый с *FromISR: SysTick/PendSV FreeRTOS
-    // (0xF0) этот IRQ не вытесняют. Значение из общей карты ресурсов, рядом с
-    // шинными: звук самый низкий.
+    // (0xF0) этот IRQ не вытесняют. Значение из общей карты ресурсов: звук
+    // ниже шинных.
     static_assert(bus::IRQ_PRIO_RELAXED == configMAX_SYSCALL_INTERRUPT_PRIORITY, "IRQ_PRIO_RELAXED must match the scheduler BASEPRI threshold");
     irq_set_priority(DMA_IRQ_NUM(bus::DMA_IRQ_INDEX_AUDIO), bus::IRQ_PRIO_RELAXED);
 }
 
 } // namespace
+
+uint64_t i2s_sink_rate_mhz() {
+    return s_state.rate_mhz;
+}
 
 uint32_t i2s_sink_underrun_count() {
     return s_state.underrun;

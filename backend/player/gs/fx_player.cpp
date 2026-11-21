@@ -4,8 +4,9 @@
 #include <cmath>
 #include <cstring>
 
-#include "core/engine/engine_defs.h"
 #include "platform/hot_path.h"
+
+#include "core/engine/engine_defs.h"
 
 namespace player::gs {
 namespace {
@@ -21,7 +22,7 @@ constexpr double kRateNote0 = 9600000.0 / 18516.0; // 518.47 Гц, нота 0
 // 4..1 байта - младший бит прошивка не смотрит. Замерено развёрткой всех
 // 32 значений.
 int fine_eighths(uint8_t finetune) {
-    const int v = (finetune >> 1) & 0x0f;
+    const int v = (finetune >> 1) & 0x0fu;
     return v < 8 ? v : v - 16;
 }
 
@@ -55,27 +56,32 @@ constexpr uint8_t kGainShift = 3;
 
 } // namespace
 
-// Заявки зовёт обработчик порта GS: в SRAM, путь шины без флеша.
-SOUNDSINTH_HOT_PATH_ATTR("gs_fx_request_start")
+// Заявки зовёт разбор команд GS в основном потоке Core1.
 void FxPlayer::request_start(const devices::gs::FxStart& cmd) {
     if (cmd.channel >= devices::gs::kFxChannels) return;
     std::atomic<uint32_t>& seq = pending_seq_[cmd.channel];
     const uint32_t s           = seq.load(std::memory_order_relaxed);
     seq.store(s + 1u, std::memory_order_relaxed);
     std::atomic_thread_fence(std::memory_order_release);
-    pending_[cmd.channel] = cmd;
+    pending_[cmd.channel]     = cmd;
+    pending_gen_[cmd.channel] = stop_gen_[cmd.channel].load(std::memory_order_relaxed);
     seq.store(s + 2u, std::memory_order_release);
     pending_mask_.fetch_or(static_cast<uint8_t>(1u << cmd.channel), std::memory_order_release);
 }
 
-SOUNDSINTH_HOT_PATH_ATTR("gs_fx_request_note")
+void FxPlayer::request_stop(uint8_t mask) {
+    for (uint8_t c = 0; c < devices::gs::kFxChannels; ++c) {
+        if ((mask & (1u << c)) != 0) stop_gen_[c].store(static_cast<uint8_t>(stop_gen_[c].load(std::memory_order_relaxed) + 1u), std::memory_order_release);
+    }
+    stop_mask_.fetch_or(mask, std::memory_order_release);
+}
+
 void FxPlayer::request_note(uint8_t channel, uint8_t note) {
     if (channel >= devices::gs::kFxChannels) return;
     pending_note_[channel] = note;
     note_mask_.fetch_or(static_cast<uint8_t>(1u << channel), std::memory_order_release);
 }
 
-SOUNDSINTH_HOT_PATH_ATTR("gs_fx_request_volume")
 void FxPlayer::request_volume(uint8_t channel, uint8_t volume) {
     if (channel >= devices::gs::kFxChannels) return;
     pending_vol_[channel] = volume;
@@ -111,19 +117,20 @@ void FxPlayer::apply_requests() {
         // следующую заявку в этот же слот, пока мы читаем.
         const uint32_t s1              = pending_seq_[c].load(std::memory_order_acquire);
         const devices::gs::FxStart req = pending_[c];
+        const uint8_t gen              = pending_gen_[c];
         std::atomic_thread_fence(std::memory_order_acquire);
         if ((s1 & 1u) != 0u || pending_seq_[c].load(std::memory_order_relaxed) != s1) {
             pending_mask_.fetch_or(static_cast<uint8_t>(1u << c), std::memory_order_relaxed);
             continue;
         }
-        if (req.length == 0) {
-            // Играть нечего: канал отдаётся автомату сразу.
+        if (req.length == 0 || gen != stop_gen_[c].load(std::memory_order_acquire)) {
+            // Играть нечего или заявку снял стоп: канал отдаётся автомату сразу.
             ended_[c].store(req.seq, std::memory_order_relaxed);
             continue;
         }
         // Байты ещё в кольце моста: заявка ждёт следующего буфера. Иначе
         // голос играл бы то, что лежало в области до этого сэмпла.
-        if (ready_ != nullptr && req.offset + req.length > (ready_->load(std::memory_order_acquire) & kFxReadyBytesMask)) {
+        if (ready_ != nullptr && req.offset + req.length > ready_->load(std::memory_order_acquire)) {
             pending_mask_.fetch_or(static_cast<uint8_t>(1u << c), std::memory_order_relaxed);
             ++waited_;
             continue;

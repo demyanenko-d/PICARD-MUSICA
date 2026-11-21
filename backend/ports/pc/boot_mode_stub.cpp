@@ -5,9 +5,10 @@
 // перезагрузку платы, а у процесса на ПК перезагрузки не бывает. Заглушка
 // нужна, чтобы загрузка настроек собиралась тем же кодом.
 
-#include "platform/boot_mode.h"
-
 #include <cstdlib>
+
+#include "platform/board_info.h"
+#include "platform/boot_mode.h"
 
 void platform::boot_reboot(const BootRequest&) {
     // Перезагружаться нечему: на ПК это конец работы.
@@ -36,4 +37,8 @@ uint8_t* platform::config_rom_page() {
 
 uint32_t platform::config_rom_page_bytes() {
     return 0;
+}
+
+platform::BoardInfo platform::board_info() {
+    return BoardInfo{};
 }

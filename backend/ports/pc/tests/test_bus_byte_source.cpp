@@ -6,6 +6,7 @@
 
 #include "host_protocol_link.h"
 #include "player/load/bus_byte_source.h"
+#include "player/shared_state.h"
 #include "player/protocol/host_protocol.h"
 
 using namespace soundsinth;
@@ -116,7 +117,36 @@ void test_seek_edges() {
 
 } // namespace
 
+// Хост молчит, машину сбросили: ожидание окна обрывается, чтение
+// короткое. Без этого цикл Core1 стоял бы до кадра RESET хоста, а программы
+// хоста после сброса нет.
+struct Silent {
+    player::load::BusByteSource* bus = nullptr;
+    uint32_t calls                   = 0;
+    static void pump(void* user) {
+        auto* self = static_cast<Silent*>(user);
+        if (++self->calls == 100) shared::g_machine_resets.fetch_add(1);
+        if (self->calls == 100000) self->bus->on_reset(); // страховка теста
+    }
+};
+
+void test_machine_reset_ends_the_wait() {
+    std::printf("test_bus_byte_source_machine_reset\n");
+    HostProtocol protocol;
+    Silent silent;
+    player::load::BusByteSource bus(protocol, 6000, &Silent::pump, &silent);
+    silent.bus             = &bus;
+    formats::ByteSource bs = bus.as_byte_source();
+    uint8_t buf[16];
+    const uint32_t got = bs.read(bs.self, buf, 16);
+    std::printf("  silent host, machine reset: read %u bytes after %u waits, aborted %d\n", got, silent.calls, bus.aborted() ? 1 : 0);
+    CHECK_EQ(got, 0u);
+    CHECK(silent.calls < 200u);
+    CHECK(bus.aborted());
+}
+
 void run_bus_byte_source_tests() {
+    test_machine_reset_ends_the_wait();
     test_sizes_and_uneven_steps();
     test_seek_edges();
 }

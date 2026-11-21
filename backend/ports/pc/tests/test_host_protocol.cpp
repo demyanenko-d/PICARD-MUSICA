@@ -700,6 +700,84 @@ void test_telemetry_round_robin_order() {
     CHECK_EQ(h.poll_status(), static_cast<uint8_t>(HostProtocol::kStNone));
 }
 
+// Окна данных подряд (догрузка сэмпла): между окнами уходят
+// kTelemetryPerWindow кадров телеметрии, остальное ждёт следующего окна.
+void test_telemetry_between_windows() {
+    std::printf("test_telemetry_between_windows\n");
+
+    HostProtocol p;
+    HostProtocol::Callbacks cb;
+    p.set_callbacks(cb);
+    Host h(p);
+    Received got;
+
+    h.command(HostProtocol::kHcStart, 0x00, 0x00, 0x10, 0x00, 2,
+              HostProtocol::kTelemetryVu | HostProtocol::kTelemetrySpectrum | HostProtocol::kTelemetryPosition);
+    while (h.poll_status() != static_cast<uint8_t>(HostProtocol::kStNone))
+        h.command(HostProtocol::kHcDone);
+
+    std::vector<uint8_t> data(4096, 0x5A);
+    p.request_file_chunk(0, 4096);
+    p.poll();
+    CHECK_EQ(h.poll_status(), static_cast<uint8_t>(HostProtocol::kStReadFast));
+    const uint8_t bands[16] = {7};
+    p.set_vu(1, 2);
+    p.set_spectrum(bands);
+    p.set_position(0, 1, PlaybackState::Playing);
+    h.send_data(data.data(), 4096);
+    h.done(4096);
+    got.collect(p);
+    CHECK_EQ(got.calls, 1);
+    p.request_file_chunk(4096, 4096); // загрузчик сразу просит следующее окно
+    p.poll();
+    uint8_t sent[2];
+    for (uint8_t& code : sent) {
+        code = h.poll_status();
+        h.command(HostProtocol::kHcDone);
+    }
+    CHECK(sent[0] >= HostProtocol::kStFileInfo && sent[0] <= HostProtocol::kStSpectrum && sent[1] >= HostProtocol::kStFileInfo &&
+          sent[1] <= HostProtocol::kStSpectrum);
+    CHECK_EQ(h.poll_status(), static_cast<uint8_t>(HostProtocol::kStReadFast));
+    h.send_data(data.data(), 4096);
+    h.done(4096);
+    got.collect(p);
+    CHECK_EQ(got.calls, 2);
+    // Оставшийся вид - после второго окна.
+    CHECK(h.poll_status() >= HostProtocol::kStFileInfo && h.poll_status() <= HostProtocol::kStSpectrum);
+    h.command(HostProtocol::kHcDone);
+    CHECK_EQ(h.poll_status(), static_cast<uint8_t>(HostProtocol::kStNone));
+}
+
+// Трек без сэмплов: кадр из нулей уходит, хотя числа не менялись; кадр с
+// сэмплами при прежних числах не повторяется.
+void test_psram_stats_without_samples() {
+    std::printf("test_psram_stats_without_samples\n");
+
+    HostProtocol p;
+    HostProtocol::Callbacks cb;
+    p.set_callbacks(cb);
+    Host h(p);
+
+    h.command(HostProtocol::kHcStart, 0x00, 0x00, 0x10, 0x00, 2, 0x3f);
+    auto drain = [&] {
+        while (h.poll_status() != static_cast<uint8_t>(HostProtocol::kStNone)) {
+            h.command(HostProtocol::kHcDone);
+        }
+    };
+    drain();
+    p.set_psram_stats(0, 0, 0);
+    p.poll();
+    CHECK_EQ(h.poll_status(), static_cast<uint8_t>(HostProtocol::kStPsramStats));
+    drain();
+    p.set_psram_stats(5, 0, 5);
+    p.poll();
+    CHECK_EQ(h.poll_status(), static_cast<uint8_t>(HostProtocol::kStPsramStats));
+    drain();
+    p.set_psram_stats(5, 0, 5);
+    p.poll();
+    CHECK_EQ(h.poll_status(), static_cast<uint8_t>(HostProtocol::kStNone));
+}
+
 // Файловый запрос обгоняет телеметрию: данные важнее рассказов о них.
 void test_file_request_beats_telemetry() {
     std::printf("test_file_request_beats_telemetry\n");
@@ -1075,6 +1153,150 @@ void test_overflow_is_clamped_and_counted() {
     CHECK_EQ(p.arg_overflow(), 0u);
 }
 
+// Каждый счётчик сбоев: аксессор, снимок counters(), разность за сессию и
+// итог прошлой сессии сходятся поле в поле.
+void test_counters_every_field() {
+    std::printf("test_counters_every_field\n");
+
+    HostProtocol p;
+    Host h(p);
+    auto same = [&p](const HostProtocol::Counters& c) {
+        CHECK_EQ(c.naks, p.nak_total());
+        CHECK_EQ(c.nak_giveups, p.nak_giveups());
+        CHECK_EQ(c.data_overflow, p.data_overflow());
+        CHECK_EQ(c.done_overflow, p.done_overflow());
+        CHECK_EQ(c.arg_overflow, p.arg_overflow());
+        CHECK_EQ(c.events_lost, p.debug_events_lost());
+        CHECK_EQ(c.unknown, p.unknown_commands());
+        CHECK_EQ(c.data_short, p.data_short());
+        CHECK_EQ(c.short_done, p.short_done());
+        const HostProtocol::StateSnapshot s = p.state_snapshot();
+        CHECK_EQ(s.unknown_commands, p.unknown_commands());
+        CHECK_EQ(s.data_short, p.data_short());
+        CHECK_EQ(s.short_done, p.short_done());
+    };
+    auto equal = [](const HostProtocol::Counters& a, const HostProtocol::Counters& b) {
+        return a.naks == b.naks && a.nak_giveups == b.nak_giveups && a.data_overflow == b.data_overflow && a.done_overflow == b.done_overflow &&
+               a.arg_overflow == b.arg_overflow && a.events_lost == b.events_lost && a.unknown == b.unknown && a.data_short == b.data_short &&
+               a.short_done == b.short_done;
+    };
+    std::vector<uint8_t> data(HostProtocol::kDataBufferBytes + 5, 0x33);
+
+    h.command(HostProtocol::kHcStart, 0x00, 0x00, 0x10, 0x00, 2, 0);
+    // Три NAK на окно - три NAK и одна сдача.
+    p.request_file_chunk(0, 4096);
+    p.poll();
+    for (uint8_t i = 0; i < HostProtocol::kMaxNak; ++i)
+        h.command(HostProtocol::kHcNak);
+    h.command(0x55); // неизвестная команда
+    // Пять байт сверх окна и длина в DONE больше окна.
+    p.request_file_chunk(4096, 4096);
+    p.poll();
+    h.send_data(data.data(), static_cast<uint16_t>(data.size()));
+    h.done(5000);
+    // Окно подтверждено короче запроса.
+    p.request_file_chunk(8192, 4096);
+    p.poll();
+    h.send_data(data.data(), 100);
+    h.done(100);
+    // Байт окна потерян: окно просится снова и приходит целым.
+    p.request_file_chunk(12288, 4096);
+    p.poll();
+    h.send_data(data.data(), 10);
+    h.done(20);
+    h.send_data(data.data(), 4096);
+    h.done(4096);
+    // События журнала без разбора - потери.
+    for (int i = 0; i < 40; ++i)
+        p.reset();
+
+    const HostProtocol::Counters first = p.counters();
+    same(first);
+    CHECK_EQ(first.naks, 3u);
+    CHECK_EQ(first.nak_giveups, 1u);
+    CHECK_EQ(first.unknown, 1u);
+    CHECK_EQ(first.data_overflow, 5u);
+    CHECK_EQ(first.done_overflow, 1u);
+    CHECK_EQ(first.short_done, 1u);
+    CHECK_EQ(first.data_short, 1u);
+    CHECK_EQ(first.arg_overflow, 0u);
+    CHECK(first.events_lost > 0u);
+    CHECK(equal(p.session_counters(), first));
+
+    HostProtocol::DebugEvent e;
+    while (p.try_pop_debug_event(e)) {
+    }
+    h.command(HostProtocol::kHcStart, 0x00, 0x00, 0x10, 0x00, 2, 0);
+    CHECK(equal(p.previous_session_counters(), first));
+    CHECK(equal(p.session_counters(), HostProtocol::Counters{}));
+    p.request_file_chunk(0, 4096);
+    p.poll();
+    h.command(HostProtocol::kHcNak);
+    h.command(0x56);
+    same(p.counters());
+    CHECK_EQ(p.session_counters().naks, 1u);
+    CHECK_EQ(p.session_counters().unknown, 1u);
+    CHECK_EQ(p.counters().naks, 4u);
+    CHECK_EQ(p.counters().unknown, 2u);
+    CHECK(equal(p.previous_session_counters(), first));
+}
+
+// Сеттеры телеметрии: прежнее значение кадра не взводит, новое взводит, в
+// кадре - ровно переданные байты.
+void test_telemetry_setters_skip_unchanged() {
+    std::printf("test_telemetry_setters_skip_unchanged\n");
+
+    HostProtocol p;
+    Host h(p);
+    h.command(HostProtocol::kHcStart, 0x00, 0x00, 0x10, 0x00, 2,
+              HostProtocol::kTelemetryVu | HostProtocol::kTelemetrySpectrum | HostProtocol::kTelemetryEngineLoad);
+    CHECK_EQ(h.poll_status(), static_cast<uint8_t>(HostProtocol::kStNone));
+    auto frame = [&](uint8_t code, const std::vector<uint8_t>& want) {
+        p.poll();
+        CHECK_EQ(h.poll_status(), code);
+        std::vector<uint8_t> a(want.size() + 1);
+        CHECK(h.read_args(a.data(), static_cast<uint8_t>(a.size())));
+        a.pop_back();
+        CHECK(a == want);
+        h.command(HostProtocol::kHcDone);
+    };
+    auto none = [&] {
+        p.poll();
+        CHECK_EQ(h.poll_status(), static_cast<uint8_t>(HostProtocol::kStNone));
+    };
+
+    p.set_vu(0, 0);
+    none(); // нули после сброса - уже отправленное значение
+    p.set_vu(5, 6);
+    frame(HostProtocol::kStVu, {5, 6});
+    p.set_vu(5, 6);
+    none();
+    p.set_vu(5, 7);
+    frame(HostProtocol::kStVu, {5, 7});
+
+    uint8_t bands[16] = {};
+    p.set_spectrum(bands);
+    none();
+    for (uint8_t i = 0; i < 16; ++i)
+        bands[i] = static_cast<uint8_t>(i * 3 + 1);
+    p.set_spectrum(bands);
+    frame(HostProtocol::kStSpectrum, std::vector<uint8_t>(bands, bands + 16));
+    p.set_spectrum(bands);
+    none();
+    bands[15] = 0;
+    p.set_spectrum(bands);
+    frame(HostProtocol::kStSpectrum, std::vector<uint8_t>(bands, bands + 16));
+
+    p.set_engine_load(0, 0, 0, 0);
+    none();
+    p.set_engine_load(9, 12, 55, 2);
+    frame(HostProtocol::kStEngineLoad, {9, 12, 55, 2});
+    p.set_engine_load(9, 12, 55, 2);
+    none();
+    p.set_engine_load(9, 12, 55, 3);
+    frame(HostProtocol::kStEngineLoad, {9, 12, 55, 3});
+}
+
 } // namespace
 
 // Управление воспроизведением: kHcTransport. Команда снимается чтением,
@@ -1098,23 +1320,12 @@ void test_transport_request_is_taken_once() {
     CHECK(p.take_transport_request() == TransportOp::SeekBackward);
 }
 
-// Конфигуратор: просьба пересчитать страницу и ответ на неё.
-void test_config_refresh_and_exit() {
-    std::printf("test_config_refresh_and_exit\n");
+// Конфигуратор: чем кончить работу.
+void test_config_exit() {
+    std::printf("test_config_exit\n");
 
     HostProtocol p;
     Host h(p);
-    CHECK(!p.take_config_refresh());
-
-    h.command(HostProtocol::kHcConfigRefresh);
-    CHECK(p.take_config_refresh());
-    CHECK(!p.take_config_refresh()); // снимается чтением
-
-    // Ответ конфигуратору уходит отдельным кодом.
-    p.arm_config_done(true);
-    CHECK_EQ(h.poll_status(), static_cast<uint8_t>(HostProtocol::kStConfigDone));
-    h.command(HostProtocol::kHcDone);
-
     // Чем кончить работу: три разных исхода, и None до просьбы.
     CHECK(p.take_config_exit() == ConfigExit::None);
     h.command(HostProtocol::kHcConfigExit, static_cast<uint8_t>(ConfigExit::Save));
@@ -1166,11 +1377,122 @@ void test_position_flags_do_not_overwrite_state() {
     CHECK_EQ(args[2], static_cast<uint8_t>(PlaybackState::Ended));
 }
 
+// Поставщик метаданных: count кадров, тип 0x10 + номер, бит 7 у последнего.
+struct FakeMeta {
+    uint8_t count = 0;
+    static bool frame(void* user, uint8_t k, uint8_t (&out)[HostProtocol::kTrackMetaBytes]) {
+        const FakeMeta* f = static_cast<const FakeMeta*>(user);
+        if (k >= f->count) return false;
+        std::memset(out, 0, sizeof(out));
+        out[0] = static_cast<uint8_t>(0x10 + k + (k + 1 == f->count ? HostProtocol::kTrackMetaLast : 0));
+        out[1] = 0xf0;
+        out[2] = k;
+        return true;
+    }
+};
+
+// Метаданные: после 0x15, кадр за кадром, бит 7 на последнем, дальше
+// ничего; без бита 6 в маске - ни кадра.
+void test_track_meta_order() {
+    std::printf("test_track_meta_order\n");
+
+    HostProtocol p;
+    Host h(p);
+    FakeMeta info{3};
+    h.command(HostProtocol::kHcStart, 0x00, 0x00, 0x10, 0x00, 2, HostProtocol::kTelemetryFileInfo | HostProtocol::kTelemetryTrackMeta);
+    p.set_file_info(1, 2, 3, 4, 5);
+    p.set_track_meta(&FakeMeta::frame, &info);
+    p.poll();
+    CHECK_EQ(h.poll_status(), static_cast<uint8_t>(HostProtocol::kStFileInfo));
+    h.command(HostProtocol::kHcDone);
+    for (uint8_t k = 0; k < 3; ++k) {
+        uint8_t a[HostProtocol::kTrackMetaBytes + 1];
+        CHECK_EQ(h.poll_status(), static_cast<uint8_t>(HostProtocol::kStTrackMeta));
+        CHECK(h.read_args(a, sizeof(a)));
+        CHECK_EQ(a[0], static_cast<uint8_t>(0x10 + k + (k == 2 ? 0x80 : 0)));
+        CHECK_EQ(a[2], k);
+        h.command(HostProtocol::kHcDone);
+    }
+    CHECK_EQ(h.poll_status(), static_cast<uint8_t>(HostProtocol::kStNone));
+
+    // Хост без бита 6.
+    HostProtocol q;
+    Host g(q);
+    g.command(HostProtocol::kHcStart, 0x00, 0x00, 0x10, 0x00, 2, HostProtocol::kTelemetryFileInfo);
+    q.set_file_info(1, 2, 3, 4, 5);
+    q.set_track_meta(&FakeMeta::frame, &info);
+    q.poll();
+    CHECK_EQ(g.poll_status(), static_cast<uint8_t>(HostProtocol::kStFileInfo));
+    g.command(HostProtocol::kHcDone);
+    CHECK_EQ(g.poll_status(), static_cast<uint8_t>(HostProtocol::kStNone));
+}
+
+// Очередь метаданных раньше 0x15 по круговому обходу - вперёд всё равно
+// 0x15: по нему хост стирает прежние.
+void test_track_meta_after_file_info() {
+    std::printf("test_track_meta_after_file_info\n");
+
+    HostProtocol p;
+    Host h(p);
+    FakeMeta info{1};
+    h.command(HostProtocol::kHcStart, 0x00, 0x00, 0x10, 0x00, 2, 0x7f);
+    CHECK_EQ(h.poll_status(), static_cast<uint8_t>(HostProtocol::kStPosition));
+    h.command(HostProtocol::kHcDone);
+    // Курсор после загрузки ядра - на метаданных.
+    p.set_engine_load(1, 2, 3, 4);
+    p.poll();
+    CHECK_EQ(h.poll_status(), static_cast<uint8_t>(HostProtocol::kStEngineLoad));
+    h.command(HostProtocol::kHcDone);
+    p.set_file_info(1, 2, 3, 4, 5);
+    p.set_track_meta(&FakeMeta::frame, &info);
+    p.poll();
+    CHECK_EQ(h.poll_status(), static_cast<uint8_t>(HostProtocol::kStFileInfo));
+    h.command(HostProtocol::kHcDone);
+    CHECK_EQ(h.poll_status(), static_cast<uint8_t>(HostProtocol::kStTrackMeta));
+    h.command(HostProtocol::kHcDone);
+    CHECK_EQ(h.poll_status(), static_cast<uint8_t>(HostProtocol::kStNone));
+}
+
+// Плата сдалась на кадре метаданных - остаток не шлётся; новый 0x15 бросает
+// недосланное прошлого трека.
+void test_track_meta_drops_rest() {
+    std::printf("test_track_meta_drops_rest\n");
+
+    HostProtocol p;
+    Host h(p);
+    FakeMeta info{3};
+    h.command(HostProtocol::kHcStart, 0x00, 0x00, 0x10, 0x00, 2, HostProtocol::kTelemetryTrackMeta);
+    p.set_track_meta(&FakeMeta::frame, &info);
+    p.poll();
+    CHECK_EQ(h.poll_status(), static_cast<uint8_t>(HostProtocol::kStTrackMeta));
+    h.command(HostProtocol::kHcDone);
+    for (uint8_t i = 0; i < HostProtocol::kMaxNak; ++i)
+        h.command(HostProtocol::kHcNak);
+    CHECK_EQ(p.nak_giveups(), 1u);
+    p.poll();
+    CHECK_EQ(h.poll_status(), static_cast<uint8_t>(HostProtocol::kStNone));
+
+    p.set_track_meta(&FakeMeta::frame, &info);
+    p.poll();
+    CHECK_EQ(h.poll_status(), static_cast<uint8_t>(HostProtocol::kStTrackMeta));
+    h.command(HostProtocol::kHcDone);
+    // Кадр 1 уже выставлен подтверждением кадра 0; после него - ничего.
+    p.set_file_info(1, 2, 3, 4, 5);
+    CHECK_EQ(h.poll_status(), static_cast<uint8_t>(HostProtocol::kStTrackMeta));
+    h.command(HostProtocol::kHcDone);
+    CHECK_EQ(h.poll_status(), static_cast<uint8_t>(HostProtocol::kStNone));
+}
+
 void run_host_protocol_tests() {
+    test_track_meta_order();
+    test_track_meta_after_file_info();
+    test_track_meta_drops_rest();
     test_transport_request_is_taken_once();
-    test_config_refresh_and_exit();
+    test_config_exit();
     test_position_flags_do_not_overwrite_state();
     test_overflow_is_clamped_and_counted();
+    test_counters_every_field();
+    test_telemetry_setters_skip_unchanged();
     test_reset_gives_board_name();
     test_end_session_keeps_board_name_nak();
     test_end_session_mid_command_keeps_frame();
@@ -1189,6 +1511,8 @@ void run_host_protocol_tests() {
     test_session_start_fields();
     test_telemetry_is_just_another_command();
     test_telemetry_round_robin_order();
+    test_telemetry_between_windows();
+    test_psram_stats_without_samples();
     test_file_request_beats_telemetry();
     test_trace_does_not_disturb_armed_command();
     test_host_byte_during_arming_hides_command();

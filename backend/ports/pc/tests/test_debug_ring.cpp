@@ -29,18 +29,28 @@ struct Sink {
     }
 };
 
+// Каждому кольцу теста - своя память, выдаётся при первом сбросе.
 void reset(Ring& r, uint32_t at) {
+    static uint8_t pool[6][debug_ring::kRingBytes];
+    static uint32_t used = 0;
+    if (r.data == nullptr) debug_ring::attach(r, pool[used++], debug_ring::kRingBytes);
     r.head.store(at);
     r.tail.store(at);
     r.dropped.store(0);
 }
 
+// Начатая строка между вызовами.
+struct Cursor {
+    uint32_t end = 0;
+    bool open    = false;
+};
+
 // Всё, что есть в кольце, построчно.
-uint32_t drain_all(Ring& r, uint32_t& left, Sink& k) {
+uint32_t drain_all(Ring& r, Cursor& left, Sink& k) {
     uint32_t total = 0;
     for (;;) {
         bool full         = false;
-        const uint32_t n  = debug_ring::drain_line(r, UINT32_MAX, left, k, full);
+        const uint32_t n  = debug_ring::drain_line(r, UINT32_MAX, left.end, left.open, k, full);
         total            += n;
         if (full || n == 0) return total;
     }
@@ -62,10 +72,10 @@ void test_lengths() {
         const std::string s = text(len, len);
         CHECK(debug_ring::push(r, s.data(), len));
         Sink k;
-        uint32_t left = 0;
+        Cursor left;
         CHECK_EQ(drain_all(r, left, k), len);
         CHECK(k.out == s);
-        CHECK_EQ(left, 0u);
+        CHECK(!left.open);
         CHECK_EQ(r.tail.load(), r.head.load());
     }
     reset(r, 0);
@@ -76,16 +86,18 @@ void test_lengths() {
     // Пустая строка не пишется.
     CHECK(debug_ring::push(r, "", 0));
     CHECK_EQ(r.head.load(), 0u);
-    uint32_t left = 0;
+    Cursor left;
     // Полное кольцо: следующая строка теряется целиком, прежние целы.
     reset(r, 0);
-    const std::string half = text(1000, 3);
-    CHECK(debug_ring::push(r, half.data(), 1000));
-    CHECK(debug_ring::push(r, half.data(), 1000));
+    // Две строки с заголовками занимают кольцо без 96 байт.
+    constexpr uint32_t kHalf = debug_ring::kRingBytes / 2u - debug_ring::kHeaderBytes - 48u;
+    const std::string half   = text(kHalf, 3);
+    CHECK(debug_ring::push(r, half.data(), kHalf));
+    CHECK(debug_ring::push(r, half.data(), kHalf));
     CHECK(!debug_ring::push(r, half.data(), 100));
     CHECK_EQ(r.dropped.load(), 1u);
     Sink all;
-    CHECK_EQ(drain_all(r, left, all), 2000u);
+    CHECK_EQ(drain_all(r, left, all), 2u * kHalf);
     CHECK(all.out == half + half);
 }
 
@@ -99,7 +111,7 @@ void test_wrap() {
         CHECK(debug_ring::push(r, s.data(), static_cast<uint32_t>(s.size())));
         expect += s;
         Sink k;
-        uint32_t left = 0;
+        Cursor left;
         drain_all(r, left, k);
         got += k.out;
     }
@@ -168,7 +180,7 @@ void test_threads() {
         done.store(true);
     });
     std::string acc;
-    uint32_t left = 0;
+    Cursor left;
     uint32_t got  = 0;
     uint32_t torn = 0;
     int64_t last  = -1;
@@ -193,7 +205,7 @@ void test_threads() {
             ++got;
         }
         acc.erase(0, pos);
-        if (fin && k.out.empty() && left == 0 && r.head.load() == r.tail.load()) break;
+        if (fin && k.out.empty() && !left.open && r.head.load() == r.tail.load()) break;
     }
     writer.join();
     CHECK_EQ(got + r.dropped.load(), kLines);
@@ -204,7 +216,32 @@ void test_threads() {
 
 } // namespace
 
+// Проход брошен посреди строки (вытеснившая задача упала, журнал
+// сбрасывается на отказе): хвост кольца остаётся на том, что проход успел
+// зафиксировать. Новый проход с тем же состоянием отдаёт строку и
+// следующую, без чтения текста как заголовков.
+void test_abandoned_pass() {
+    Ring r;
+    reset(r, 0);
+    const std::string a = text(28, 1) + "\n", b = text(29, 2) + "\n";
+    CHECK(debug_ring::push(r, a.data(), static_cast<uint32_t>(a.size())));
+    CHECK(debug_ring::push(r, b.data(), static_cast<uint32_t>(b.size())));
+    Cursor c;
+    Sink part;
+    part.cap  = 10;
+    bool full = false;
+    debug_ring::drain_line(r, UINT32_MAX, c.end, c.open, part, full);
+    // Брошен: зафиксированное - только заголовок.
+    r.tail.store(debug_ring::kHeaderBytes);
+    Sink rest;
+    drain_all(r, c, rest);
+    std::printf("  abandoned pass: resumed %zu bytes, tail %u head %u\n", rest.out.size(), r.tail.load(), r.head.load());
+    CHECK(rest.out == a + b);
+    CHECK_EQ(r.tail.load(), r.head.load());
+}
+
 void run_debug_ring_tests() {
+    test_abandoned_pass();
     test_lengths();
     test_wrap();
     test_pair(3, UINT32_MAX);

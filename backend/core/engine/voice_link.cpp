@@ -22,6 +22,7 @@ void VoiceLink::trigger(uint8_t slot, const soundsinth::model::SampleDescriptor&
     // петля и её границы, позиция после подготовки интерполяции (один отсчёт,
     // второй - если сэмпл не кончился), дробная часть с нуля.
     sounding_[slot] = start.sounds;
+    sustain_[slot]  = start.sounds && start.loop_ok && sample.sus_loop;
     if (start.sounds) {
         sounding_loop_[slot]       = start.loop_ok;
         sounding_loop_start_[slot] = sample.loop_start;
@@ -41,6 +42,7 @@ void VoiceLink::trigger(uint8_t slot, const soundsinth::model::SampleDescriptor&
     if (start.sounds) cmd.flags |= kTriggerSounds;
     if (start.loop_ok) cmd.flags |= kTriggerLoop;
     if (voice_hermite(sample, quirks)) cmd.flags |= kTriggerHermite;
+    if (start.steps) cmd.flags |= kTriggerSteps;
     cmd.u.trig.sample                = &sample;
     cmd.u.trig.offset                = start.offset;
     cmd.u.trig.first_page            = first_page;
@@ -61,6 +63,7 @@ void VoiceLink::move(uint8_t from, uint8_t to) {
     sounding_loop_[to]       = sounding_loop_[from];
     sounding_loop_start_[to] = sounding_loop_start_[from];
     sounding_loop_end_[to]   = sounding_loop_end_[from];
+    sustain_[to]             = sustain_[from];
     // Исходный слот не гасится: микшер копирует голос, а не переносит, и
     // voices[from] остаётся звучащим до следующего запуска на этом слоте.
     step_[to]          = step_[from];
@@ -74,6 +77,23 @@ void VoiceLink::move(uint8_t from, uint8_t to) {
 void VoiceLink::fade_before_missing(uint8_t slot) {
     model_tail(slot);
     send(VoiceOp::FadeBeforeMissing, slot);
+}
+
+void VoiceLink::release_sustain(uint8_t slot, uint32_t loop_start, uint32_t loop_end, bool loop_enabled, uint16_t checkpoint_first_page) {
+    if (!sustain_[slot]) return;
+    sustain_[slot] = false;
+    // Модель звучания: позиция остаётся, меняется только петля. Незацикленный
+    // дальше кончится по loop_end - он и есть конец данных.
+    if (sounding_[slot]) {
+        sounding_loop_[slot]       = loop_enabled;
+        sounding_loop_start_[slot] = loop_start;
+        sounding_loop_end_[slot]   = loop_end;
+    }
+    VoiceCommand cmd{VoiceOp::ReleaseSustain, slot, 0, static_cast<uint8_t>(loop_enabled ? 1 : 0), {}};
+    cmd.u.val.x = static_cast<int32_t>(loop_start);
+    cmd.u.val.y = static_cast<int32_t>(loop_end);
+    cmd.u.val.z = checkpoint_first_page;
+    push(cmd);
 }
 
 void VoiceLink::fade_stopped(bool wave_tail) {
@@ -118,6 +138,7 @@ void VoiceLink::flush() {
                 TriggerStart start;
                 start.sounds  = (cmd.flags & kTriggerSounds) != 0;
                 start.loop_ok = (cmd.flags & kTriggerLoop) != 0;
+                start.steps   = (cmd.flags & kTriggerSteps) != 0;
                 start.offset  = cmd.u.trig.offset;
                 mixer.trigger(cmd.slot, psram, *cmd.u.trig.sample, cmd.u.trig.first_page, cmd.u.trig.checkpoint_first_page, start,
                               (cmd.flags & kTriggerHermite) != 0);
@@ -128,6 +149,10 @@ void VoiceLink::flush() {
                 break;
             case VoiceOp::FadeBeforeMissing:
                 mixer.fade_before_missing(cmd.slot);
+                break;
+            case VoiceOp::ReleaseSustain:
+                voice_release_sustain(mixer.voices[cmd.slot], psram, static_cast<uint32_t>(cmd.u.val.x), static_cast<uint32_t>(cmd.u.val.y), cmd.flags != 0,
+                                      static_cast<uint16_t>(cmd.u.val.z));
                 break;
             case VoiceOp::Move:
                 mixer.move(cmd.slot, cmd.arg);

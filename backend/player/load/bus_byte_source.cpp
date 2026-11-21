@@ -6,6 +6,8 @@
 
 #include "platform/hot_path.h"
 
+#include "player/shared_state.h"
+
 // Весь файл в SRAM: read_fn и request_window крутят service() всю загрузку трека.
 
 namespace player::load {
@@ -17,13 +19,17 @@ void BusByteSource::request_window(uint32_t offset, uint32_t n) {
     window_len_  = 0;
     window_base_ = offset;
     protocol_.request_file_chunk(offset, static_cast<uint16_t>(n));
-    uint16_t len = 0;
+    // Сброс машины - тот же обрыв, что RESET хоста: программа, читавшая
+    // файл, исчезла, и окна не будет никогда.
+    const uint32_t resets = shared::g_machine_resets.load(std::memory_order_relaxed);
+    uint16_t len          = 0;
     while (!protocol_.take_received(len)) {
+        if (shared::g_machine_resets.load(std::memory_order_relaxed) != resets) aborted_ = true;
         if (aborted_) return;
         service_(service_user_);
     }
     window_     = protocol_.data_buffer();
-    window_len_ = std::min<uint32_t>(len, player::protocol::HostProtocol::kDataBufferBytes);
+    window_len_ = std::min<uint32_t>(len, protocol::HostProtocol::kDataBufferBytes);
 }
 
 SOUNDSINTH_HOT_PATH_ATTR("bbs_read_fn")
@@ -53,7 +59,7 @@ uint32_t BusByteSource::read_fn(void* self, void* dst, uint32_t n) {
         // pos_ внутри запрошенного окна: base отстоит от него меньше чем на сектор.
         const uint32_t sector = src->protocol_.sector_size_bytes();
         const uint32_t base   = sector ? (src->pos_ & ~(sector - 1u)) : src->pos_; // сектор - степень двойки
-        const uint32_t want   = std::min<uint32_t>(player::protocol::HostProtocol::kDataBufferBytes, src->file_length_ - base);
+        const uint32_t want   = std::min<uint32_t>(protocol::HostProtocol::kDataBufferBytes, src->file_length_ - base);
         src->request_window(base, want);
 
         // Окно не накрыло pos_: сброс, протокол сдался (длина 0) или хост

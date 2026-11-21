@@ -1,0 +1,34 @@
+/* Память шины по постоянным адресам, область BUSMEM.
+   Секция NOLOAD: crt0 её не обнуляет, это делает main первым действием
+   от __busmem_start__ до __busmem_end__.
+
+   ОЗУ DivMMC (bus_divmmc_ram) - символ, а не секция: в банках 8-15 по тем
+   же адресам выполняется код BDI (.bdi_code), а пересечение двух секций
+   компоновщик не пропускает. */
+SECTIONS
+{
+    .busmem (NOLOAD) : {
+        __busmem_start__ = .;
+        /* Первый уровень карты трапов DivMMC - 1 КБ на границе 1 КБ. В .bss
+           она одна требовала этого выравнивания и сдвигала всю .bss. */
+        __busmem_traplo__ = .;
+        *(.busmem.traplo)
+        /* Таблица портов при DOS вплотную перед таблицей портов: пара на
+           границе 2 КБ, автомат выбирает таблицу разрядом 10 адреса. */
+        bus_porttab_dos = .;
+        . += 0x400;
+        __busmem_porttab__ = .;
+        *(.busmem.porttab)
+        *(.busmem.rom)
+        /* В режиме TR-DOS таблицы страниц - память навигатора образов:
+           банк окна - разряд 14 адреса, начало на границе 32 КБ. */
+        __busmem_pagetabs__ = .;
+        *(.busmem.pagetabs)
+    } > BUSMEM
+    ASSERT(__busmem_traplo__ % 0x400 == 0 && bus_porttab_dos == __busmem_traplo__ + 0x400, "the trap map takes 1 KB on a 1 KB boundary before the port tables")
+    ASSERT(bus_porttab_dos % 0x800 == 0 && __busmem_porttab__ == bus_porttab_dos + 0x400, "the DOS port table pairs with the port table on a 2 KB boundary")
+    ASSERT(__busmem_pagetabs__ % 0x8000 == 0, "the page tables hold the image navigator in the TR-DOS mode and must start on a 32 KB boundary")
+    __busmem_end__ = ORIGIN(BUSMEM) + LENGTH(BUSMEM);
+    ASSERT(ADDR(.busmem) + SIZEOF(.busmem) <= bus_divmmc_ram, "bus tables overlap the DivMMC RAM")
+    ASSERT(bus_divmmc_ram % 0x10000 == 0, "the DivMMC RAM must start on a 64 KB boundary")
+}

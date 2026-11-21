@@ -202,16 +202,29 @@ void check_planner(const FormatOps& ops, const char* path) {
     {
         std::vector<uint16_t> pb(indices.size());
         std::vector<uint16_t> pb_last_use(last_use.size());
-        const player::load::PlaybackPlan pb_planned = player::load::plan_playback_order(song, mem.psram, pb.data(), static_cast<uint16_t>(pb.size()),
-                                                                                        pb_last_use.data(), player::load::LoadOrder::ByPlayback);
-        const uint16_t pb_count                     = pb_planned.count;
-        const uint16_t pb_prefetch                  = pb_planned.prefetch_count;
+        // Мусор до вызова: незвучащие планировщик обязан пометить сам.
+        std::vector<uint16_t> pb_first_use(last_use.size(), 0x1234);
+        const player::load::PlaybackPlan pb_planned =
+            player::load::plan_playback_order(song, mem.psram, pb.data(), static_cast<uint16_t>(pb.size()), pb_last_use.data(),
+                                              player::load::LoadOrder::ByPlayback, player::load::kPrefetchOrderPositions, pb_first_use.data());
+        const uint16_t pb_count    = pb_planned.count;
+        const uint16_t pb_prefetch = pb_planned.prefetch_count;
         CHECK_EQ(pb_count, count);
         CHECK_EQ(pb_prefetch, prefetch);
         for (uint16_t i = 0; i < pb_count; ++i)
             CHECK_EQ(pb[i], ref.first_appearance_order[i]);
         for (uint16_t i = 0; i < song.sample_count; ++i)
             CHECK_EQ(pb_last_use[i], last_use[i]);
+        // (5) first_use - первая позиция независимого обхода.
+        std::map<uint16_t, uint16_t> expect_first_use;
+        for (const auto& entry : ref.per_position) {
+            for (const uint16_t idx : entry.second)
+                expect_first_use.emplace(idx, entry.first); // pos растёт => первое вхождение
+        }
+        for (uint16_t i = 0; i < song.sample_count; ++i) {
+            const auto it = expect_first_use.find(i);
+            CHECK_EQ(pb_first_use[i], it == expect_first_use.end() ? player::load::kSampleNeverUsed : it->second);
+        }
     }
 
     // Сколько байт файла нужно прочитать, чтобы префетч состоялся, - это
@@ -354,6 +367,59 @@ void test_capacity_and_prefetch_positions() {
     memory::track_memory_destroy(mem);
 }
 
+// Сборщик плана из прохода длительности: позиция в проходе убывает на
+// переходе назад, поэтому first_use - минимум, last_use - максимум. Нота
+// без инструмента играет прежним инструментом канала; сэмпл за ёмкостью
+// массивов не пишется никуда.
+void test_plan_collect_row_extremes() {
+    std::printf("test_sample_prefetch_plan_collect_row_extremes\n");
+    soundsinth::model::SampleDescriptor samples[4];
+    soundsinth::model::Instrument instruments[4];
+    for (uint16_t i = 0; i < 4; ++i) {
+        samples[i].length_samples           = 1;
+        instruments[i].default_sample_index = i;
+    }
+    Song song;
+    song.samples            = samples;
+    song.sample_count       = 4;
+    song.instruments        = instruments;
+    song.instrument_count   = 4;
+    constexpr uint16_t kCap = 3;
+    uint16_t indices[kCap], last_use[kCap], first_use[kCap];
+    for (uint16_t i = 0; i < kCap; ++i)
+        indices[i] = last_use[i] = first_use[i] = 0x1234;
+    uint32_t words[4]        = {};
+    player::load::UseMap map = player::load::use_map_layout(kCap, 20);
+    map.words                = words;
+    player::load::PlanCollector pc;
+    player::load::plan_collect_begin(pc, song, indices, kCap, last_use, first_use);
+    pc.use_map     = &map;
+    const auto row = [&](uint16_t pos, uint16_t ins0, uint16_t ins1) {
+        PatternCell cells[2];
+        cells[0].note       = 60;
+        cells[0].instrument = ins0;
+        cells[1].note       = ins1 != 0 ? 60 : soundsinth::model::kNoteNone;
+        cells[1].instrument = ins1;
+        player::load::plan_collect_row(&pc, cells, 2, pos);
+    };
+    row(5, 3, 0); // сэмпл 2
+    row(3, 1, 4); // сэмпл 0; сэмпл 3 за ёмкостью
+    row(9, 0, 0); // канал 0 - прежним инструментом, сэмпл 0
+    row(1, 3, 0); // сэмпл 2 раньше всех
+    CHECK_EQ(pc.count, 2u);
+    CHECK_EQ(indices[0], 2u);
+    CHECK_EQ(indices[1], 0u);
+    CHECK_EQ(first_use[2], 1u);
+    CHECK_EQ(last_use[2], 5u);
+    CHECK_EQ(first_use[0], 3u);
+    CHECK_EQ(last_use[0], 9u);
+    CHECK_EQ(first_use[1], player::load::kSampleNeverUsed);
+    CHECK_EQ(last_use[1], player::load::kSampleNeverUsed);
+    CHECK_EQ(player::load::use_map_distance(map, 0, 4), 5u);
+    CHECK_EQ(player::load::use_map_distance(map, 2, 2), 3u);
+    CHECK_EQ(player::load::use_map_distance(map, 1, 0), player::load::kUseMapNever);
+}
+
 void test_sample_prefetch_matches_independent_walk() {
     std::printf("test_sample_prefetch_matches_independent_walk\n");
     const FormatOps kIt{&formats::it::load};
@@ -371,8 +437,34 @@ void test_sample_prefetch_matches_independent_walk() {
 
 } // namespace
 
+// Граница префетча - в сырых номерах order, как first_use: маркер в начале
+// order её не сдвигает. Деление устойчивое: у ByPlayback порядок первого
+// появления сохраняется.
+void test_split_prefetch_counts_raw_positions() {
+    std::vector<soundsinth::model::Pattern> pats(2);
+    for (auto& pt : pats) {
+        pt.psram_offset  = 0;
+        pt.channel_count = 4;
+    }
+    const uint16_t order[3] = {soundsinth::model::kOrderSkip, 0, 1};
+    soundsinth::model::Song song;
+    song.patterns      = pats.data();
+    song.pattern_count = 2;
+    song.order         = order;
+    song.order_count   = 3;
+    // Сэмплы 0..3: первое появление на сырых позициях 1, 2, 1, никогда.
+    const uint16_t first_use[4]           = {1, 2, 1, player::load::kSampleNeverUsed};
+    uint16_t idx[4]                       = {3, 2, 1, 0};
+    const player::load::PlaybackPlan plan = player::load::plan_split_prefetch(song, idx, 4, first_use, 1, player::load::LoadOrder::ByPlayback);
+    std::printf("  prefetch over 1 playable position after a marker: %u samples, order %u %u\n", plan.prefetch_count, idx[0], idx[1]);
+    CHECK_EQ(plan.prefetch_count, 2u);
+    CHECK(idx[0] == 2 && idx[1] == 0); // в прежнем порядке
+}
+
 void run_sample_prefetch_tests() {
+    test_split_prefetch_counts_raw_positions();
     test_sample_prefetch_matches_independent_walk();
     test_repeated_pattern_marks_last_occurrence();
     test_capacity_and_prefetch_positions();
+    test_plan_collect_row_extremes();
 }

@@ -9,4 +9,9 @@ namespace platform_pc {
 // SD-карты, сам FatFs (third_party/fatfs) не меняется.
 bool mount_disk_image(const char* path);
 
+// Диск без файла: сектор отдаёт функция (false - ошибка чтения). Запись
+// отвергается. nullptr - снять.
+using SectorReader = bool (*)(unsigned long lba, unsigned char* out);
+void mount_sector_reader(SectorReader reader);
+
 } // namespace platform_pc

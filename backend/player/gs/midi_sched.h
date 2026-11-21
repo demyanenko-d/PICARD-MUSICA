@@ -3,9 +3,9 @@
 
 // Расписание MIDI-файла по кадрам для залитого плеером проигрывателя.
 //
-// В этом режиме карта General Sound работает разборщиком: плеер отдаёт ей
-// файл целиком, а потом раз в кадр просит очередную порцию MIDI-байт и сам
-// выталкивает их в линию с порта A звукогенератора. Эти байты приходят на
+// В этом режиме плеер отдаёт эмуляции General Sound файл целиком, а потом
+// раз в кадр просит очередную порцию MIDI-байт и сам выталкивает её в
+// линию с порта A звукогенератора. Эти байты приходят на
 // отвод AY и играют живым MIDI.
 //
 // Всё, что нужно знать о файле, плеер подставляет в тело блоба перед
@@ -13,7 +13,7 @@
 // MThd поэтому не разбирается.
 //
 // Память: файл лежит в области GS, рабочие таблицы - там же, в её хвосте.
-// В SRAM не уходит ничего.
+// В SRAM - только сам объект: курсоры дорожек, счёт клавиш и столбиков.
 
 #include <cstdint>
 
@@ -52,7 +52,7 @@ inline constexpr uint16_t kMidiFrameData = 51;
 // Байт 21 - операнд команды `ld a,nn / and a / jp nz,<цикл кадра>`: ноль
 // там значит "кончили", и плеер уходит на следующий трек.
 inline constexpr uint16_t kMidiStatePlaying = 21;
-// Положение в тактах, которое плеер печатает шестью знаками (#EE38): 24
+// Положение в тиках MIDI, которое плеер печатает шестью знаками (#EE38): 24
 // бита из двух слов карты, в блоке старшим байтом вперёд.
 //
 //   17 - старший байт первого слова, у блоба он всегда ноль
@@ -73,31 +73,35 @@ inline constexpr uint16_t kMidiStateConst = 22;
 //
 // Клавиша - это нота минус 24 (так считает и карта: #5496 режет ноты ниже
 // 24 и выше 109). Октава занимает ровно 28 пикселей, полутона внутри неё
-// стоят по kKeyPixel; каждая клавиша светит тремя пикселями. Геометрия
+// стоят по kMidiKeyPixel; каждая клавиша светит тремя пикселями. Геометрия
 // выведена из рисунка плеера.
-// Сколько кадров горит строка дорожки после взятой ноты.
-inline constexpr uint8_t kMidiBlinkFrames = 3;
+inline constexpr uint16_t kMidiStateKeys = 24;
+inline constexpr uint16_t kMidiKeyRow    = 25; // байт в ряду
+inline constexpr unsigned kMidiKeyRows   = 3u;
+inline constexpr uint8_t kMidiKeysMax    = 85; // столько клавиш у рисунка
+inline constexpr uint8_t kMidiKeyLowest  = 24; // нота самой левой клавиши
+inline constexpr uint8_t kMidiOctavePx   = 28;
+inline constexpr unsigned kMidiSemitones = 12u;
+inline constexpr uint8_t kMidiKeyWidthPx = 3;
+// Левый пиксель клавиши внутри октавы, по полутонам.
+inline constexpr uint8_t kMidiKeyPixel[kMidiSemitones] = {0, 3, 5, 7, 10, 13, 15, 17, 19, 21, 23, 25};
+// Чёрные клавиши октавы: их полоска идёт вторым рядом.
+inline constexpr bool kMidiKeyBlack[kMidiSemitones] = {false, true, false, true, false, false, true, false, true, false, true, false};
 // Столбики нот над клавиатурой: 36 штук по три пикселя, байты 99..134
-// блока. Разбор #53E8 в теле блоба: столбик выбирается нотой ПО МОДУЛЮ 36,
+// блока. Разбор #53E8 в теле блоба: столбик выбирается нотой по модулю 36,
 // а значение - это скорость, делённая пополам. Плеер (#8C11) делит ещё раз
 // и получает высоту. Карта чистит их при чтении, то есть столбик живёт
 // один кадр.
-inline constexpr uint16_t kMidiStateBars   = 99;
-inline constexpr uint8_t kMidiBars         = 36;
-inline constexpr uint16_t kMidiStateKeys   = 24;
-inline constexpr uint16_t kMidiKeyRow      = 25; // байт в ряду
-inline constexpr uint8_t kMidiKeysMax      = 85; // столько клавиш у рисунка
-inline constexpr uint8_t kMidiKeyLowest    = 24; // нота самой левой клавиши
-inline constexpr uint8_t kMidiOctavePx     = 28;
-inline constexpr uint8_t kMidiKeyPixel[12] = {0, 3, 5, 7, 10, 13, 15, 17, 19, 21, 23, 25};
-// Чёрные клавиши октавы: их полоска идёт вторым рядом.
-inline constexpr bool kMidiKeyBlack[12] = {false, true, false, true, false, false, true, false, true, false, true, false};
+inline constexpr uint16_t kMidiStateBars = 99;
+inline constexpr uint8_t kMidiBars       = 36;
+static_assert(kMidiStateKeys + kMidiKeyRows * kMidiKeyRow == kMidiStateBars, "the key picture must end where the bars begin");
+static_assert(kMidiStateBars + kMidiBars == devices::gs::kMidiStateBytes, "the bars must end the state block");
+// Сколько кадров горит строка дорожки после взятой ноты.
+inline constexpr uint8_t kMidiBlinkFrames = 3;
 // Кадр Спектрума: расписание блоба идёт по прерыванию 50 Гц.
 inline constexpr uint32_t kMidiFrameUs = 20000;
 
-// Раскладка рабочей области. Лежит в хвосте области GS: файл .mid у плеера
-// не длиннее 64 КБ (поле длины в блобе шестнадцатиразрядное), и с ним она
-// не пересекается.
+// Раскладка рабочей области в хвосте области GS.
 inline constexpr uint32_t kMidiNamesAt = 0;
 inline constexpr uint32_t kMidiInfoAt  = kMidiNamesAt + devices::gs::kMidiNamesBytes;
 // Блока состояния здесь нет: он живёт в SRAM у автомата, потому что первые
@@ -141,9 +145,9 @@ public:
     uint32_t skipped() const { return skipped_; }
     uint32_t stopped_at() const { return stopped_at_; }
     uint32_t tempo_us() const { return tempo_us_; }
-    // Положение в тактах - то, что плеер показывает строкой Ticks.
+    // Положение в тиках MIDI - то, что плеер показывает строкой Ticks.
     uint32_t position_ticks() const { return static_cast<uint32_t>(now_q16_ >> 16); }
-    // Длина всей песни в тактах - её плеер печатает строкой Total и по ней
+    // Длина всей песни в тиках MIDI - её плеер печатает строкой Total и по ней
     // же рисует ход.
     uint32_t total_ticks() const { return total_ticks_; }
 
@@ -151,13 +155,19 @@ private:
     struct Track {
         uint32_t pos    = 0; // где читать следующее событие
         uint32_t end    = 0;
-        uint32_t tick   = 0; // абсолютный такт следующего события
+        uint32_t tick   = 0; // абсолютный тик следующего события
         uint8_t running = 0;
         bool done       = true;
     };
 
     // Переменная длина MIDI. false - вышли за дорожку.
     bool read_varlen(uint32_t& pos, uint32_t end, uint32_t& out) const;
+    // Статус события, явный или running; явный канальный становится running.
+    // 0 - события нет: дорожка кончилась или вместо статуса мусор.
+    uint8_t read_status(uint32_t& pos, uint32_t end, uint8_t& running) const;
+    // Тип мета-события (у дампа его нет) и длина тела. false - вышли за
+    // дорожку.
+    bool read_body(uint32_t& pos, uint32_t end, uint8_t status, uint8_t& type, uint32_t& len) const;
     // Поставить дорожку на следующее событие, прочитав дельту.
     void arm(Track& t);
     // Выдать событие дорожки в порцию. Возвращает false, если не поместилось.
@@ -172,7 +182,6 @@ private:
     uint32_t scan_total_ticks();
 
     const uint8_t* file_ = nullptr;
-    uint32_t len_        = 0;
     uint8_t* work_       = nullptr;
     uint8_t* state_      = nullptr;
     // Сколько кадров строка дорожки ещё горит. Карта так же гасит свои
@@ -183,8 +192,8 @@ private:
     uint8_t track_count_          = 0;
     uint16_t division_            = 0;
     uint32_t tempo_us_            = 500000; // умолчание MIDI: 120 долей в минуту
-    // Положение в тактах, Q16. Считается не накоплением приращения, а от
-    // опоры: такт кадра - дробь, и накопленное усечение уводило бы события
+    // Положение в тиках MIDI, Q16. Считается не накоплением приращения, а от
+    // опоры: тиков на кадр - дробь, и накопленное усечение уводило бы события
     // на кадр назад. Опора переставляется на смене темпа, между сменами
     // счёт идёт от неё в микросекундах.
     uint64_t tick_base_q16_ = 0;
@@ -195,7 +204,7 @@ private:
     // только выталкивает байты в линию, поэтому разрез получателю не
     // виден. Пара на всё расписание, а не поле дорожки: кадр обрывается на
     // первом же непоместившемся событии, значит недоданным может быть
-    // только один дамп. Отдаётся он прежде выбора дорожки по такту - иначе
+    // только один дамп. Отдаётся он прежде выбора дорожки по тику - иначе
     // чужие байты встанут в середину.
     uint8_t sysex_track_ = kMidiTracksMax;
     uint32_t sysex_left_ = 0;

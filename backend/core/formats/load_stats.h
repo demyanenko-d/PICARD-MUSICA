@@ -13,14 +13,14 @@
 namespace soundsinth::model {
 
 struct TrackerLoadStats {
-    uint16_t samples_nonresident   = 0; // сэмпл с данными, который не распаковывается (ADPCM)
-    uint16_t samples_dropped       = 0; // данные сэмпла не помещаются в файл - выброшен при разборе
-    uint16_t samples_failed        = 0; // полная загрузка: не лёг в PSRAM или каталог, файл оборвался
-    uint16_t first_failed_sample   = 0;
-    const char* first_failure      = nullptr;
-    uint16_t ignored_sustain_loops = 0; // IT: петля удержания сэмпла не воспроизводится
-    uint16_t ignored_autovibrato   = 0; // автовибрато сэмпла IT и инструмента XM не воспроизводится
-    uint32_t effect_cells_dropped  = 0; // ячейки с командой, которая не разбирается (Effect::None)
+    uint16_t samples_nonresident  = 0; // сэмпл с данными, который не распаковывается (ADPCM)
+    uint16_t samples_dropped      = 0; // данные сэмпла не помещаются в файл - выброшен при разборе
+    uint16_t samples_failed       = 0; // полная загрузка: не лёг в PSRAM или каталог, файл оборвался
+    uint16_t first_failed_sample  = 0;
+    const char* first_failure     = nullptr;
+    uint16_t sustain_loops        = 0; // IT: сэмплов с петлёй удержания (играет до Note-Off)
+    uint16_t autovibrato          = 0; // сэмплов с рабочим автовибрато (глубина и скорость ненулевые)
+    uint32_t effect_cells_dropped = 0; // ячейки с командой, которая не разбирается (Effect::None)
     // Где по заголовкам кончается файл: наибольшее смещение сэмпла плюс его
     // байты. У MOD это точная длина файла, у S3M, XM и IT - нижняя граница
     // (сжатые сэмплы своей длины в заголовке не несут). Принятого меньше -

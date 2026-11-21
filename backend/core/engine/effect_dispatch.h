@@ -38,6 +38,9 @@ struct DispatchContext {
     // Параметры общих эффектов (SetEffectParam), по model::FxParam. nullptr -
     // команда без действия.
     uint8_t* fx_params = nullptr;
+    // MOD_PANNING: глубина, на которую сужаются 8xx/E8x MOD. У прочих
+    // форматов 100 - панорама как в файле.
+    uint8_t mod_pan_percent = 100;
 
     // NNA: nna_user - указатель вызывающего, не DispatchContext*. Оба поля
     // nullptr - NNA нет.
@@ -48,9 +51,9 @@ struct DispatchContext {
 // Сброс каналов, панорама и громкость из заголовка - до sequencer_init: он
 // разбирает строку 0, и её Xxx, S8x, Mxx и панорама сэмпла ложатся поверх
 // заголовка (строка 0 с Mxx, Xxx или S8x - около 8% файлов IT).
-// pan_percent - глубина разводки Paula у MOD, проценты: 100 - до упора,
-// как у железа, 0 - все каналы по центру. Прочих форматов не касается:
-// у них панорама своя, из файла.
+// pan_percent - глубина разводки Paula у MOD, проценты, не больше 100: 100 -
+// до упора, как у железа, 0 - все каналы по центру. Прочих форматов не
+// касается: у них панорама своя, из файла.
 void channels_init(const soundsinth::model::Song& song, ChannelState* channels, uint8_t pan_percent = 100);
 
 // Разбор строки: у каждого канала - перехват NoteDelay, сброс флагов
@@ -99,6 +102,10 @@ void advance_envelope_and_fadeout(ChannelState& cs, bool amiga_pitch, soundsinth
 // SRAM: горячий цикл TrackerEngine зовёт их только на каналах с glissando
 // (около 0.2% файлов архива).
 uint16_t glissando_amiga_period(const ChannelState& cs, int8_t sample_finetune, bool nearest);
+
+// Синус IT (256 точек, +-64, побайтово по ITTECH.TXT) - общий для вибрато
+// эффекта и автовибрато сэмпла.
+int8_t it_sine(uint8_t phase);
 int32_t glissando_linear_pitch(const ChannelState& cs, int8_t sample_finetune, bool nearest);
 
 } // namespace soundsinth::engine

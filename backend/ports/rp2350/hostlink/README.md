@@ -1,7 +1,7 @@
 # hostlink - связь платы с хостом ZX Spectrum
 
 Модуль отвечает хосту по шине Z80, принимает от него файл частями и
-отдаёт телеметрию. Ядро связи (bus, host_protocol, hostlink) о музыке и
+отдаёт телеметрию. Ядро связи (bus, hostlink) о музыке и
 PSRAM не знает: потребитель получает байты и решает сам. Эмуляция GS
 живёт в плеере и зовёт загрузчик трека, divmmc - эмулятор SD.
 
@@ -15,7 +15,9 @@ hostlink/
   ports.pio         автоматы цикла ввода-вывода (IORQ) и rom_serve
   memory.pio        автоматы цикла памяти (MREQ) и трапы
   trap_join.pio     склейщики трапов DivMMC
-  trdos.pio         триггер TR-DOS (DOS_N)
+  reset_watch.pio   слежение за сбросом машины по тишине на M1
+  trdos.pio         триггер TR-DOS (DOS_N) и навигатор образов
+  pentagon.pio      своё ПЗУ Пентагона, вход в DOS и вывод DOS_N
   divmmc.*          DivMMC: своё ПЗУ и ОЗУ в окне 0x0000-0x3FFF
 
   rom_images/
@@ -31,7 +33,7 @@ hostlink/
 ```cpp
 #include "hostlink.h"
 
-soundsinth::io::HostProtocol g_protocol;
+player::protocol::HostProtocol g_protocol;
 
 void on_session(void* user, uint32_t sector, uint32_t length, uint8_t flags, uint8_t load_order) { /* ... */ }
 void on_reset(void* user) { /* ... */ }
@@ -39,7 +41,7 @@ void on_reset(void* user) { /* ... */ }
 // На том ядре, которое дальше будет обслуживать шину:
 hostlink::Callbacks cb{&my_state, &on_session, &on_reset};
 hostlink::init(g_protocol, cb);
-hostlink::release_host_reset();
+bus::release_host_reset(); // когда шина поднята
 
 for (;;) {
     hostlink::service();          // разобрать команду хоста, напечатать здоровье связи
@@ -80,7 +82,9 @@ const uint8_t* window = g_protocol.data_buffer();          // len байт, 0 - 
 pico_generate_pio_header(my_target ${CMAKE_CURRENT_LIST_DIR}/hostlink/ports.pio)
 pico_generate_pio_header(my_target ${CMAKE_CURRENT_LIST_DIR}/hostlink/memory.pio)
 pico_generate_pio_header(my_target ${CMAKE_CURRENT_LIST_DIR}/hostlink/trap_join.pio)
+pico_generate_pio_header(my_target ${CMAKE_CURRENT_LIST_DIR}/hostlink/reset_watch.pio)
 pico_generate_pio_header(my_target ${CMAKE_CURRENT_LIST_DIR}/hostlink/trdos.pio)
+pico_generate_pio_header(my_target ${CMAKE_CURRENT_LIST_DIR}/hostlink/pentagon.pio)
 ```
 
 ## Ограничения

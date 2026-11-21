@@ -3,6 +3,7 @@
 
 #include "platform/compiler.h"
 #include "platform/hot_path.h"
+
 #include "core/config.h"
 #include "core/audio/sound_source.h"
 #include "core/audio/saturate.h"

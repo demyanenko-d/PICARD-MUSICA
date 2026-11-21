@@ -9,17 +9,26 @@
 #include <cstdlib>
 #include <fstream>
 #include <memory>
+#include <string>
 #include <vector>
+
+#include "ay_rom_writer.h"
 
 #include "core/bank/bank_reader.h"
 #include "core/model/song.h"
 #include "core/formats/midi_live.h"
 #include "player/live/live_requests.h"
+#include "player/live/live_tap.h"
+#include "player/live/session.h"
+#include "player/shared_state.h"
 #include "core/memory/track_memory.h"
 #include "core/engine/tracker_engine.h"
 #include "core/formats/midi.h"
 #include "core/live_midi/live_stream.h"
 #include "core/audio/sound_source.h"
+
+extern char g_test_log[8192];
+extern uint32_t g_test_time_us;
 
 using namespace soundsinth;
 
@@ -285,9 +294,199 @@ void test_live_requests_ring() {
     CHECK_EQ(got, static_cast<uint16_t>(7));
 }
 
+// Рукопожатие памяти трека шагами двух ядер. Core0 вышел из режима, пока
+// Core1 был между проверкой просьбы и подтверждением: подтверждения на
+// снятую просьбу быть не должно, иначе следующий вход сбросит память под
+// фоновой догрузкой.
+void test_live_memory_handshake() {
+    std::printf("test_live_memory_handshake\n");
+    player::live::session_end();
+    player::live::request_track_memory();
+    CHECK(player::live::wants_track_memory());
+    player::live::session_end();
+    player::live::grant_track_memory();
+    CHECK(!player::live::track_memory_granted());
+
+    player::live::request_track_memory();
+    player::live::grant_track_memory();
+    CHECK(player::live::track_memory_granted());
+    CHECK(!player::live::wants_track_memory());
+    player::live::session_end();
+    CHECK(!player::live::track_memory_granted());
+}
+
+// Новый живой сеанс начинает счёт с нуля: строки, заказы, чтения, запас
+// кольца отвода и худшая строка прошлого сеанса в его журнал не попадают.
+void test_live_session_begin_clears_counters() {
+    std::printf("test_live_session_begin_clears_counters\n");
+    std::vector<uint8_t> blob = read_bank(kBankPath);
+    bank::Bank bnk;
+    if (blob.empty() || !bank::bank_open(blob.data(), static_cast<uint32_t>(blob.size()), bnk, nullptr)) {
+        std::printf("  SKIP: no bank\n");
+        return;
+    }
+    if (shared::g_track_memory.resident.base == nullptr) memory::track_memory_create(shared::g_track_memory);
+    shared::g_flash_bank = bnk;
+    auto stats           = [] {
+        g_test_log[0] = 0;
+        player::live::session_log_stats();
+        return std::string(g_test_log);
+    };
+    auto has = [](const std::string& log, const char* want) {
+        if (log.find(want) != std::string::npos) return true;
+        std::printf("  no \"%s\" in:\n%s", want, log.c_str());
+        return false;
+    };
+
+    player::live::session_end();
+    CHECK(player::live::session_begin(1000));
+    pc_tests::AyRomWriter rom;
+    rom.bytes({0xc0, 0x00});
+    rom.bytes({0x90, 60, 100});
+    for (const uint16_t w : rom.w)
+        player::live::tap_push(0, (w & midi_in::kAyWriteSelect) != 0 ? player::live::TapPort::AySelect : player::live::TapPort::AyData,
+                               static_cast<uint8_t>(w));
+    for (int i = 0; i < 3; ++i) {
+        player::live::live_row(player::live::row_user());
+        while (player::live::serve_requests()) {
+        }
+    }
+    const std::string first = stats();
+    CHECK(has(first, "over 3 rows"));
+    // В первом разборе могут быть и записи прошлых тестов.
+    const size_t peak_at = first.find("peak per drain ");
+    CHECK(peak_at != std::string::npos);
+    CHECK(peak_at != std::string::npos && std::stoul(first.substr(peak_at + 15)) >= rom.w.size());
+    CHECK(first.find("samples from flash 0 ") == std::string::npos);
+    CHECK(first.find("read queue peak 0,") == std::string::npos);
+
+    player::live::session_end();
+    CHECK(player::live::session_begin(2000));
+    const std::string again = stats();
+    CHECK(has(again, "samples from flash 0 (repeats 0, failures 0)"));
+    CHECK(has(again, "records retired 0 (waiting 0)"));
+    CHECK(has(again, "peak per drain 0 writes"));
+    CHECK(has(again, "row - peak 0 us, mean 0 us over 0 rows"));
+    CHECK(has(again, "worst row - instruments 0 (evicted 0), records 0, retires 0;"));
+    CHECK(has(again, "read queue peak 0, request waited max 0 rows (mean 0), read max 0 us (mean 0)"));
+    CHECK(again.find("silent notes") == std::string::npos);
+
+    player::live::session_end();
+    soundsinth::memory::track_memory_reset_for_new_track(shared::g_track_memory);
+    shared::g_flash_bank = bank::Bank{};
+}
+
+// Конец сеанса забывает поток: нота в очереди под форой и недособранное
+// сообщение не выходят в следующем сеансе.
+void test_live_session_end_forgets_stream() {
+    std::printf("test_live_session_end_forgets_stream\n");
+    std::vector<uint8_t> blob = read_bank(kBankPath);
+    bank::Bank bnk;
+    if (blob.empty() || !bank::bank_open(blob.data(), static_cast<uint32_t>(blob.size()), bnk, nullptr)) {
+        std::printf("  SKIP: no bank\n");
+        return;
+    }
+    if (shared::g_track_memory.resident.base == nullptr) memory::track_memory_create(shared::g_track_memory);
+    shared::g_flash_bank = bnk;
+    auto feed            = [](std::initializer_list<uint8_t> msg) {
+        pc_tests::AyRomWriter rom;
+        rom.bytes(msg);
+        for (const uint16_t w : rom.w)
+            player::live::tap_push(0, (w & midi_in::kAyWriteSelect) != 0 ? player::live::TapPort::AySelect : player::live::TapPort::AyData,
+                                              static_cast<uint8_t>(w));
+    };
+    auto queued = [] {
+        g_test_log[0] = 0;
+        player::live::session_log_stats();
+        const std::string log(g_test_log);
+        const size_t at = log.find("queued ");
+        return at == std::string::npos ? ~0ul : std::stoul(log.substr(at + 7));
+    };
+
+    player::live::session_end();
+    CHECK(player::live::session_begin(g_test_time_us / 1000u));
+    feed({0x90, 60, 100});
+    feed({0x91, 62}); // без скорости
+    player::live::live_row(player::live::row_user());
+    CHECK_EQ(queued(), 1ul); // нота ждёт форы
+    player::live::session_end();
+
+    CHECK(player::live::session_begin(g_test_time_us / 1000u));
+    CHECK_EQ(queued(), 0ul);
+    feed({100}); // без сброса разбора дособрал бы ноту 62
+    player::live::live_row(player::live::row_user());
+    CHECK_EQ(queued(), 0ul);
+
+    player::live::session_end();
+    soundsinth::memory::track_memory_reset_for_new_track(shared::g_track_memory);
+    shared::g_flash_bank = bank::Bank{};
+}
+
+// Страниц PSRAM не осталось: отказавшая загрузка просит тик отдать запись
+// молчащего инструмента и повторяется, когда страницы вернулись.
+void test_live_pcm_short_frees_record() {
+    std::printf("test_live_pcm_short_frees_record\n");
+    std::vector<uint8_t> blob = read_bank(kBankPath);
+    bank::Bank bnk;
+    if (blob.empty() || !bank::bank_open(blob.data(), static_cast<uint32_t>(blob.size()), bnk, nullptr)) {
+        std::printf("  SKIP: no bank\n");
+        return;
+    }
+    if (shared::g_track_memory.resident.base == nullptr) memory::track_memory_create(shared::g_track_memory);
+    shared::g_flash_bank = bnk;
+    auto feed            = [](std::initializer_list<uint8_t> msg) {
+        pc_tests::AyRomWriter rom;
+        rom.bytes(msg);
+        for (const uint16_t w : rom.w)
+            player::live::tap_push(0, (w & midi_in::kAyWriteSelect) != 0 ? player::live::TapPort::AySelect : player::live::TapPort::AyData,
+                                              static_cast<uint8_t>(w));
+    };
+    auto rows = [](int n) {
+        for (int i = 0; i < n; ++i) {
+            g_test_time_us += 10000;
+            player::live::live_row(player::live::row_user());
+            while (player::live::serve_requests()) {
+            }
+        }
+    };
+    auto stats = [] {
+        g_test_log[0] = 0;
+        player::live::session_log_stats();
+        return std::string(g_test_log);
+    };
+
+    player::live::session_end();
+    CHECK(player::live::session_begin(g_test_time_us / 1000u));
+    memory::PsramStore& psram = shared::g_track_memory.psram;
+    feed({0xc0, 0x00});
+    feed({0x90, 60, 100});
+    rows(10);
+    feed({0x80, 60, 0});
+    rows(300); // пианино замолчало больше секунды назад
+    CHECK(stats().find("samples from flash 1 (repeats") != std::string::npos);
+    while (memory::psram_free_page_count(psram) > 0)
+        (void)memory::psram_alloc_page(psram);
+
+    feed({0x99, 42, 100}); // хэт: сэмпл короче фортепианного
+    rows(10);
+    const std::string log = stats();
+    std::printf("%s", log.c_str());
+    CHECK(log.find("samples from flash 2 (repeats") != std::string::npos);
+    CHECK(log.find("failures 0)") == std::string::npos);
+    CHECK(log.find("records retired 1 ") != std::string::npos);
+
+    player::live::session_end();
+    soundsinth::memory::track_memory_reset_for_new_track(shared::g_track_memory);
+    shared::g_flash_bank = bank::Bank{};
+}
+
 void run_live_stream_tests() {
     test_live_stream_lookahead();
     test_live_stream_order_and_overflow();
     test_live_stream_engine_plays();
     test_live_requests_ring();
+    test_live_memory_handshake();
+    test_live_session_begin_clears_counters();
+    test_live_session_end_forgets_stream();
+    test_live_pcm_short_frees_record();
 }

@@ -100,6 +100,79 @@ const uint8_t kAxisU8[] = {
     0x81, 0x02,       //   Input (Data, Variable, Absolute)
     0xC0              // End Collection
 };
+
+// Клавиатура без номера отчёта, за ней коллекции с номерами на чужих
+// страницах: System Control (Generic Desktop 0x81..0x83, вне осей) и
+// Consumer Control (0x0C). Номера там не делают отчёты клавиатуры
+// нумерованными.
+const uint8_t kKeyboardForeignIds[] = {
+    0x05, 0x01,       // Usage Page (Generic Desktop)
+    0x09, 0x06,       // Usage (Keyboard)
+    0xA1, 0x01,       // Collection (Application)
+    0x05, 0x07,       //   Usage Page (Keyboard)
+    0x19, 0xE0, 0x29, 0xE7,
+    0x15, 0x00, 0x25, 0x01,
+    0x75, 0x01, 0x95, 0x08,
+    0x81, 0x02,       //   Input - восемь модификаторов
+    0x95, 0x01, 0x75, 0x08,
+    0x81, 0x01,       //   Input (Constant) - байт запаса
+    0x95, 0x06, 0x75, 0x08,
+    0x15, 0x00, 0x25, 0x65,
+    0x19, 0x00, 0x29, 0x65,
+    0x81, 0x00,       //   Input (Data, Array) - шесть слотов
+    0xC0,             // End Collection
+    0x05, 0x01,       // Usage Page (Generic Desktop)
+    0x09, 0x80,       // Usage (System Control)
+    0xA1, 0x01,       // Collection (Application)
+    0x85, 0x02,       //   Report ID (2)
+    0x19, 0x81, 0x29, 0x83,
+    0x15, 0x00, 0x25, 0x01,
+    0x75, 0x01, 0x95, 0x03,
+    0x81, 0x02,       //   Input (Data, Variable) - три разряда
+    0x95, 0x05,
+    0x81, 0x01,       //   Input (Constant)
+    0xC0,             // End Collection
+    0x05, 0x0C,       // Usage Page (Consumer)
+    0x09, 0x01,       // Usage (Consumer Control)
+    0xA1, 0x01,       // Collection (Application)
+    0x85, 0x03,       //   Report ID (3)
+    0x15, 0x00, 0x26, 0x3C, 0x02,
+    0x19, 0x00, 0x2A, 0x3C, 0x02,
+    0x75, 0x10, 0x95, 0x01,
+    0x81, 0x00,       //   Input (Data, Array)
+    0xC0              // End Collection
+};
+
+// Мышь с номером 1 и Consumer Control с номером 2: номера есть у своих
+// страниц, карта нумерованная.
+const uint8_t kMouseAndConsumerIds[] = {
+    0x05, 0x01,       // Usage Page (Generic Desktop)
+    0x09, 0x02,       // Usage (Mouse)
+    0xA1, 0x01,       // Collection (Application)
+    0x85, 0x01,       //   Report ID (1)
+    0x05, 0x09,       //   Usage Page (Button)
+    0x19, 0x01, 0x29, 0x03,
+    0x15, 0x00, 0x25, 0x01,
+    0x75, 0x01, 0x95, 0x03,
+    0x81, 0x02,       //   Input - три кнопки
+    0x95, 0x05,
+    0x81, 0x01,       //   Input (Constant)
+    0x05, 0x01,
+    0x09, 0x30, 0x09, 0x31,
+    0x15, 0x81, 0x25, 0x7F,
+    0x75, 0x08, 0x95, 0x02,
+    0x81, 0x06,       //   Input - X, Y
+    0xC0,             // End Collection
+    0x05, 0x0C,       // Usage Page (Consumer)
+    0x09, 0x01,       // Usage (Consumer Control)
+    0xA1, 0x01,       // Collection (Application)
+    0x85, 0x02,       //   Report ID (2)
+    0x15, 0x00, 0x26, 0x3C, 0x02,
+    0x19, 0x00, 0x2A, 0x3C, 0x02,
+    0x75, 0x10, 0x95, 0x01,
+    0x81, 0x00,       //   Input (Data, Array)
+    0xC0              // End Collection
+};
 // clang-format on
 
 HID_ReportInfo_t g_info;
@@ -184,4 +257,27 @@ void run_hid_parser_tests() {
     CHECK(xu8.present());
     CHECK_EQ(static_cast<int>(xu8.logical_min), 0);
     CHECK_EQ(static_cast<int>(xu8.logical_max), 255);
+
+    std::printf("hid_parser: report ids on foreign pages\n");
+    ReportMap kf;
+    CHECK(report_map_build(kKeyboardForeignIds, sizeof(kKeyboardForeignIds), kf));
+    CHECK(!kf.uses_report_ids);
+    CHECK_EQ(static_cast<int>(kf.keyboard.report_id), 0);
+    CHECK_EQ(static_cast<int>(kf.keyboard.modifier_count), 8);
+    CHECK_EQ(static_cast<int>(kf.keyboard.slot_count), 6);
+    CHECK_EQ(static_cast<int>(kf.keyboard.slot_bit_offset), 16);
+    CHECK_EQ(static_cast<int>(kf.button_count), 0);
+    CHECK(!kf.has_axes());
+    CHECK_EQ(static_cast<int>(report_map_bytes(kf)), 8);
+
+    ReportMap mc;
+    CHECK(report_map_build(kMouseAndConsumerIds, sizeof(kMouseAndConsumerIds), mc));
+    CHECK(mc.uses_report_ids);
+    CHECK_EQ(static_cast<int>(mc.button_count), 3);
+    CHECK_EQ(static_cast<int>(mc.button[0].report_id), 1);
+    CHECK_EQ(static_cast<int>(mc.field(Axis::X).report_id), 1);
+    CHECK_EQ(static_cast<int>(mc.field(Axis::X).bit_offset), 8);
+    CHECK(!mc.keyboard.present());
+    CHECK_EQ(static_cast<int>(mc.keyboard.modifier_count), 0);
+    CHECK_EQ(static_cast<int>(report_map_bytes(mc)), 4);
 }

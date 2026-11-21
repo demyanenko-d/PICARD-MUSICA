@@ -54,7 +54,7 @@ void SequencerTask::stop(void (*on_slow)(uint32_t waited_ms)) {
 }
 
 void SequencerTask::run() {
-    while (true) {
+    for (;;) {
         platform::os_sem_wait(s_go);
         // Остановка проверяется после пробуждения: stop() будит этим же
         // семафором, и тик делать уже не нужно.

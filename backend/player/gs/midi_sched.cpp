@@ -25,6 +25,11 @@ constexpr uint8_t kSysExStart     = 0xf0u;
 constexpr uint8_t kSysExCont      = 0xf7u;
 constexpr uint8_t kFrameEnd       = 0xffu;
 
+// У мета-события и дампа тело с длиной, у остальных - байты данных.
+bool has_body(uint8_t status) {
+    return status == kMetaStatus || status == kSysExStart || status == kSysExCont;
+}
+
 uint32_t be24(const uint8_t* p) {
     return (static_cast<uint32_t>(p[0]) << 16) | (static_cast<uint32_t>(p[1]) << 8) | p[2];
 }
@@ -49,6 +54,23 @@ bool MidiSched::read_varlen(uint32_t& pos, uint32_t end, uint32_t& out) const {
     return false;
 }
 
+uint8_t MidiSched::read_status(uint32_t& pos, uint32_t end, uint8_t& running) const {
+    if (pos >= end) return 0;
+    const uint8_t status = file_[pos];
+    if ((status & 0x80u) == 0) return running;
+    ++pos;
+    if (status < 0xf0u) running = status;
+    return status;
+}
+
+bool MidiSched::read_body(uint32_t& pos, uint32_t end, uint8_t status, uint8_t& type, uint32_t& len) const {
+    if (status == kMetaStatus) {
+        if (pos >= end) return false;
+        type = file_[pos++];
+    }
+    return read_varlen(pos, end, len);
+}
+
 void MidiSched::arm(Track& t) {
     uint32_t delta = 0;
     if (t.pos >= t.end || !read_varlen(t.pos, t.end, delta)) {
@@ -70,42 +92,28 @@ void MidiSched::scan_name(const Track& t, uint8_t* dst) const {
     for (uint8_t step = 0; step < 32 && pos < t.end; ++step) {
         uint32_t delta = 0;
         if (!read_varlen(pos, t.end, delta)) return;
-        if (pos >= t.end) return;
-        uint8_t status = file_[pos];
-        if ((status & 0x80u) != 0) {
-            ++pos;
-            if (status < 0xf0u) running = status;
-        } else {
-            status = running;
-            if (status == 0) return;
+        const uint8_t status = read_status(pos, t.end, running);
+        if (status == 0) return;
+        if (!has_body(status)) {
+            pos += data_bytes(status);
+            continue;
         }
-        if (status == kMetaStatus) {
-            if (pos >= t.end) return;
-            const uint8_t type = file_[pos++];
-            uint32_t n         = 0;
-            if (!read_varlen(pos, t.end, n)) return;
-            if (type == kMetaTrackName) {
-                const uint32_t take = n < kMidiNameChars ? n : kMidiNameChars;
-                for (uint32_t i = 0; i < take && pos + i < t.end; ++i) {
-                    const uint8_t ch = file_[pos + i];
-                    dst[i]           = (ch >= 0x20u && ch < 0x7fu) ? ch : ' ';
-                }
-                return;
+        uint8_t type = 0;
+        uint32_t n   = 0;
+        if (!read_body(pos, t.end, status, type, n)) return;
+        if (status == kMetaStatus && type == kMetaTrackName) {
+            const uint32_t take = n < kMidiNameChars ? n : kMidiNameChars;
+            for (uint32_t i = 0; i < take && pos + i < t.end; ++i) {
+                const uint8_t ch = file_[pos + i];
+                dst[i]           = (ch >= 0x20u && ch < 0x7fu) ? ch : ' ';
             }
-            pos += n;
-            continue;
+            return;
         }
-        if (status == kSysExStart || status == kSysExCont) {
-            uint32_t n = 0;
-            if (!read_varlen(pos, t.end, n)) return;
-            pos += n;
-            continue;
-        }
-        pos += data_bytes(status);
+        pos += n;
     }
 }
 
-// Сколько тактов в самой длинной дорожке. События разбираются тем же
+// Сколько тиков MIDI в самой длинной дорожке. События разбираются тем же
 // порядком, что и при игре, но своими указателями: рабочие курсоры к этому
 // времени уже стоят на первом событии.
 uint32_t MidiSched::scan_total_ticks() {
@@ -116,25 +124,13 @@ uint32_t MidiSched::scan_total_ticks() {
         uint32_t tick      = tracks_[i].tick; // первая задержка уже учтена
         uint8_t running    = 0;
         while (pos < end) {
-            if (pos >= end) break;
-            uint8_t status = file_[pos];
-            if ((status & 0x80u) != 0) {
-                ++pos;
-                if (status < 0xf0u) running = status;
-            } else {
-                status = running;
-                if (status == 0) break;
-            }
-            if (status == kMetaStatus) {
-                if (pos >= end) break;
-                const uint8_t type = file_[pos++];
-                uint32_t len       = 0;
-                if (!read_varlen(pos, end, len)) break;
-                if (type == kMetaEndOfTrack) break;
-                pos += len;
-            } else if (status == kSysExStart || status == kSysExCont) {
+            const uint8_t status = read_status(pos, end, running);
+            if (status == 0) break;
+            if (has_body(status)) {
+                uint8_t type = 0;
                 uint32_t len = 0;
-                if (!read_varlen(pos, end, len)) break;
+                if (!read_body(pos, end, status, type, len)) break;
+                if (status == kMetaStatus && type == kMetaEndOfTrack) break;
                 pos += len;
             } else {
                 pos += data_bytes(status);
@@ -150,7 +146,6 @@ uint32_t MidiSched::scan_total_ticks() {
 
 bool MidiSched::begin(const uint8_t* file, uint32_t len, const devices::gs::MidiFileFacts& facts, uint8_t* work, uint8_t* state) {
     file_          = file;
-    len_           = len;
     work_          = work;
     state_         = state;
     ready_         = false;
@@ -183,30 +178,27 @@ bool MidiSched::begin(const uint8_t* file, uint32_t len, const devices::gs::Midi
     // единицы, а счёт времени у них другой.
     if (division_ == 0 || (division_ & 0x8000u) != 0) return false;
 
-    // Граница - принятое, а не длина из блоба: поле там шестнадцатиразрядное,
+    // Граница - принятое (len), а не длина из блоба: поле там шестнадцатиразрядное,
     // и у файла длиннее 64 КБ по нему разбирается одна дорожка из двадцати.
     // Принятое - это ровно то, что прислал плеер, вместе с десятью байтами
     // добивки, и на "MTrk" добивка не похожа.
-    const uint32_t limit = len;
-    stopped_at_          = 0;
-
     uint32_t pos = facts.first_track;
     for (uint8_t i = 0; i < kMidiTracksMax; ++i) {
         // Заголовок дорожки ищется, а не берётся на веру: между кусками
         // встречается мусор, и сорваться на нём значило бы потерять весь
         // хвост файла. Ищем вперёд от ожидаемого места.
-        while (pos + 8 <= limit && (file_[pos] != 'M' || file_[pos + 1] != 'T' || file_[pos + 2] != 'r' || file_[pos + 3] != 'k')) {
+        while (pos + 8 <= len && (file_[pos] != 'M' || file_[pos + 1] != 'T' || file_[pos + 2] != 'r' || file_[pos + 3] != 'k')) {
             ++pos;
             ++skipped_;
         }
-        if (pos + 8 > limit) {
+        if (pos + 8 > len) {
             stopped_at_ = pos;
             break;
         }
         const uint32_t chunk = be32(file_ + pos + 4);
         const uint32_t start = pos + 8;
         uint32_t end         = start + chunk;
-        if (end > limit) end = limit; // обрезанный файл играем до конца принятого
+        if (end > len) end = len; // обрезанный файл играем до конца принятого
         Track& t  = tracks_[track_count_];
         t.pos     = start;
         t.end     = end;
@@ -224,7 +216,7 @@ bool MidiSched::begin(const uint8_t* file, uint32_t len, const devices::gs::Midi
     total_ticks_ = scan_total_ticks();
 
     // Справка о файле (#04). Разбор #EE69: первый байт только выбирает,
-    // печатать ли ведущие нули, а САМО ЧИСЛО - следующие три байта,
+    // печатать ли ведущие нули, а само число - следующие три байта,
     // старшим вперёд. Плеер печатает его строкой Total и по нему же рисует
     // ход. Разрешение сюда не идёт: PPQN он читает из MThd сам.
     uint8_t* info = work_ + kMidiInfoAt;
@@ -258,12 +250,13 @@ void MidiSched::key_change(uint8_t note, bool on) {
 // рисуются они на разной высоте.
 void MidiSched::draw_keys() {
     uint8_t* const rows = state_ + kMidiStateKeys;
-    std::memset(rows, 0, kMidiKeyRow * 3u);
+    std::memset(rows, 0, kMidiKeyRow * kMidiKeyRows);
     for (uint8_t key = 0; key < kMidiKeysMax; ++key) {
         if (keys_[key] == 0) continue;
+        // 12u = kMidiSemitones литералом: с именем GCC не сводит / и % в одно умножение.
         const uint8_t semitone = static_cast<uint8_t>(key % 12u);
         const uint16_t x       = static_cast<uint16_t>(key / 12u) * kMidiOctavePx + kMidiKeyPixel[semitone];
-        for (uint8_t d = 0; d < 3; ++d) {
+        for (uint8_t d = 0; d < kMidiKeyWidthPx; ++d) {
             const uint16_t px = static_cast<uint16_t>(x + d);
             if (px >= kMidiKeyRow * 8u) break;
             rows[px >> 3] = static_cast<uint8_t>(rows[px >> 3] | (0x80u >> (px & 7u)));
@@ -278,31 +271,19 @@ void MidiSched::draw_keys() {
 }
 
 bool MidiSched::emit(Track& t, uint16_t& n) {
-    uint8_t* out = work_ + kMidiFrameAt + static_cast<uint32_t>(frame_slot_) * kMidiFrameMax;
-    if (t.pos >= t.end) {
+    uint8_t* out      = work_ + kMidiFrameAt + static_cast<uint32_t>(frame_slot_) * kMidiFrameMax;
+    const uint32_t at = t.pos; // начало события: сюда откат, если не влезло
+    // Дорожка кончилась или вместо события мусор - дальше её не читаем.
+    const uint8_t status = read_status(t.pos, t.end, t.running);
+    if (status == 0) {
         t.done = true;
         return true;
     }
-    uint8_t status = file_[t.pos];
-    if ((status & 0x80u) != 0) {
-        ++t.pos;
-        if (status < 0xf0u) t.running = status;
-    } else {
-        status = t.running;
-        if (status == 0) { // мусор вместо события: дорожку дальше не читаем
-            t.done = true;
-            return true;
-        }
-    }
+    uint8_t type = 0;
+    uint32_t len = 0;
 
     if (status == kMetaStatus) {
-        if (t.pos >= t.end) {
-            t.done = true;
-            return true;
-        }
-        const uint8_t type = file_[t.pos++];
-        uint32_t len       = 0;
-        if (!read_varlen(t.pos, t.end, len)) {
+        if (!read_body(t.pos, t.end, status, type, len)) {
             t.done = true;
             return true;
         }
@@ -325,17 +306,15 @@ bool MidiSched::emit(Track& t, uint16_t& n) {
         return true;
     }
 
-    if (status == kSysExStart || status == kSysExCont) {
+    if (has_body(status)) {
         // Статус #F0..#F7 running-статусом не становится, поэтому курсор
         // двигать нельзя, пока событие не пошло в линию: иначе в следующем
-        // кадре тело дампа прочтётся как события и уйдёт нотами. Статус
-        // здесь всегда явный, и вернуть его на место - шаг назад.
+        // кадре тело дампа прочтётся как события и уйдёт нотами.
         if (n >= kMidiFrameData) {
-            --t.pos;
+            t.pos = at;
             return false;
         }
-        uint32_t len = 0;
-        if (!read_varlen(t.pos, t.end, len)) {
+        if (!read_body(t.pos, t.end, status, type, len)) {
             t.done = true;
             return true;
         }
@@ -360,8 +339,14 @@ bool MidiSched::emit(Track& t, uint16_t& n) {
         return true;
     }
 
+    // Статус занимает байт порции: плеер на 52-м байте уходит в ветку
+    // перегрузки. Не влезло - в следующий кадр: канальный статус помнит
+    // running, системный #F1..#F6 явный всегда - курсор назад на него.
     const uint8_t nd = data_bytes(status);
-    if (n + nd > kMidiFrameData) return false;
+    if (n + 1u + nd > kMidiFrameData) {
+        if (status >= 0xf0u) t.pos = at;
+        return false;
+    }
     // Статус пишем всегда, даже если в файле он опущен: плеер только
     // выталкивает байты в линию и состояния не ведёт.
     out[n++]               = status;
@@ -405,8 +390,8 @@ uint16_t MidiSched::next_frame() {
         return 1;
     }
 
-    // Положение - от опоры, а не накоплением: такт кадра почти никогда не
-    // целый, и накопленное усечение сдвигало бы события на кадр назад.
+    // Положение - от опоры, а не накоплением: число тиков на кадр почти никогда
+    // не целое, и накопленное усечение сдвигало бы события на кадр назад.
     us_since_base_ += kMidiFrameUs;
     now_q16_        = tick_base_q16_ + ((us_since_base_ * division_ << 16) / tempo_us_);
 
@@ -425,7 +410,12 @@ uint16_t MidiSched::next_frame() {
         }
     }
 
-    for (;;) {
+    // Пока хвост дампа не отдан, выбор не зовётся: дорожка дампа стоит на
+    // том же тике и выбралась бы первой, а байт данных дампа - не событие.
+    // Признак "играть" падает кадром позже последних событий: по нулю плеер
+    // уходит, не забрав порцию, где они лежат.
+    const bool was_finished = finished_;
+    while (sysex_left_ == 0) {
         uint8_t pick    = kMidiTracksMax;
         uint32_t lowest = 0;
         for (uint8_t i = 0; i < track_count_; ++i) {
@@ -447,8 +437,8 @@ uint16_t MidiSched::next_frame() {
     bytes_out_ += n;
     // Признак "продолжать играть" держится здесь: конец расписания плеер
     // узнаёт только по нему.
-    state_[kMidiStatePlaying] = finished_ ? 0u : 1u;
-    // Положение в тактах: его плеер печатает строкой Ticks. Старшим байтом
+    state_[kMidiStatePlaying] = finished_ && (was_finished || n == 1u) ? 0u : 1u;
+    // Положение в тиках MIDI: его плеер печатает строкой Ticks. Старшим байтом
     // вперёд, как складывает блок сама карта.
     const uint32_t pos        = position_ticks();
     state_[kMidiStatePos]     = 0;

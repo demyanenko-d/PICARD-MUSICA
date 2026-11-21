@@ -172,6 +172,44 @@ void test_soft_clip_curve() {
     CHECK(bus.soft_clipped_frames() > 0);
 }
 
+// Трек доиграл: после затухания источники не зовутся, и снятие паузы их не
+// возвращает; start_track() возвращает.
+void test_finish_stops_sources() {
+    std::printf("test_mixbus_finish_stops_sources\n");
+    const uint32_t n = 8192;
+    std::vector<int32_t> l(n, 20000), r(n, -20000);
+    Canned src{l.data(), r.data(), 0, n};
+    mixbus::SoundSource s = src.as_source();
+    mixbus::MixBus bus;
+    bus.add_source(&s);
+    const uint32_t kF = mixbus::MixBus::kFadeFrames;
+    std::vector<int16_t> buf(kF * 2);
+
+    bus.render(buf.data(), kF);
+    bus.finish();
+    bus.render(buf.data(), kF);
+    CHECK(bus.faded());
+    const uint32_t pos = src.pos, silent = bus.silent_renders();
+    bus.render(buf.data(), kF);
+    bus.set_paused(true);
+    bus.render(buf.data(), kF);
+    bus.set_paused(false);
+    bus.finish();
+    bus.render(buf.data(), kF);
+    CHECK_EQ(src.pos, pos);
+    CHECK_EQ(bus.silent_renders(), silent + 3u);
+    bool zeros = true;
+    for (int16_t v : buf) {
+        if (v != 0) zeros = false;
+    }
+    CHECK(zeros);
+
+    bus.start_track();
+    bus.render(buf.data(), kF);
+    CHECK_EQ(src.pos, pos + kF);
+    CHECK_EQ(buf[0], 20000);
+}
+
 // Затухание: огибающая монотонна, после kFadeFrames - нули; кадр конца
 // трека гасит выход к нему; start_track() возвращает звук следующему треку.
 void test_fade_out_and_end_frame() {
@@ -403,12 +441,12 @@ struct RefBus {
 // Шина против оракула на дробном входе Q24.8: тишина, полная шкала, перегруз
 // в разы, крайние значения, случайные куски; буферы разной длины; все
 // четыре сочетания лимитера и мягкого насыщения; выход и все счётчики.
-void test_bus_matches_oracle() {
-    std::printf("test_mixbus_bus_matches_oracle\n");
-    const uint32_t n = 40000;
-    std::vector<int32_t> ql(n), qr(n);
-    uint32_t x = 12345;
-    auto rnd   = [&x]() {
+// Вход сверки с оракулом: тишина, полная шкала, перегруз в разы, крайние
+// значения, случайные куски.
+void oracle_input(std::vector<int32_t>& ql, std::vector<int32_t>& qr) {
+    const auto n = static_cast<uint32_t>(ql.size());
+    uint32_t x   = 12345;
+    auto rnd     = [&x]() {
         x = x * 1664525u + 1013904223u;
         return x;
     };
@@ -432,20 +470,30 @@ void test_bus_matches_oracle() {
         ql[100 + k] = edges[k];
         qr[200 + k] = edges[k];
     }
+}
+
+// Источник сверки: готовый вход Q24.8 как есть.
+struct Two {
+    const int32_t* l;
+    const int32_t* r;
+    uint32_t pos = 0;
+    static void render_add(void* self, int32_t* ml, int32_t* mr, uint32_t m) {
+        Two* t = static_cast<Two*>(self);
+        for (uint32_t i = 0; i < m; ++i, ++t->pos) {
+            ml[i] += t->l[t->pos];
+            mr[i] += t->r[t->pos];
+        }
+    }
+};
+
+void test_bus_matches_oracle() {
+    std::printf("test_mixbus_bus_matches_oracle\n");
+    const uint32_t n = 40000;
+    std::vector<int32_t> ql(n), qr(n);
+    oracle_input(ql, qr);
     for (int mode = 0; mode < 4; ++mode) {
         const bool limiter = (mode & 1) != 0, soft = (mode & 2) != 0;
-        struct Two {
-            const int32_t* l;
-            const int32_t* r;
-            uint32_t pos = 0;
-            static void render_add(void* self, int32_t* ml, int32_t* mr, uint32_t m) {
-                Two* t = static_cast<Two*>(self);
-                for (uint32_t i = 0; i < m; ++i, ++t->pos) {
-                    ml[i] += t->l[t->pos];
-                    mr[i] += t->r[t->pos];
-                }
-            }
-        } src{ql.data(), qr.data()};
+        Two src{ql.data(), qr.data()};
         mixbus::SoundSource s{&src, &Two::render_add};
         mixbus::MixBus bus;
         bus.add_source(&s);
@@ -483,12 +531,119 @@ void test_bus_matches_oracle() {
     }
 }
 
+// ФВЧ выхода: постоянный сигнал уходит в ноль с постоянной времени
+// 1 / (2 pi fc), скачок проходит целиком, 0 Гц - выход не тронут.
+void test_highpass() {
+    std::printf("test_mixbus_highpass\n");
+    const uint32_t n = 44100;
+    std::vector<int32_t> dc(n, 10000);
+    auto render = [&](uint32_t hz) {
+        Canned src{dc.data(), dc.data(), 0, n};
+        mixbus::SoundSource s = src.as_source();
+        mixbus::MixBus bus;
+        bus.add_source(&s);
+        bus.set_compressor(0x7FFFFFFF, 0);
+        bus.set_highpass_hz(hz, 44100);
+        std::vector<int16_t> out(n * 2);
+        for (uint32_t done = 0; done < n; done += SOUNDSINTH_AUDIO_BUFFER_FRAMES) {
+            const uint32_t k = std::min<uint32_t>(SOUNDSINTH_AUDIO_BUFFER_FRAMES, n - done);
+            bus.render(out.data() + done * 2, k);
+        }
+        return out;
+    };
+    const std::vector<int16_t> off = render(0);
+    CHECK_EQ(off[0], 10000);
+    CHECK_EQ(off[2 * (n - 1)], 10000);
+    const std::vector<int16_t> hp = render(25);
+    // Скачок в начале - почти целиком.
+    CHECK(hp[0] >= 9960 && hp[0] <= 10000);
+    // Через одну постоянную времени (6.37 мс, 281 кадр) - около 1/e.
+    CHECK(std::abs(hp[2 * 281] - 3679) < 60);
+    // Через секунду - ноль, без остатка ни в одном канале.
+    CHECK_EQ(hp[2 * (n - 1)], 0);
+    CHECK_EQ(hp[2 * (n - 1) + 1], 0);
+    // 5 Гц: постоянная времени 32 мс, за секунду тоже точный ноль.
+    const std::vector<int16_t> dc5 = render(5);
+    CHECK_EQ(dc5[2 * (n - 1)], 0);
+    CHECK_EQ(dc5[2 * (n - 1) + 1], 0);
+    // Отрицательная постоянная: округление вниз с переносом остатка сходится
+    // к нулю другим путём.
+    std::fill(dc.begin(), dc.end(), -10000);
+    const std::vector<int16_t> neg5 = render(5);
+    CHECK_EQ(neg5[2 * (n - 1)], 0);
+    CHECK_EQ(neg5[2 * (n - 1) + 1], 0);
+
+    // Граница трека: прошлый вход фильтра не переходит в следующий трек,
+    // иначе первый кадр тишины - ступенька почти в полную постоянную.
+    std::fill(dc.begin(), dc.end(), 10000);
+    const std::vector<int32_t> zero(n, 0);
+    Canned a{dc.data(), dc.data(), 0, n / 2}, z{zero.data(), zero.data(), 0, n};
+    mixbus::SoundSource sa = a.as_source(), sz = z.as_source();
+    mixbus::MixBus bus;
+    bus.add_source(&sa);
+    bus.set_compressor(0x7FFFFFFF, 0);
+    bus.set_highpass_hz(5, 44100);
+    std::vector<int16_t> out(SOUNDSINTH_AUDIO_BUFFER_FRAMES * 2);
+    for (uint32_t done = 0; done < n / 2; done += SOUNDSINTH_AUDIO_BUFFER_FRAMES)
+        bus.render(out.data(), SOUNDSINTH_AUDIO_BUFFER_FRAMES);
+    bus.remove_source(&sa);
+    bus.start_track();
+    bus.add_source(&sz);
+    bus.render(out.data(), SOUNDSINTH_AUDIO_BUFFER_FRAMES);
+    CHECK_EQ(out[0], 0);
+    CHECK_EQ(out[1], 0);
+}
+
+// Сверка с оракулом при включённом ФВЧ 5 Гц, как играет каждый трек: ФВЧ
+// оракула - в double с тем же коэффициентом. Расхождение - не больше
+// единицы int16 (округление), лимитер срабатывает на тех же кадрах.
+void test_bus_highpass_matches_oracle() {
+    std::printf("test_mixbus_bus_highpass_matches_oracle\n");
+    const uint32_t n = 40000;
+    std::vector<int32_t> ql(n), qr(n);
+    oracle_input(ql, qr);
+    const double a = std::round(1.0 / (1.0 + 6.283185307179586 * 5.0 / 44100.0) * (1 << 30)) / (1 << 30);
+    std::vector<int32_t> hl(n), hr(n);
+    double yl = 0, yr = 0;
+    for (uint32_t i = 0; i < n; ++i) {
+        yl    = a * (yl + ql[i] - (i ? ql[i - 1] : 0));
+        yr    = a * (yr + qr[i] - (i ? qr[i - 1] : 0));
+        hl[i] = static_cast<int32_t>(std::floor(yl));
+        hr[i] = static_cast<int32_t>(std::floor(yr));
+    }
+    Two src{ql.data(), qr.data()};
+    mixbus::SoundSource s{&src, &Two::render_add};
+    mixbus::MixBus bus;
+    bus.add_source(&s);
+    bus.set_limiter(true);
+    bus.set_highpass_hz(5, 44100);
+    RefBus ref;
+    ref.limiter = true;
+    std::vector<int16_t> out(n * 2), want(n * 2);
+    for (uint32_t done = 0; done < n; done += SOUNDSINTH_AUDIO_BUFFER_FRAMES) {
+        const uint32_t m = std::min<uint32_t>(SOUNDSINTH_AUDIO_BUFFER_FRAMES, n - done);
+        bus.render(out.data() + done * 2, m);
+        for (uint32_t i = 0; i < m; ++i)
+            ref.frame(hl[done + i], hr[done + i], &want[(done + i) * 2]);
+    }
+    int32_t worst = 0;
+    for (uint32_t i = 0; i < n * 2; ++i)
+        worst = std::max(worst, std::abs(out[i] - want[i]));
+    std::printf("  max difference %d, compressed %u (oracle %u)\n", worst, bus.limited_frames(), ref.limited);
+    CHECK(worst <= 1);
+    CHECK_EQ(bus.limited_frames(), ref.limited);
+    CHECK(ref.limited > 0);
+}
+
 void run_mixbus_limiter_tests() {
+    test_highpass();
     test_bus_matches_oracle();
+    test_bus_highpass_matches_oracle();
     test_limiter_off_is_clamp_and_on_is_transparent();
     test_bus_rounding();
     test_bus_counters_across_buffers();
     test_fade_out_and_end_frame();
+    test_finish_stops_sources();
     test_soft_clip_curve();
     test_limiter_off_changes_nothing();
     test_limiter_never_exceeds_scale();

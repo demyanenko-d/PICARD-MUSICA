@@ -1,141 +1,200 @@
 ; SPDX-License-Identifier: MIT
-; Триггер TR-DOS: сигнал DOS_N по выборке команды.
+; TR-DOS с ПЗУ машины: сигнал DOS_N по выборке команды и навигатор образов
+; по NMI.
 ;
 ; Машина с интерфейсом Beta страничит ПЗУ TR-DOS по адресу выборки:
-; выборка в окне 0x3Dxx включает его, выборка по адресу 0x4000 и выше
-; выключает. Здесь этот признак ведёт плата линией DOS_N.
+; выборка в окне 0x3Dxx при ПЗУ 48 включает его, выборка по адресу 0x4000
+; и выше выключает. Здесь этот признак ведёт плата линией DOS_N.
 ;
-; Автоматов два, и они в разных блоках. Решает pio0: только он видит M1, RD
-; и адрес - его окно выводов 0..31. Ведёт pio2: только он достаёт до
-; DOS_N - его окно 16..47. Решение переносит канал DMA из очереди одного в
-; очередь другого; ядро не участвует.
+; Автоматы в двух блоках. Выборку видит только pio0 (M1, RD и адрес - его
+; окно выводов 0..31), до DOS_N достаёт только pio2 (окно 16..47). pio0
+; отмечает каждую выборку флагом, автомат в pio2 ждёт флаг соседнего блока
+; и решает по A8..A15 - они в окне обоих. Ни ядра, ни DMA.
 ;
-; Через SIO путь не годится: он на шине IOPORT, у ядер, и DMA до него не
-; достаёт.
+; Навигатор - своё ПЗУ на 0x0000-0x1FFF и банк ОЗУ на 0x2000-0x3FFF с
+; выборки 0x0066 до чтения 0x1FFF (второй байт RETN на 0x1FFE).
 ;
-;   trdos_detect   смена уровня по выборке команды: ноль - включить, единица - снять
-;   trdos_drive    уровень на DOS_N
+;   trdos_fetch   (pio0) отметка выборки; выборка 0x0066 - флаг навигатора
+;   trdos_nav     (pio0) отдача чтений ниже 0x4000, пока флаг навигатора стоит
+;   trdos_gate    (pio2) DOS по старшему байту адреса выборки
+;
+; DOS - флаг IRQ_DOS блока pio0: по нему port_detect_dos выбирает таблицу
+; портов, dos_drive (pentagon.pio) ведёт вывод.
 
 .pio_version rp2350
 
-; Номера линий Z80 в wait gpio - числа в инструкциях, bus_setup.cpp сверяет
-; их с PIN_* (bus.h).
-.define public Z80_M1_N_GPIO 3
-.define public Z80_RD_N_GPIO 5
+; Номера линий Z80 в wait gpio - числа в инструкциях, сборка сверяет их с
+; номерами пинов.
+.define public TRDOS_Z80_M1_N_GPIO 3
+.define public TRDOS_Z80_WR_N_GPIO 4
+.define public TRDOS_Z80_RD_N_GPIO 5
+.define public TRDOS_Z80_MREQ_N_GPIO 7
+; Флаги блока pio0. DOS - тот же, что IRQ_DOS в pentagon.pio, ПЗУ 48 - что
+; IRQ_ROM48 в reset_watch.pio.
+.define public TRDOS_IRQ_FETCH 3
+.define public TRDOS_IRQ_NAV 4
+.define public TRDOS_IRQ_DOS 5
+.define public TRDOS_IRQ_ROM48 7
 
-; ---
-; IN_BASE = A0 (GPIO 8): разряд слова равен номеру линии адреса.
+; --- Выборка команды ---
 ;
-; Ждать RD, а не отмерять паузу: при выборке команды он падает на полтакта
-; позже адреса, и ожидание само даёт установившийся адрес на любой частоте
+;   IN_BASE = A0 (GPIO 8), JMP_PIN = M1_N
+;   Y = 0x0066 - вход навигатора по NMI; все единицы - навигатора нет
+;
+; Ждать RD, а не отмерять паузу: при выборке он падает на полтакта позже
+; адреса, и ожидание само даёт установившийся адрес на любой частоте
 ; машины. Заодно отсекается подтверждение прерывания - там M1 низкий, а RD
 ; высокий.
 ;
 ; Проверка M1 после RD - от чтения вектора в режиме 2: оно идёт сразу за
 ; подтверждением, RD в нём низкий, а M1 уже снят.
 ;
-; Y заряжен старшим байтом окна (0x3D) при запуске: в set он не влезает.
-;
-; Окно включает TR-DOS только при ПЗУ 48: бит 4 порта 0x7FFD. Бит держит
-; флаг IRQ kTrdosIrqRom48 этого блока, читается он mov x, status. Флаг
-; ставит и снимает обработчик записей в порты на ядре, гасит сторож сброса
-; машины. Выход по 0x4000 и выше - при любом ПЗУ.
-;
-; Уровень линии автомат помнит сам - счётчиком команд, двумя копиями
-; цикла. Свободного регистра под него нет: X занят разбором адреса, Y -
-; окном. Каждая копия смотрит только свой переход и кладёт слово только на
-; смену уровня.
-;
-;   released   DOS_N = 1, ПЗУ TR-DOS не страничено; ждёт выборку в окне
-;   asserted   DOS_N = 0, страничено; ждёт выборку по 0x4000 и выше
-;
-; Начальное состояние - released: ровно то, что ставит на выводе
-; trdos_drive_program_init.
-;
-; Иначе слово шло бы на каждой выборке выше 0x4000, то есть всё время,
-; пока машина не в TR-DOS: сотни тысяч переносов DMA в секунду при
-; единицах настоящих смен.
-.program trdos_detect
-
-released_end:
-    wait 1 gpio Z80_M1_N_GPIO   ; конец выборки: иначе она разобралась бы дважды
-public released:
-    wait 0 gpio Z80_M1_N_GPIO   ; идёт выборка команды
-    wait 0 gpio Z80_RD_N_GPIO   ; адрес установился
-    jmp pin, released_end       ; M1 уже снят: не выборка
-    mov x, status               ; флаг ПЗУ 48: все единицы или ноль
-    jmp !x, released_end        ; ПЗУ 128 - окно 0x3Dxx не TR-DOS
-    mov osr, pins
-    out null, 8                 ; A0..A7: окно задано старшим байтом
-    out x, 8                    ; X = A8..A15
-    jmp x != y, released_end    ; не окно - уровень прежний
-    mov isr, null               ; окно - включить DOS_N
-    push noblock                ; полная очередь теряет отметку, а не встаёт
-    wait 1 gpio Z80_M1_N_GPIO
+; После каждой выборки - ожидание конца M1. Без него та же выборка
+; разбирается заново по адресу регенерации (I:R).
+.program trdos_fetch
 .wrap_target
-public asserted:
-    wait 0 gpio Z80_M1_N_GPIO
-    wait 0 gpio Z80_RD_N_GPIO
-    jmp pin, asserted_end
+skip:
+    wait 1 gpio TRDOS_Z80_M1_N_GPIO   ; конец выборки
+    wait 0 gpio TRDOS_Z80_M1_N_GPIO   ; идёт выборка команды
+    wait 0 gpio TRDOS_Z80_RD_N_GPIO   ; адрес установился
+    jmp pin, skip               ; M1 уже снят: не выборка
+    irq set TRDOS_IRQ_FETCH     ; решателю DOS в pio2
     mov osr, pins
-    out null, 14                ; до A14
-    out x, 2                    ; X = A14, A15
-    jmp !x, asserted_end        ; оба нуля - ниже 0x4000, уровень прежний
-    mov isr, ~null              ; выше - снять DOS_N, при любом ПЗУ
-    push noblock
-    wait 1 gpio Z80_M1_N_GPIO
-    jmp released
-asserted_end:
-    wait 1 gpio Z80_M1_N_GPIO
+    out x, 16                   ; A0..A15
+    jmp x != y, skip
+    irq set TRDOS_IRQ_NAV       ; NMI: ПЗУ - навигатора, с этой же выборки
 .wrap
 
-; ---
-.program trdos_drive
+; --- Отдача ПЗУ навигатора ---
+;
+; Пока стоит флаг навигатора, чтения ниже 0x4000 - наши: ROM_BLK_N гасит
+; ПЗУ машины, адрес байта уходит цепочке DMA к rom_serve. Вывод ставится
+; по флагу на каждом чтении: ROM_BLK_N = ~IRQ_NAV.
+;
+; Память - 32 КБ: ПЗУ навигатора, N0, копия ПЗУ, N1 по 8 КБ. Адрес байта
+; = X << 14 | A0..A13, X = база >> 14 | банк окна 0x2000: при банке 1
+; окно ложится на вторую половину. Банк меняет ядро словом в очередь.
+;
+; Выход - чтение адреса, у которого 13 младших разрядов единицы: 0x1FFF,
+; второй байт RETN. Байт отдаётся, флаг снимается, ROM_BLK_N отпускает
+; следующее чтение - это уже стек программы. 0x3FFF навигатор не читает.
+;
+;   IN_BASE = A0 (GPIO 8), JMP_PIN = RD_N, OUT = ROM_BLK_N
+;   STATUS  = флаг навигатора: все единицы - стоит
+.program trdos_nav
+
+; Подтверждение начала цикла: без него ложный цикл
+; кладёт лишний адрес в очередь rom_serve.
+.define MREQ_CONFIRM 1
+; Запас против trdos_fetch: на выборке 0x0066 флаг он ставит к седьмому
+; такту после того, как оба автомата увидели спад RD, а здесь без задержки
+; флаг читается не раньше восьмого.
+.define NAV_LAG 4
 
 .wrap_target
-    pull block
-    out pins, 1
+done:
+    wait 1 gpio TRDOS_Z80_MREQ_N_GPIO ; конец цикла
+public poll:
+    set y, MREQ_CONFIRM
+confirm:
+    wait 0 gpio TRDOS_Z80_MREQ_N_GPIO
+    wait 1 gpio TRDOS_Z80_WR_N_GPIO   ; не запись
+    jmp pin, poll               ; RD_N высокий: регенерация
+    jmp y--, confirm
+    pull noblock                ; слово банка, если его положило ядро
+    mov x, osr [NAV_LAG]
+    mov y, status
+    mov pins, ~y                ; ROM_BLK_N
+    jmp !y, done
+    mov osr, pins
+    out null, 14
+    out y, 2                    ; A14, A15
+    jmp y--, done               ; выше 0x3FFF - ОЗУ машины
+    in x, 18
+    in pins, 14                 ; A0..A13, 32-й разряд - автопуш
+    mov osr, ~pins
+    out y, 13                   ; A0..A12 наоборот: ноль - все единицы
+    jmp y--, done
+    irq clear TRDOS_IRQ_NAV     ; второй байт RETN отдан: дальше ПЗУ машины
+.wrap
+
+; --- DOS по выборке ---
+;
+; Блок звука, окно выводов 16..47: A8..A15 - разряды 0..7 снимка.
+;
+;   IN_BASE = A8 (GPIO 16), Y = 0x3D - старший байт окна включения
+;   STATUS  = флаг ПЗУ 48 блока pio0: все единицы или ноль
+;
+; Адрес ещё на шине: отметку trdos_fetch ставит через два такта после RD,
+; снимок отсюда - ещё через несколько, а Z80 держит адрес выборки около
+; 430 нс.
+.program trdos_gate
+high:
+    irq next clear TRDOS_IRQ_DOS ; выше 0x3FFF - снять, при любом ПЗУ
+.wrap_target
+top:
+    wait 1 irq next TRDOS_IRQ_FETCH ; флаг pio0, дождавшийся его и снимает
+    mov osr, pins
+    out null, 6
+    out x, 2                    ; A14, A15
+    jmp x--, high
+    mov osr, pins
+    out x, 8                    ; A8..A15
+    jmp x != y, top             ; не окно
+    mov x, status
+    jmp !x, top                 ; ПЗУ 128 - окно 0x3Dxx не TR-DOS
+    irq next set TRDOS_IRQ_DOS
 .wrap
 
 % c-sdk {
 #include "hardware/pio.h"
 
-// Решатель: адрес с A0, OUT сдвигает вправо (разряд слова равен номеру
-// линии), jmp pin смотрит на M1_N.
-//
-// window_hi - старший байт окна включения (0x3D). Кладётся в Y: в set
-// помещаются только пять разрядов.
-static inline void trdos_detect_program_init(PIO pio, uint sm, uint offset, uint pin_a0, uint pin_m1_n,
-                                             uint8_t window_hi, uint irq_rom48) {
-    pio_sm_config c = trdos_detect_program_get_default_config(offset);
+// entry - адрес входа навигатора (0x0066) или все единицы: тогда выборка
+// с ним не сравнится никогда. Кладётся в Y: в set не помещается.
+static inline void trdos_fetch_program_init(PIO pio, uint sm, uint offset, uint pin_a0, uint pin_m1_n, uint32_t entry) {
+    pio_sm_config c = trdos_fetch_program_get_default_config(offset);
     sm_config_set_in_pins(&c, pin_a0);
     sm_config_set_jmp_pin(&c, pin_m1_n);
-    sm_config_set_mov_status(&c, STATUS_IRQ_SET, irq_rom48);
     sm_config_set_out_shift(&c, /*shift_right=*/true, /*autopull=*/false, 32);
-    sm_config_set_in_shift(&c, /*shift_right=*/false, /*autopush=*/false, 32);
     sm_config_set_clkdiv(&c, 1.0f);
     pio_sm_init(pio, sm, offset, &c);
+    pio_sm_put_blocking(pio, sm, entry);
+    pio_sm_exec(pio, sm, pio_encode_pull(false, true));
+    pio_sm_exec(pio, sm, pio_encode_mov(pio_y, pio_osr));
+}
+
+// word - база блока навигатора >> 14, банк 0. ROM_BLK_N - автомату без
+// рывка: сперва уровень (единица - ПЗУ машины), потом направление, потом
+// функция пина (до неё пин ведёт SIO в той же единице).
+static inline void trdos_nav_program_init(PIO pio, uint sm, uint offset, uint pin_a0, uint pin_rd_n, uint pin_rom_blk_n, uint32_t word) {
+    pio_sm_config c = trdos_nav_program_get_default_config(offset);
+    sm_config_set_in_pins(&c, pin_a0);
+    sm_config_set_jmp_pin(&c, pin_rd_n);
+    sm_config_set_out_pins(&c, pin_rom_blk_n, 1); // mov pins, ~y
+    sm_config_set_mov_status(&c, STATUS_IRQ_SET, TRDOS_IRQ_NAV);
+    sm_config_set_out_shift(&c, /*shift_right=*/true, /*autopull=*/false, 32);
+    sm_config_set_in_shift(&c, /*shift_right=*/false, /*autopush=*/true, 32);
+    sm_config_set_clkdiv(&c, 1.0f);
+    pio_sm_init(pio, sm, offset + trdos_nav_offset_poll, &c);
+    pio_sm_put_blocking(pio, sm, word);
+    pio_sm_exec_wait_blocking(pio, sm, pio_encode_pull(false, false));
+    pio_sm_exec_wait_blocking(pio, sm, pio_encode_mov(pio_x, pio_osr));
+    pio_sm_set_pins_with_mask(pio, sm, 1u << pin_rom_blk_n, 1u << pin_rom_blk_n);
+    pio_sm_set_pindirs_with_mask(pio, sm, 1u << pin_rom_blk_n, 1u << pin_rom_blk_n);
+    pio_gpio_init(pio, pin_rom_blk_n);
+}
+
+// window_hi - старший байт окна включения (0x3D), в Y.
+static inline void trdos_gate_program_init(PIO pio, uint sm, uint offset, uint pin_a8, uint8_t window_hi) {
+    pio_sm_config c = trdos_gate_program_get_default_config(offset);
+    sm_config_set_in_pins(&c, pin_a8);
+    // Флаг следующего блока по кругу: для pio2 это pio0.
+    sm_config_set_mov_status(&c, STATUS_IRQ_SET, PIO_SM0_EXECCTRL_STATUS_N_VALUE_IRQ_NEXTPIO | TRDOS_IRQ_ROM48);
+    sm_config_set_out_shift(&c, /*shift_right=*/true, /*autopull=*/false, 32);
+    sm_config_set_clkdiv(&c, 1.0f);
+    pio_sm_init(pio, sm, offset + trdos_gate_wrap_target, &c);
     pio_sm_put_blocking(pio, sm, window_hi);
     pio_sm_exec(pio, sm, pio_encode_pull(false, true));
     pio_sm_exec(pio, sm, pio_encode_mov(pio_y, pio_osr));
-    // Состояние автомата - его счётчик команд, и начальное обязано совпасть
-    // с уровнем, который выставил выдатчик.
-    pio_sm_exec(pio, sm, pio_encode_jmp(offset + trdos_detect_offset_released));
-}
-
-// Выдатчик. Пин передаётся автомату уже в неактивном уровне: сперва
-// выходной регистр и направление, пока пин ещё у SIO, и только потом сам
-// пин - иначе в передаче он побывал бы плавающим.
-static inline void trdos_drive_program_init(PIO pio, uint sm, uint offset, uint pin_dos_n) {
-    pio_sm_config c = trdos_drive_program_get_default_config(offset);
-    sm_config_set_out_pins(&c, pin_dos_n, 1);
-    sm_config_set_set_pins(&c, pin_dos_n, 1);
-    sm_config_set_out_shift(&c, /*shift_right=*/true, /*autopull=*/false, 32);
-    sm_config_set_clkdiv(&c, 1.0f);
-    pio_sm_init(pio, sm, offset, &c);
-    pio_sm_exec(pio, sm, pio_encode_set(pio_pins, 1));
-    // Не маской: вывод старше 31, и разряд в ней не поместился бы.
-    pio_sm_set_consecutive_pindirs(pio, sm, pin_dos_n, 1, true);
-    pio_gpio_init(pio, pin_dos_n);
 }
 %}

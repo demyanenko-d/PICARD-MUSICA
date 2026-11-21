@@ -1,4 +1,5 @@
-#pragma once
+#ifndef BUS_CLIENT_H
+#define BUS_CLIENT_H
 
 /*
  * Протокол обмена с платой. Ни файлов, ни экрана, ни памяти под данные.
@@ -65,7 +66,7 @@ extern bool_t bus_load_valid;
 extern u16 bus_psram_total, bus_psram_queued, bus_psram_loaded;
 extern bool_t bus_psram_valid;
 
-extern u8  bus_state;           /* 0 грузится, 1 играет, 2 доиграл */
+extern u8  bus_state;           /* 0 грузится, 1 играет, 2 доиграл, 3 файл не принят */
 
 /* Была ли хоть одна сессия. Отдельным признаком, потому что ноль в
    bus_state - это "грузится", и до первого трека он неотличим. */
@@ -73,6 +74,25 @@ extern bool_t bus_session_started;
 #define BUS_STATE_LOADING 0
 #define BUS_STATE_PLAYING 1
 #define BUS_STATE_ENDED   2
+#define BUS_STATE_FAILED  3
+
+/* Номер трека: растёт на каждом кадре сведений о файле (0x15) - с него у
+   платы начинается новый трек, прежние метаданные недействительны. */
+extern u8  bus_track_seq;
+
+#if BUS_SCOPE
+/* Уровень и спектр (0x17, 0x18): шкала 0..255, 32 единицы - 6 дБ. */
+extern u8  bus_level[2];
+extern u8  bus_spectrum[16];
+/* Максимум пришедшего с прошлой отрисовки: кадр, затёртый следующим до
+   отрисовки, не теряется. Отрисовка кладёт туда последнее пришедшее. Где
+   лежат - решает приложение. */
+extern u8  bus_level_max[2];
+extern u8  bus_spec_max[16];
+/* Кадр метаданных трека (0x1B), 18 байт без суммы: тип, номер и длина
+   блока, 16 байт блока. Хранит приложение. */
+void plat_track_meta(const u8 *frame);
+#endif
 
 
 /* -- Запрос данных (действителен при BUS_EV_READ*) -- */
@@ -98,8 +118,9 @@ bool_t bus_ping(void);
 /**
  * Сброс сессии, допустим в любом состоянии. Дожидается ответа платы и
  * подтверждает его: без подтверждения она ничего больше не вооружит.
+ * TRUE - плата ответила.
  */
-void bus_reset(void);
+bool_t bus_reset(void);
 
 /*
  * Маршрут платы по файлу за сэмплами. Выбирает приложение: цена перемотки
@@ -116,6 +137,13 @@ void bus_start(u32 file_length, u8 load_order);
 
 /** Один проход: опросить плату и разобрать её команду. Возвращает событие. */
 u8 bus_poll(void);
+
+/**
+ * Один опрос без ожидания - для вызова изнутри долгой работы. reads ==
+ * FALSE: запрос чтения не разбирается и остаётся висеть до следующего
+ * опроса (карта занята), телеметрия за ним ждёт.
+ */
+u8 bus_poll_now(bool_t reads);
 
 /** Ответ на BUS_EV_READ: отдать len байт. */
 void bus_send(const u8 *data, u16 len);
@@ -172,4 +200,6 @@ void bus_trace(u8 code, u16 a, u16 b);
 #else
 #define bus_trace(code, a, b) ((void)0)
 #endif
+
+#endif /* BUS_CLIENT_H */
 

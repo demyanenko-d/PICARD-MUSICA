@@ -4,7 +4,7 @@
 // Живой вход MIDI: события потока -> строки ячеек тем же конвертером, что у
 // загрузчика .mid (midi_convert.h). Песня без паттернов: инструменты и
 // записи сэмплов банка добавляются в неё при первой ноте программы, PCM
-// подгружается по запросу (player::load::progressive_request).
+// подгружается по запросу (RequestFn).
 //
 // Инструмент строится сразу при первой ноте. Запись сэмпла песни - по
 // первой ноте в его зоне: keymap живых инструментов дописывается её
@@ -62,6 +62,11 @@ public:
 
     // PCM записи выброшен, номер свободен.
     void record_retired(uint16_t song_sample);
+
+    // Подгрузке не хватило PSRAM: отдать давнюю запись без ссылок, а нет
+    // такой - снять молчащий инструмент и отдать запись после него. Страницы
+    // освобождает подгрузка, когда голоса отпустят PCM.
+    void free_pcm();
 
     // Канал ударный (GS/XG SysEx назначения); после begin - десятый.
     void set_drum_channel(uint8_t channel, bool drums) {
@@ -129,8 +134,9 @@ private:
     static void on_sample(void* self, uint16_t song_inst, uint16_t bank_sample);
 
     // Отдать давние записи, на которые не ссылается ни один живой keymap,
-    // пока свободных и уходящих меньше kLiveRecordReserve.
-    void retire_records();
+    // пока свободных и уходящих меньше kLiveRecordReserve; one_more -
+    // хотя бы одну и при полном запасе.
+    void retire_records(bool one_more = false);
 
     bool slot_live(uint16_t slot) const;
     bool slot_sounding(uint16_t slot) const;

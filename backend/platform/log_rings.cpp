@@ -12,9 +12,11 @@
 
 namespace {
 
-// Нулевые до main (статическое хранилище обнуляет старт на любой
-// платформе): отдельной инициализации колец нет.
-debug_ring::Ring s_ring[2];
+// Запасные кольца - до log_rings_attach или без большого блока: старт
+// печатает напрямую, а этого хватает на строки до появления потребителя.
+constexpr uint32_t kSmallRingBytes = 512;
+uint8_t s_small[2][kSmallRingBytes];
+debug_ring::Ring s_ring[2] = {{s_small[0], kSmallRingBytes - 1u}, {s_small[1], kSmallRingBytes - 1u}};
 
 // Номер выдаваемого кольца и недоданные хвосты строк: строка длиннее
 // приёмника выдаётся за несколько проходов, до её конца кольцо не меняется.
@@ -70,15 +72,15 @@ void platform::debug_log(const char* msg) {
     }
     const uint32_t len = static_cast<uint32_t>(std::strlen(msg));
     if (len == 0) return;
-    const uint32_t core = platform::core_id();
     // Строка длиннее кольца не влезет никогда: потеря сразу, без запрета
     // переключения ради заведомого отказа push.
-    if (len > debug_ring::kMaxLineBytes) {
-        s_ring[core].dropped.fetch_add(1, std::memory_order_relaxed);
+    if (len > debug_ring::max_line(s_ring[platform::core_id()])) {
+        s_ring[platform::core_id()].dropped.fetch_add(1, std::memory_order_relaxed);
         return;
     }
+    // Ядро - после запрета: до него задача вправе переехать на другое.
     platform::log_writer_lock();
-    debug_ring::push(s_ring[core], msg, len);
+    debug_ring::push(s_ring[platform::core_id()], msg, len);
     platform::log_writer_unlock();
 }
 
@@ -141,7 +143,7 @@ bool platform::log_service(uint32_t max_bytes) {
 
 void platform::log_flush_blocking() {
     // Предел - два кольца: другое ядро может дописывать и дальше.
-    uint32_t budget = 2u * (debug_ring::kRingBytes + debug_ring::kHeaderBytes);
+    uint32_t budget = s_ring[0].mask + s_ring[1].mask + 2u + 2u * debug_ring::kHeaderBytes;
     while (budget > 0) {
         platform::log_wait_ready();
         const uint32_t sent = drain_rings(budget);
@@ -168,4 +170,11 @@ void platform::log_go_direct() {
 
 void platform::log_use_rings() {
     s_direct.store(false, std::memory_order_release);
+}
+
+void platform::log_rings_attach(uint8_t* mem, uint32_t bytes) {
+    // Кольца пусты только в прямом режиме: тогда в них не пишут.
+    if (mem == nullptr || !s_direct.load(std::memory_order_acquire) || (bytes & (bytes - 1u)) != 0u) return;
+    debug_ring::attach(s_ring[0], mem, bytes);
+    debug_ring::attach(s_ring[1], mem + bytes, bytes);
 }

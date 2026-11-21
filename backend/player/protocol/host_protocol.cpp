@@ -21,12 +21,23 @@ namespace {
 constexpr uint8_t kSectorEnumCount = 4;
 constexpr uint32_t kSectorBytesMin = 128;
 
-// Имя платы и версия, ASCII, ровно 16 байт без нуля: это байты на шину,
-// а не C-строка (литерал добавил бы 17-й байт). Версия синхронизируется с
-// CMakeLists.txt вручную: модуль платформонезависим, макросов pico-sdk
-// не видит.
-constexpr uint8_t kBoardName[16] = {'P', 'I', '-', 'M', 'U', 'S', 'I', 'C', 'A', ' ', 'V', '0', '.', '4', '6', ' '};
-static_assert(sizeof(kBoardName) <= HostProtocol::kMaxPayload, "the board name fits the frame");
+// Имя платы с числами версии сборки (без суффикса -beta), ровно 16 байт
+// без нуля, добито пробелами: это байты на шину, а не C-строка.
+constexpr char kBoardText[]        = "PI-MUSICA V" SOUNDSINTH_VERSION_NUM_STR;
+constexpr uint32_t kBoardNameBytes = 16;
+static_assert(sizeof(kBoardText) - 1u <= kBoardNameBytes, "the board name with the version fits 16 characters");
+struct BoardName {
+    uint8_t bytes[kBoardNameBytes];
+};
+constexpr BoardName make_board_name() {
+    BoardName n{};
+    for (uint32_t i = 0; i < kBoardNameBytes; ++i) {
+        n.bytes[i] = static_cast<uint8_t>(i < sizeof(kBoardText) - 1u ? kBoardText[i] : ' ');
+    }
+    return n;
+}
+constexpr BoardName kBoardName = make_board_name();
+static_assert(sizeof(kBoardName.bytes) <= HostProtocol::kMaxPayload, "the board name fits the frame");
 
 uint8_t SOUNDSINTH_HOT_PATH(to_bcd8)(uint8_t v) {
     return static_cast<uint8_t>(((v / 10) << 4) | (v % 10));
@@ -141,7 +152,7 @@ void HostProtocol::on_data_byte(uint8_t byte) {
     // распоряжается хост, без проверки запись уходит за буфер. Отсечённое
     // считается (data_overflow).
     if (data_pos_ >= kDataBufferBytes) {
-        ++data_overflow_;
+        ++cnt_.data_overflow;
         return;
     }
     data_buf_[data_pos_] = byte;
@@ -153,7 +164,7 @@ void HostProtocol::on_data_byte(uint8_t byte) {
 SOUNDSINTH_HOT_PATH_ATTR("hp_poll")
 void HostProtocol::poll() {
     // Снимок приёма команд хоста - до последней проверки кольца: байт,
-    // пришедший после неё, покажет сверка после вооружения.
+    // пришедший после неё, покажет сверка после выставления.
     const uint8_t head0   = cmd_head_;
     const uint8_t pos0    = *const_cast<volatile uint8_t*>(&cmd_pos_);
     const uint32_t drops0 = *const_cast<volatile uint32_t*>(&cmd_overruns_);
@@ -165,18 +176,18 @@ void HostProtocol::poll() {
         dispatch_host_command();
     }
     // Спрятанная команда возвращается, когда кадр хоста, пришедший поверх
-    // её вооружения, разобран: кольцо пусто и новый кадр не начат. Маркер и
+    // её выставления, разобран: кольцо пусто и новый кадр не начат. Маркер и
     // NAK возвращают её сами; START, например, - нет.
     if (status_hidden_ && cmd_tail_ == cmd_head_ && *const_cast<volatile uint8_t*>(&cmd_pos_) == 0) {
         status_hidden_ = false;
         if (awaiting_ack_ && !published_) rearm();
     }
     // Только при !awaiting_ack_: статус снят на первом байте команды хоста, а
-    // разобрана она после восьмого; вооружённое в эту щель получит чужое
+    // разобрана она после восьмого; выставленное в эту щель получит чужое
     // подтверждение.
     if (awaiting_ack_) return;
     arm_next();
-    // Байт команды хоста во время вооружения: ISR снял статус раньше, чем
+    // Байт команды хоста во время выставления: ISR снял статус раньше, чем
     // платформа выставила новый, и хост увидел бы команду до разбора своего
     // кадра (исполнил бы её дважды или отдал подтверждение не той). Статус
     // прячется до разбора кадра.
@@ -193,7 +204,7 @@ void HostProtocol::dispatch_host_command() {
     switch (cmd_[0]) {
         case kHcReset:
             reset();
-            arm(kStResetDone, kBoardName, sizeof(kBoardName));
+            arm(kStResetDone, kBoardName.bytes, sizeof(kBoardName.bytes));
             return;
 
         case kHcStart:
@@ -212,7 +223,7 @@ void HostProtocol::dispatch_host_command() {
             return;
 
         case kHcNak:
-            ++nak_total_;
+            ++cnt_.naks;
             push_debug_event(DebugEventKind::Nak, armed_code_, nak_streak_, awaiting_ack_ ? 1u : 0u);
             retry_armed();
             return;
@@ -227,12 +238,6 @@ void HostProtocol::dispatch_host_command() {
             }
             // Как и маркер: обмен не меняет, снятую команду вернуть.
             if (awaiting_ack_) rearm();
-            return;
-
-        case kHcConfigRefresh:
-            // Разбирает цикл сеанса: пересчёт трогает настройки и страницу,
-            // в прерывании такому не место. Ответ придёт kStConfigDone.
-            config_refresh_request_ = true;
             return;
 
         case kHcConfigExit:
@@ -256,7 +261,7 @@ void HostProtocol::dispatch_host_command() {
             // снял статус, и неподтверждённую команду платы хост больше не
             // увидит. Вернуть, как по NAK, с тем же пределом попыток.
             // Счётчик - единственный признак сдвига кадра команд.
-            ++unknown_commands_;
+            ++cnt_.unknown;
             retry_armed();
             return;
     }
@@ -271,7 +276,7 @@ void HostProtocol::end_session() {
 
 SOUNDSINTH_HOT_PATH_ATTR("hp_retry_armed")
 void HostProtocol::retry_armed() {
-    // Уже подтверждённую команду не возвращать: poll() тут же вооружил бы
+    // Уже подтверждённую команду не возвращать: poll() тут же выставил бы
     // поверх неё следующую, и подтверждение хоста за старую досталось бы
     // новой (окно с длиной 0 - короткое чтение, запрос потерян).
     if (!awaiting_ack_) return;
@@ -284,7 +289,7 @@ void HostProtocol::retry_armed() {
         return;
     }
     // Сдаться.
-    ++nak_giveups_;
+    ++cnt_.nak_giveups;
     nak_streak_   = 0;
     awaiting_ack_ = false; // кадр закрыт, хоть и без успеха
     push_debug_event(DebugEventKind::NakGiveup, armed_code_, 0, 0);
@@ -317,7 +322,7 @@ void HostProtocol::handle_done() {
     // Длина пришла с шины и могла исказиться. Без отсечки испорченный
     // байт отправил бы чтение за буфер; больше окна хост не присылает.
     if (written > kDataBufferBytes) {
-        ++done_overflow_;
+        ++cnt_.done_overflow;
         written = kDataBufferBytes;
     }
 
@@ -327,7 +332,7 @@ void HostProtocol::handle_done() {
     // чтение.
     uint16_t len = (written < request_length_) ? written : request_length_;
     if (data_pos_ < written) {
-        ++data_short_;
+        ++cnt_.data_short;
         if (++short_streak_ < kMaxNak) {
             queued_offset_      = request_offset_;
             queued_length_      = request_length_;
@@ -337,7 +342,7 @@ void HostProtocol::handle_done() {
         len = 0;
     }
     short_streak_ = 0;
-    if (written < request_length_) ++short_done_;
+    if (written < request_length_) ++cnt_.short_done;
     received_len_ = len;
     received_     = true;
 }
@@ -350,15 +355,15 @@ bool HostProtocol::take_received(uint16_t& length) {
     return true;
 }
 
-// --- Вооружение ---
+// --- Выставление команды ---
 
-// Одна копия: зовут четыре места, встроенная во все стоила бы ~180 байт SRAM.
+// Одна копия на все места вызова: встроенная стоила бы SRAM.
 SOUNDSINTH_NOINLINE SOUNDSINTH_HOT_PATH_ATTR("hp_arm")
 void HostProtocol::arm(uint8_t code, const uint8_t* payload, uint8_t payload_len) {
     // Длиннее kMaxPayload - отсечь (иначе затрёт соседние поля) и посчитать
     // в arg_overflow.
     if (payload_len > kMaxPayload) {
-        ++arg_overflow_;
+        ++cnt_.arg_overflow;
         payload_len = kMaxPayload;
     }
 
@@ -422,9 +427,17 @@ void HostProtocol::store_position(uint8_t minutes_bcd, uint8_t seconds_bcd, uint
 
 SOUNDSINTH_HOT_PATH_ATTR("hp_arm_next")
 void HostProtocol::arm_next() {
-    // Порядок и есть приоритет: данные важнее телеметрии.
+    // Порядок и есть приоритет: данные важнее телеметрии. Но после окна
+    // данных - до kTelemetryPerWindow кадров телеметрии: догрузка идёт окнами
+    // подряд, и без этого VU и спектр хоста стоят до её конца. Кадр
+    // телеметрии - десятки байт против окна в kDataBufferBytes.
+    if (has_queued_request_ && telemetry_credit_ != 0 && (telemetry_dirty_ & telemetry_flags_) != 0) {
+        try_arm_telemetry();
+        return;
+    }
     if (has_queued_request_) {
         has_queued_request_ = false;
+        telemetry_credit_   = kTelemetryPerWindow;
 
         uint8_t a[kReadArgBytes];
         put_u32(&a[kReadOffset], queued_offset_);
@@ -457,8 +470,12 @@ static_assert(HostProtocol::kStFileInfo + HostProtocol::kTelemetryPositionLsb ==
                   HostProtocol::kStFileInfo + HostProtocol::kTelemetryVuLsb == HostProtocol::kStVu &&
                   HostProtocol::kStFileInfo + HostProtocol::kTelemetrySpectrumLsb == HostProtocol::kStSpectrum &&
                   HostProtocol::kStFileInfo + HostProtocol::kTelemetryPsramStatsLsb == HostProtocol::kStPsramStats &&
-                  HostProtocol::kStFileInfo + HostProtocol::kTelemetryEngineLoadLsb == HostProtocol::kStEngineLoad,
+                  HostProtocol::kStFileInfo + HostProtocol::kTelemetryEngineLoadLsb == HostProtocol::kStEngineLoad &&
+                  HostProtocol::kStFileInfo + HostProtocol::kTelemetryTrackMetaLsb == HostProtocol::kStTrackMeta,
               "the telemetry kind code is kStFileInfo plus the kind number");
+static_assert(HostProtocol::kTelemetryKindCount <= HostProtocol::kTelemetryKindsMax &&
+                  HostProtocol::kInternalBase >= HostProtocol::kStFileInfo + HostProtocol::kTelemetryKindsMax,
+              "the telemetry codes stay below the internal codes");
 
 SOUNDSINTH_HOT_PATH_ATTR("hp_try_arm_telemetry")
 void HostProtocol::try_arm_telemetry() {
@@ -466,6 +483,7 @@ void HostProtocol::try_arm_telemetry() {
     // сразу, без обхода.
     const uint8_t pending = telemetry_dirty_ & telemetry_flags_;
     if (pending == 0) return;
+    if (telemetry_credit_ != 0) --telemetry_credit_;
     // Круговой обход от курсора: каждый вид телеметрии получает очередь, ни
     // один не вытеснит остальные, как бы часто ни обновлялся.
     auto next_kind = [](uint8_t k) { return k + 1u == kTelemetryKindCount ? uint8_t{0} : static_cast<uint8_t>(k + 1u); };
@@ -500,10 +518,46 @@ void HostProtocol::try_arm_telemetry() {
             payload = engine_load_;
             len     = sizeof(engine_load_);
             break;
+        case kTelemetryTrackMetaLsb:
+            arm_track_meta();
+            return;
         default: // kTelemetryFileInfoLsb
             break;
     }
     arm(static_cast<uint8_t>(kStFileInfo + kind), payload, len);
+}
+
+// Во флеше: кадр метаданных - несколько раз на трек, а SRAM на счету.
+SOUNDSINTH_NOINLINE void HostProtocol::arm_track_meta() {
+    // 0x15 - вперёд метаданных: по нему хост стирает прежние.
+    if ((telemetry_dirty_ & telemetry_flags_ & kTelemetryFileInfo) != 0) {
+        telemetry_dirty_ = static_cast<uint8_t>((telemetry_dirty_ & ~kTelemetryFileInfo) | kTelemetryTrackMeta);
+        arm(kStFileInfo, file_info_, sizeof(file_info_));
+        return;
+    }
+    uint8_t frame[kTrackMetaBytes] = {};
+    // Кадр, пока шли метаданные, сдан после kMaxNak попыток: остаток не
+    // шлётся, хост без бита последнего кадра видит, что метаданные неполные.
+    const bool gave_up = track_meta_frame_ != 0 && cnt_.nak_giveups != track_meta_giveups_;
+    if (track_meta_fn_ == nullptr || gave_up || !track_meta_fn_(track_meta_user_, track_meta_frame_, frame)) {
+        track_meta_fn_ = nullptr;
+        return;
+    }
+    track_meta_giveups_ = cnt_.nak_giveups;
+    if ((frame[0] & kTrackMetaLast) != 0) {
+        track_meta_fn_ = nullptr;
+    } else {
+        ++track_meta_frame_;
+        telemetry_dirty_ |= kTelemetryTrackMeta;
+    }
+    arm(kStTrackMeta, frame, sizeof(frame));
+}
+
+void HostProtocol::set_track_meta(TrackMetaFn fn, void* user) {
+    track_meta_fn_    = fn;
+    track_meta_user_  = user;
+    track_meta_frame_ = 0;
+    telemetry_dirty_  = static_cast<uint8_t>(fn != nullptr ? telemetry_dirty_ | kTelemetryTrackMeta : telemetry_dirty_ & ~kTelemetryTrackMeta);
 }
 
 // --- Управление извне ---
@@ -532,9 +586,9 @@ HostProtocol::StateSnapshot HostProtocol::state_snapshot() const {
     s.telemetry_dirty  = telemetry_dirty_;
     s.data_pos         = data_pos_;
     s.cmd_overruns     = cmd_overruns_;
-    s.unknown_commands = unknown_commands_;
-    s.data_short       = data_short_;
-    s.short_done       = short_done_;
+    s.unknown_commands = cnt_.unknown;
+    s.data_short       = cnt_.data_short;
+    s.short_done       = cnt_.short_done;
     return s;
 }
 
@@ -550,6 +604,8 @@ void HostProtocol::set_file_info(uint8_t minutes, uint8_t seconds, uint16_t num_
     // Без сравнения: reset() значения не стирает, и второй трек с той же
     // длительностью и счётчиками остался бы без file_info.
     telemetry_dirty_ |= kTelemetryFileInfo;
+    // Новый трек: недосланные метаданные прошлого бросаются.
+    set_track_meta(nullptr, nullptr);
 }
 
 void HostProtocol::set_position(uint8_t minutes, uint8_t seconds, PlaybackState state, uint8_t flags) {
@@ -566,34 +622,25 @@ TransportOp HostProtocol::take_transport_request() {
     return op;
 }
 
-bool HostProtocol::take_config_refresh() {
-    const bool want         = config_refresh_request_;
-    config_refresh_request_ = false;
-    return want;
-}
-
 ConfigExit HostProtocol::take_config_exit() {
     const ConfigExit op  = config_exit_request_;
     config_exit_request_ = ConfigExit::None;
     return op;
 }
 
-void HostProtocol::arm_config_done(bool accepted) {
-    const uint8_t payload = accepted ? 1u : 0u;
-    arm(kStConfigDone, &payload, 1);
+void HostProtocol::update_kind(uint8_t* dst, const uint8_t* next, uint8_t n, uint8_t bit) {
+    if (std::memcmp(dst, next, n) == 0) return;
+    std::memcpy(dst, next, n);
+    telemetry_dirty_ |= bit;
 }
 
 void HostProtocol::set_vu(uint8_t left, uint8_t right) {
-    if (vu_[0] == left && vu_[1] == right) return;
-    vu_[0]            = left;
-    vu_[1]            = right;
-    telemetry_dirty_ |= kTelemetryVu;
+    const uint8_t next[] = {left, right};
+    update_kind(vu_, next, sizeof(vu_), kTelemetryVu);
 }
 
 void HostProtocol::set_spectrum(const uint8_t bands16[16]) {
-    if (std::memcmp(spectrum_, bands16, sizeof(spectrum_)) == 0) return;
-    std::memcpy(spectrum_, bands16, sizeof(spectrum_));
-    telemetry_dirty_ |= kTelemetrySpectrum;
+    update_kind(spectrum_, bands16, sizeof(spectrum_), kTelemetrySpectrum);
 }
 
 void HostProtocol::set_psram_stats(uint16_t total_samples, uint16_t queued, uint16_t loaded) {
@@ -601,20 +648,15 @@ void HostProtocol::set_psram_stats(uint16_t total_samples, uint16_t queued, uint
     put_u16(&next[0], total_samples);
     put_u16(&next[2], queued);
     put_u16(&next[4], loaded);
-    if (std::memcmp(psram_, next, sizeof(psram_)) == 0) return;
-    std::memcpy(psram_, next, sizeof(psram_));
-    telemetry_dirty_ |= kTelemetryPsramStats;
+    update_kind(psram_, next, sizeof(psram_), kTelemetryPsramStats);
+    // Трек без сэмплов шлёт кадр и при прежних нулях: без кадра хост держит
+    // строку загрузки.
+    if (total_samples == 0) telemetry_dirty_ |= kTelemetryPsramStats;
 }
 
 void HostProtocol::set_engine_load(uint8_t typical_voices, uint8_t peak_voices, uint8_t cpu_percent, uint8_t cull_level) {
-    uint8_t next[4];
-    next[0] = typical_voices;
-    next[1] = peak_voices;
-    next[2] = cpu_percent;
-    next[3] = cull_level;
-    if (std::memcmp(engine_load_, next, sizeof(engine_load_)) == 0) return;
-    std::memcpy(engine_load_, next, sizeof(engine_load_));
-    telemetry_dirty_ |= kTelemetryEngineLoad;
+    const uint8_t next[] = {typical_voices, peak_voices, cpu_percent, cull_level};
+    update_kind(engine_load_, next, sizeof(engine_load_), kTelemetryEngineLoad);
 }
 
 // --- Диагностика ---
@@ -623,45 +665,31 @@ void HostProtocol::set_engine_load(uint8_t typical_voices, uint8_t peak_voices, 
 // бы SRAM.
 SOUNDSINTH_NOINLINE void HostProtocol::rotate_session_counters() {
     prev_session_ = session_counters();
-    session_base_ = counters();
-}
-
-HostProtocol::Counters HostProtocol::counters() const {
-    Counters c;
-    c.naks          = nak_total_;
-    c.nak_giveups   = nak_giveups_;
-    c.data_overflow = data_overflow_;
-    c.done_overflow = done_overflow_;
-    c.arg_overflow  = arg_overflow_;
-    c.events_lost   = debug_events_lost_;
-    c.unknown       = unknown_commands_;
-    c.data_short    = data_short_;
-    c.short_done    = short_done_;
-    return c;
+    session_base_ = cnt_;
 }
 
 HostProtocol::Counters HostProtocol::session_counters() const {
-    const Counters now = counters();
+    const Counters& b = session_base_;
     Counters d;
-    d.naks          = now.naks - session_base_.naks;
-    d.nak_giveups   = now.nak_giveups - session_base_.nak_giveups;
-    d.data_overflow = now.data_overflow - session_base_.data_overflow;
-    d.done_overflow = now.done_overflow - session_base_.done_overflow;
-    d.arg_overflow  = now.arg_overflow - session_base_.arg_overflow;
-    d.events_lost   = now.events_lost - session_base_.events_lost;
-    d.unknown       = now.unknown - session_base_.unknown;
-    d.data_short    = now.data_short - session_base_.data_short;
-    d.short_done    = now.short_done - session_base_.short_done;
+    d.naks          = cnt_.naks - b.naks;
+    d.nak_giveups   = cnt_.nak_giveups - b.nak_giveups;
+    d.data_overflow = cnt_.data_overflow - b.data_overflow;
+    d.done_overflow = cnt_.done_overflow - b.done_overflow;
+    d.arg_overflow  = cnt_.arg_overflow - b.arg_overflow;
+    d.events_lost   = cnt_.events_lost - b.events_lost;
+    d.unknown       = cnt_.unknown - b.unknown;
+    d.data_short    = cnt_.data_short - b.data_short;
+    d.short_done    = cnt_.short_done - b.short_done;
     return d;
 }
 
-// Не встраивается: мест вызова семь, все редкие, копии раздували бы SRAM.
+// Не встраивается: места вызова редкие, копии раздували бы SRAM.
 SOUNDSINTH_NOINLINE SOUNDSINTH_HOT_PATH_ATTR("hp_push_debug_event")
 void HostProtocol::push_debug_event(DebugEventKind kind, uint8_t arg0, uint16_t arg1, uint32_t arg2) {
     const uint8_t head = debug_head_;
     const uint8_t next = static_cast<uint8_t>(head + 1);
     if (static_cast<uint8_t>(next - debug_tail_) > kDebugEventCapacity) {
-        ++debug_events_lost_; // переполнение: новое событие теряется
+        ++cnt_.events_lost; // переполнение: новое событие теряется
         return;
     }
     debug_events_[head % kDebugEventCapacity] = DebugEvent{kind, arg0, arg1, arg2};

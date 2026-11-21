@@ -5,11 +5,14 @@
 #include <cstdio>
 #include <iterator>
 
+#include "hardware/clocks.h"
 #include "hardware/sync.h"
 #include "pico/time.h"
 
 #include "platform/compiler.h"
 #include "platform/log.h"
+
+#include "devices/bdi/bdi.h"
 
 #include "player/shared_state.h" // чем занято ядро в самый долгий промежуток
 
@@ -77,12 +80,10 @@ SOUNDSINTH_NOINLINE void log_bus_losses_on_change(const bus::PioStats& st, const
     // норме, и нули тут же отличают потерю в очереди от неверного разбора
     // адреса. Числа - опросов, заставших флаг, а не слов.
     static uint32_t s_last_lost = 0;
-    const uint32_t lost         = bm.trap_lost + bm.join_lost + bm.route_lost + bm.detect_lost + bm.trdos_lost + bm.trdos_desync;
+    const uint32_t lost         = bm.trap_lost + bm.join_lost + bm.route_lost + bm.detect_lost;
     if (lost != s_last_lost) {
-        snprintf(s_out, sizeof(s_out),
-                 "bus: TRAP QUEUE LOST (polls) rom_trap=%" PRIu32 " join=%" PRIu32 " route=%" PRIu32 " detect=%" PRIu32 " | trdos lost=%" PRIu32
-                 " desync=%" PRIu32 "\n",
-                 bm.trap_lost, bm.join_lost, bm.route_lost, bm.detect_lost, bm.trdos_lost, bm.trdos_desync);
+        snprintf(s_out, sizeof(s_out), "bus: TRAP QUEUE LOST (polls) rom_trap=%" PRIu32 " join=%" PRIu32 " route=%" PRIu32 " detect=%" PRIu32 "\n",
+                 bm.trap_lost, bm.join_lost, bm.route_lost, bm.detect_lost);
         debug_log(s_out);
         s_last_lost = lost;
     }
@@ -108,14 +109,29 @@ SOUNDSINTH_NOINLINE void log_bus_summary(const bus::PioStats& st, const bus::Bus
     // молчанию не отличить "потерь нет" от "счётчик не снимается".
     snprintf(s_out, sizeof(s_out),
              "bus: trap queues lost (polls) rom_trap=%" PRIu32 " join=%" PRIu32 " route=%" PRIu32 " detect=%" PRIu32 " | stalls join=%" PRIu32 " route=%" PRIu32
-             "\n",
-             bm.trap_lost, bm.join_lost, bm.route_lost, bm.detect_lost, bm.join_stall, bm.route_stall);
+             " | variant waits=%" PRIu32 " clears=%" PRIu32 "\n",
+             bm.trap_lost, bm.join_lost, bm.route_lost, bm.detect_lost, bm.join_stall, bm.route_stall, bm.variant_waits, bm.variant_clears);
     debug_log(s_out);
-    // TR-DOS: вывод DOS_N и состояние детектора; на машине без карты журнал
-    // - единственный свидетель потерянной отметки.
+    // Худший проход обработчика записей: базовая строка бюджета для
+    // применения ВГ93 в нём же (план Б2). Кумулятивно с загрузки.
+    const uint32_t cyc_per_us = clock_get_hz(clk_sys) / 1000000u;
+    const uint32_t tenths     = bm.wr_isr_cyc_max * 10u / (cyc_per_us ? cyc_per_us : 1u);
+    snprintf(s_out, sizeof(s_out), "bus: wr isr worst %" PRIu32 " cycles = %" PRIu32 ".%" PRIu32 " us, drained %" PRIu32 " words\n", bm.wr_isr_cyc_max,
+             tenths / 10u, tenths % 10u, bm.wr_isr_cyc_drained);
+    debug_log(s_out);
+    // TR-DOS: вывод DOS_N и флаг DOS; на машине без карты они видны только
+    // здесь.
     if (bm.trdos) {
-        snprintf(s_out, sizeof(s_out), "trdos: DOS_N=%u state=%s lost=%" PRIu32 " desync=%" PRIu32 "\n", static_cast<unsigned>(bm.trdos_level),
-                 bm.trdos_asserted ? "asserted" : "released", bm.trdos_lost, bm.trdos_desync);
+        snprintf(s_out, sizeof(s_out), "trdos: DOS_N=%u state=%s\n", static_cast<unsigned>(bm.trdos_level), bm.trdos_asserted ? "asserted" : "released");
+        debug_log(s_out);
+    }
+    // Фронты линий хоста: в простое приращения нулевые.
+    snprintf(s_out, sizeof(s_out),
+             "signal: edge polls (fall/rise) dos %" PRIu32 "/%" PRIu32 " nmi %" PRIu32 "/%" PRIu32 " romblk %" PRIu32 "/%" PRIu32 " reset %" PRIu32 "/%" PRIu32
+             "\n",
+             bm.sig_edges[0], bm.sig_edges[1], bm.sig_edges[2], bm.sig_edges[3], bm.sig_edges[4], bm.sig_edges[5], bm.sig_edges[6], bm.sig_edges[7]);
+    debug_log(s_out);
+    for (int i = 0; devices::bdi::bdi_log_line(i, s_out, sizeof(s_out)); ++i) {
         debug_log(s_out);
     }
     // Промежуток и фаза - своей строкой: вместе со счётчиками выше это 231
@@ -127,7 +143,7 @@ SOUNDSINTH_NOINLINE void log_bus_summary(const bus::PioStats& st, const bus::Bus
 }
 
 // Снимок протокола. Хост не опрашивает (armed, ack=1, байты не растут),
-// плата ждёт окна (data=1) или вооружать нечего (всё нули) - по сводке
+// плата ждёт окна (data=1) или выставлять нечего (всё нули) - по сводке
 // шины одинаковы.
 SOUNDSINTH_NOINLINE void log_protocol_state(const player::protocol::HostProtocol& protocol, uint32_t now_ms) {
     const player::protocol::HostProtocol::StateSnapshot ps = protocol.state_snapshot();

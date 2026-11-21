@@ -52,20 +52,39 @@ bool sample_of_cell(const Song& song, uint16_t& last_instrument, const PatternCe
     return song.samples[*sample].length_samples != 0;
 }
 
+// n позиций массива - "не звучит"; nullptr - массива нет.
+void mark_never_used(uint16_t* use, uint16_t n) {
+    if (use == nullptr) return;
+    for (uint16_t i = 0; i < n; ++i) {
+        use[i] = kSampleNeverUsed;
+    }
+}
+
+// Сэмпл звучит на позиции pos: last_use - максимум, first_use (если есть) -
+// минимум по всем вхождениям. true - встречен впервые.
+bool note_use(uint16_t* last_use, uint16_t* first_use, uint16_t sample, uint16_t pos) {
+    const bool first_time = last_use[sample] == kSampleNeverUsed;
+    if (first_time || pos > last_use[sample]) last_use[sample] = pos;
+    if (first_use != nullptr && (first_time || pos < first_use[sample])) first_use[sample] = pos;
+    return first_time;
+}
+
+// Позиция order звучит: маркеры, битые номера, паттерн без строк и без
+// каналов - нет. Одно условие на план и на границу префетча.
+bool order_plays(const Song& song, uint16_t pat_index) {
+    if (pat_index == soundsinth::model::kOrderSkip || pat_index >= song.pattern_count) return false;
+    const Pattern& pat = song.patterns[pat_index];
+    return (song.row_fetch != nullptr || pat.psram_offset != Pattern::kInvalidOffset) && pat.channel_count != 0;
+}
+
 } // namespace
 
 PlaybackPlan plan_playback_order(const Song& song, soundsinth::memory::PsramStore& psram, uint16_t* out_indices, uint16_t capacity,
                                  uint16_t* out_last_use_order_pos, LoadOrder order, uint16_t prefetch_positions, uint16_t* out_first_use_order_pos) {
     if (out_indices == nullptr || out_last_use_order_pos == nullptr || capacity == 0) return {};
 
-    for (uint16_t i = 0; i < song.sample_count; ++i) {
-        out_last_use_order_pos[i] = kSampleNeverUsed;
-    }
-    if (out_first_use_order_pos != nullptr) {
-        for (uint16_t i = 0; i < song.sample_count; ++i) {
-            out_first_use_order_pos[i] = kSampleNeverUsed;
-        }
-    }
+    mark_never_used(out_last_use_order_pos, song.sample_count);
+    mark_never_used(out_first_use_order_pos, song.sample_count);
 
     // Строка на стеке, 384 байта: нужна на один вызов.
     PatternCell row[kMaxPatternChannels];
@@ -81,13 +100,11 @@ PlaybackPlan plan_playback_order(const Song& song, soundsinth::memory::PsramStor
     for (uint16_t pos = 0; pos < song.order_count; ++pos) {
         const uint16_t pat_index = song.order[pos];
         if (pat_index == soundsinth::model::kOrderEnd) break; // конец линейного содержимого песни
-        if (pat_index == soundsinth::model::kOrderSkip || pat_index >= song.pattern_count) continue;
-
-        const Pattern& pat = song.patterns[pat_index];
         // Строки может не быть в зоне паттернов вовсе: у .mid её делает
-        // источник. Без этой ветки план пуст, и на плате трек играет тишину.
+        // источник. Без этого план пуст, и на плате трек играет тишину.
+        if (!order_plays(song, pat_index)) continue;
+        const Pattern& pat     = song.patterns[pat_index];
         const bool from_source = song.row_fetch != nullptr;
-        if ((!from_source && pat.psram_offset == Pattern::kInvalidOffset) || pat.channel_count == 0) continue;
 
         // Граница префетча - по воспроизводимым позициям: маркеры и битые
         // индексы звук не задерживают и в префетч не входят.
@@ -112,14 +129,9 @@ PlaybackPlan plan_playback_order(const Song& song, soundsinth::memory::PsramStor
                 uint16_t sample_idx = 0;
                 if (!sample_of_cell(song, last_instrument[ch], row[ch], &sample_idx)) continue;
 
-                // pos растёт монотонно, поэтому присваивание и есть максимум
-                // по всем вхождениям, в том числе когда паттерн стоит в order
-                // несколько раз.
-                const bool first_time              = out_last_use_order_pos[sample_idx] == kSampleNeverUsed;
-                out_last_use_order_pos[sample_idx] = pos;
-                if (first_time && out_first_use_order_pos != nullptr) {
-                    out_first_use_order_pos[sample_idx] = pos;
-                }
+                // Паттерн может стоять в order несколько раз: last_use - по
+                // последнему вхождению.
+                const bool first_time = note_use(out_last_use_order_pos, out_first_use_order_pos, sample_idx, pos);
                 if (first_time && count < capacity) out_indices[count++] = sample_idx;
             }
         }
@@ -145,10 +157,8 @@ void plan_collect_begin(PlanCollector& pc, const Song& song, uint16_t* out_indic
     // Массивы - на capacity элементов: дальше не пишется, даже если
     // сэмплов в песне больше.
     const uint16_t n = song.sample_count < capacity ? song.sample_count : capacity;
-    for (uint16_t i = 0; i < n; ++i) {
-        if (out_last_use_order_pos != nullptr) out_last_use_order_pos[i] = kSampleNeverUsed;
-        if (out_first_use_order_pos != nullptr) out_first_use_order_pos[i] = kSampleNeverUsed;
-    }
+    mark_never_used(out_last_use_order_pos, n);
+    mark_never_used(out_first_use_order_pos, n);
 }
 
 void plan_collect_row(void* user, const PatternCell* cells, uint8_t channel_count, uint16_t order_pos) {
@@ -162,13 +172,8 @@ void plan_collect_row(void* user, const PatternCell* cells, uint8_t channel_coun
         if (!sample_of_cell(song, pc.last_instrument[ch], cells[ch], &sample_idx)) continue;
         if (sample_idx >= pc.capacity) continue; // за массивами плана
 
-        // Позиция в проходе может убывать (переход назад), поэтому крайние
-        // считаются минимумом и максимумом, а не присваиванием.
-        const bool first_time = pc.last_use[sample_idx] == kSampleNeverUsed;
-        if (first_time || order_pos > pc.last_use[sample_idx]) pc.last_use[sample_idx] = order_pos;
-        if (pc.first_use != nullptr) {
-            if (first_time || order_pos < pc.first_use[sample_idx]) pc.first_use[sample_idx] = order_pos;
-        }
+        // Позиция в проходе может убывать (переход назад).
+        const bool first_time = note_use(pc.last_use, pc.first_use, sample_idx, order_pos);
         if (first_time && pc.count < pc.capacity) pc.indices[pc.count++] = sample_idx;
         if (pc.use_map != nullptr) use_map_mark(*pc.use_map, sample_idx, order_pos);
     }
@@ -223,16 +228,25 @@ uint16_t use_map_distance(const UseMap& m, uint16_t sample, uint16_t order_pos) 
 
 PlaybackPlan plan_split_prefetch(const Song& song, uint16_t* indices, uint16_t count, const uint16_t* first_use, uint16_t prefetch_positions, LoadOrder order) {
     if (indices == nullptr || first_use == nullptr) return {};
-    // Обменами, без сохранения порядка: обе части всё равно сортируются
-    // следом, а у ByPlayback состав важен, а не порядок внутри части.
+    // Граница - в сырых номерах order, как first_use: prefetch_positions
+    // считает только звучащие позиции, и маркеры в начале order иначе
+    // сдвигали бы её вперёд - сэмплы первых нот оставались за префетчем.
+    uint16_t raw = 0;
+    for (uint16_t played = 0; raw < song.order_count && played < prefetch_positions; ++raw) {
+        if (song.order[raw] == soundsinth::model::kOrderEnd) break;
+        if (order_plays(song, song.order[raw])) ++played;
+    }
+    // Устойчиво, вставкой: у ByPlayback порядок первого появления и есть
+    // заказ, сортировки после нет. Раз на трек.
     uint16_t w = 0;
     for (uint16_t i = 0; i < count; ++i) {
-        const uint16_t fu = first_use[indices[i]];
-        if (fu == kSampleNeverUsed || fu >= prefetch_positions) continue;
-        const uint16_t t = indices[w];
-        indices[w]       = indices[i];
-        indices[i]       = t;
-        ++w;
+        const uint16_t v  = indices[i];
+        const uint16_t fu = first_use[v];
+        if (fu == kSampleNeverUsed || fu >= raw) continue;
+        for (uint16_t j = i; j > w; --j) {
+            indices[j] = indices[j - 1];
+        }
+        indices[w++] = v;
     }
     sort_plan_parts(song, indices, w, count, order);
     return {count, w};

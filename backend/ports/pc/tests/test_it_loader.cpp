@@ -9,6 +9,7 @@
 
 #include "core/formats/load_stats.h"
 #include "core/model/song.h"
+#include "core/engine/tracker_engine.h"
 #include "core/formats/it.h"
 #include "core/formats/memory_byte_source.h"
 #include "core/memory/track_memory.h"
@@ -821,8 +822,10 @@ soundsinth::model::VolumeColumnCommand it_volume_ref(uint8_t v) {
 }
 
 // Буквы IT -> Effect, как S3MConvert OpenMPT для IT: Cxx не в BCD, Vxx как
-// есть, 28 ('\') - SmoothMidiMacro; 27 и 29-31 (XParam, DelayCut, Finetune)
-// не разбираются. S0x и S7x у OpenMPT - память параметра и NNA, у нас None
+// есть, 28 ('\') - как Zxx; 27 и 29-31 (XParam, DelayCut, Finetune)
+// не разбираются. Zxx >= 0x80 - фиксированные макросы, без блока в файле -
+// умолчания Impulse Tracker: Z80..Z8F резонанс 0, 8, ..., 120, выше пусто.
+// S0x и S7x у OpenMPT - память параметра и NNA, у нас None
 // (расхождение, пачка поведения). Колонка громкости - все 256 байт.
 void test_effect_letters() {
     std::printf("test_it_effect_letters\n");
@@ -859,7 +862,10 @@ void test_effect_letters() {
         {24, 0x80, Effect::SetPanning, 0x80},
         {25, 0x44, Effect::Panbrello, 0x44},
         {26, 0x50, Effect::SetMidiMacro, 0x50},
-        {28, 0x51, Effect::SmoothMidiMacro, 0x51},
+        {26, 0x80, Effect::SetFilterResonance, 0},
+        {26, 0x88, Effect::SetFilterResonance, 64},
+        {26, 0x90, Effect::None, 0},
+        {28, 0x51, Effect::SetMidiMacro, 0x51},
         {19, 0x11, Effect::GlissandoControl, 1},
         {19, 0x22, Effect::SetFinetune, 2},
         {19, 0x31, Effect::SetVibratoWaveform, 1},
@@ -1073,9 +1079,9 @@ void test_empty_envelopes() {
     memory::track_memory_destroy(mem);
 }
 
-// Потери разбора считаются: петля удержания и автовибрато сэмпла (не
-// воспроизводятся), ячейка S0x (не разбирается), сэмпл, данные которого за
-// концом файла (выброшен).
+// Статистика разбора: сэмпл с петлёй удержания (играет до Note-Off),
+// автовибрато (не воспроизводится), ячейка S0x (не разбирается), сэмпл,
+// данные которого за концом файла (выброшен).
 void test_load_stats() {
     std::printf("test_it_load_stats\n");
     std::vector<uint8_t> body = {0x81, 0x08, 19, 0x05, 0x00}; // канал 1: S05
@@ -1086,7 +1092,9 @@ void test_load_stats() {
     if (it == f.end()) return;
     const size_t h  = static_cast<size_t>(it - f.begin());
     f[h + 18]      |= 0x20; // петля удержания
-    f[h + 77]       = 5;    // глубина автовибрато
+    f[h + 68]       = 2;    // её конец: 0..2, иначе петля пуста и не считается
+    f[h + 76] = 3; // скорость автовибрато: без неё IT-ветка не исполняется и сэмпл не считается
+    f[h + 77] = 5; // глубина автовибрато
     for (const bool cut : {false, true}) {
         formats::MemoryByteSource src(f.data(), static_cast<uint32_t>(f.size()) - (cut ? 2u : 0u));
         memory::TrackMemory mem;
@@ -1096,11 +1104,59 @@ void test_load_stats() {
         const soundsinth::model::TrackerLoadStats& ls = soundsinth::model::g_tracker_load_stats;
         CHECK_EQ(ls.effect_cells_dropped, 1u);
         CHECK_EQ(ls.samples_dropped, static_cast<uint16_t>(cut ? 1 : 0));
-        CHECK_EQ(ls.ignored_sustain_loops, static_cast<uint16_t>(cut ? 0 : 1));
-        CHECK_EQ(ls.ignored_autovibrato, static_cast<uint16_t>(cut ? 0 : 1));
+        CHECK_EQ(ls.sustain_loops, static_cast<uint16_t>(cut ? 0 : 1));
+        CHECK_EQ(ls.autovibrato, static_cast<uint16_t>(cut ? 0 : 1));
         CHECK_EQ(ls.samples_failed, static_cast<uint16_t>(0));
+        // Петля удержания (0..2) легла в loop_* дескриптора, обычная петля
+        // синтетики (0..4) - в Song::sus_release.
+        CHECK_EQ(song.sus_release_count, static_cast<uint16_t>(cut ? 0 : 1));
+        if (!cut && song.sus_release_count == 1) {
+            CHECK(song.samples[0].sus_loop);
+            CHECK(song.samples[0].loop_enabled);
+            CHECK_EQ(song.samples[0].loop_start, 0u);
+            CHECK_EQ(song.samples[0].loop_end, 2u);
+            CHECK(song.sus_release[0].loop_enabled);
+            CHECK_EQ(song.sus_release[0].loop_start, 0u);
+            CHECK_EQ(song.sus_release[0].loop_end, 4u);
+        }
         memory::track_memory_destroy(mem);
     }
+}
+
+// MOD_PANNING сужает только MOD: S8x в IT при 20% звучит как при 100%.
+void test_s8x_ignores_mod_panning() {
+    std::printf("test_it_s8x_ignores_mod_panning\n");
+    // Строка 0: нота, инструмент, S80 (панорама влево); три пустые.
+    const std::vector<uint8_t> pattern = {0x81, 0x0B, 48, 1, 19, 0x80, 0x00, 0x00, 0x00, 0x00};
+    const std::vector<uint8_t> file    = build_synthetic_it(false, 0, nullptr, nullptr, &pattern, 4);
+    std::vector<int32_t> out[2];
+    const uint8_t percent[2] = {100, 20};
+    for (int k = 0; k < 2; ++k) {
+        formats::MemoryByteSource mbs(file.data(), static_cast<uint32_t>(file.size()));
+        memory::TrackMemory mem;
+        memory::track_memory_create(mem);
+        Song song;
+        CHECK(formats::it::load(mbs.as_byte_source(), mem, song, nullptr));
+        engine::TrackerEngine eng(song, mem, percent[k]);
+        constexpr uint32_t kChunk = SOUNDSINTH_AUDIO_BUFFER_FRAMES;
+        std::vector<int32_t> l(kChunk), r(kChunk);
+        mixbus::SoundSource* s = eng.as_sound_source();
+        for (uint32_t done = 0; done < 44100u / 4u; done += kChunk) {
+            std::fill(l.begin(), l.end(), 0);
+            std::fill(r.begin(), r.end(), 0);
+            s->render_add(s->self, l.data(), r.data(), kChunk);
+            for (uint32_t i = 0; i < kChunk; ++i) {
+                out[k].push_back(l[i]);
+                out[k].push_back(r[i]);
+            }
+        }
+        memory::track_memory_destroy(mem);
+    }
+    bool stereo = false;
+    for (size_t i = 0; i + 1 < out[0].size(); i += 2)
+        stereo = stereo || out[0][i] != out[0][i + 1];
+    CHECK(stereo); // S80 сработал: каналы разные
+    CHECK(out[0] == out[1]);
 }
 
 } // namespace
@@ -1122,4 +1178,5 @@ void run_it_loader_tests() {
     test_pan_pitch_envelope_offset_and_filter_flag();
     test_chnpan_mute_bit();
     test_modplug_signature();
+    test_s8x_ignores_mod_panning();
 }

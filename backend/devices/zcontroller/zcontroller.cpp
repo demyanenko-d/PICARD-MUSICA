@@ -13,25 +13,19 @@
 namespace devices::zcontroller {
 namespace {
 
-namespace sd  = devices::sd;
-namespace hal = devices::hal;
-
 // Запись в порт управления: бит SSEL, ноль выбирает карту. Номера портов и
 // значения чтения - в заголовке: их сверяет тест.
 constexpr uint8_t kCtrlSselBit = 0x02;
 
+// -1 - ещё не публиковали: первая публикация нужна при любом состоянии.
+int8_t s_present_published = -1;
+bool s_running             = false;
+
 // --- Защёлка ответа ---
 //
-// Z-Controller работает конвейером: чтение порта данных
-// возвращает результат предыдущего обмена и сразу запускает следующий,
-// холостой. Z80 не ждёт завершения обмена, а забирает готовое.
-//
-// С шиной это совпадает: ответ на чтение выдаёт PIO из таблицы, байт
-// должен лежать там заранее, и здесь это всегда уже случившийся
-// результат. Один обмен на одно обращение хоста.
-//
-// Лишний обмен на чтении ломает разбор: команда - шесть записей подряд, и
-// она превращается в CMD0 с аргументом 0xFF00FF00.
+// Конвейер 0x57 (заголовок) совпадает с шиной: ответ на чтение PIO берёт
+// из таблицы, байт там лежит заранее. Один обмен на одно обращение:
+// лишний обмен на чтении превращает команду в CMD0 с аргументом 0xFF00FF00.
 //
 // Ячейку пишут оба обработчика. Вытесненный между обменом и записью
 // положил бы свой, более ранний ответ поверх свежего: запись повторяется,
@@ -54,14 +48,10 @@ void SOUNDSINTH_HOT_PATH(port_write_data)(uint8_t, uint8_t data) {
 }
 
 void SOUNDSINTH_HOT_PATH(port_write_ctrl)(uint8_t, uint8_t data) {
-    // Бит 1: ноль выбирает карту. Порт управления обмена не делает, только двигает CS. Защёлка не
-    // трогается: в ней результат последнего обмена.
+    // Бит 1: ноль выбирает карту. Обмена порт управления не делает, только
+    // двигает CS; защёлку не трогает: в ней результат последнего обмена.
     sd::sd_spi_select(sd::SdOwner::ZController, (data & kCtrlSselBit) == 0u);
 }
-
-// -1 - ещё не публиковали: первая публикация нужна при любом состоянии.
-int8_t s_present_published = -1;
-bool s_running             = false;
 
 void SOUNDSINTH_HOT_PATH(publish_presence)(bool present) {
     const int8_t now = present ? 1 : 0;
@@ -88,7 +78,7 @@ void zcontroller_init() {
 
     // Состояние карты в порту управления: драйвер WC смотрит только бит 1,
     // но чужой софт может смотреть и остальные.
-    publish_presence(devices::storage::storage_emulator_present(sd::SdOwner::ZController));
+    publish_presence(storage::storage_emulator_state(sd::SdOwner::ZController).present);
 
     // До первого обмена защёлка пуста - отдаётся то же, что невыбранная
     // карта.
@@ -98,10 +88,10 @@ void zcontroller_init() {
 
 void SOUNDSINTH_HOT_PATH(zcontroller_tick)() {
     if (!s_running) return;
-    // Опрос, а не событие: обе проверки читают готовый признак драйвера, ни
-    // одного обращения к носителю здесь нет. Публикация - запись байта в
-    // таблицу ответов, шину она не задерживает.
-    publish_presence(devices::storage::storage_emulator_present(sd::SdOwner::ZController));
+    // Опрос, а не событие: проверка читает готовый снимок носителя, к
+    // самому носителю не обращается. Публикация - запись байта в таблицу
+    // ответов, шину она не задерживает.
+    publish_presence(storage::storage_emulator_state(sd::SdOwner::ZController).present);
 }
 
 } // namespace devices::zcontroller

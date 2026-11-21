@@ -19,43 +19,33 @@ cd /d "%~dp0..\frontend\config_rom"
 if not exist obj mkdir obj
 
 set FW=..\z80_fw
-set BUS=..\common
-set CFLAGS=-mz80 --sdcccall 1 --no-std-crt0 --opt-code-size -I . -I %BUS% --disable-warning 85
 set ASFLAGS=-plosgff
 
-echo [1/5] Assembling the framework...
+echo [1/4] Assembling the framework...
 for %%F in (scr kbd font) do (
     sdasz80 %ASFLAGS% obj\%%F.rel %FW%\%%F.s >nul
     if errorlevel 1 ( echo FAIL %%F.s && exit /b 1 )
 )
 
-echo [2/5] Assembling startup and glue...
-for %%F in (crt0 fw_glue) do (
-    sdasz80 %ASFLAGS% obj\%%F.rel %%F.s >nul
+echo [2/4] Assembling the configurator...
+for %%F in (crt0 menu) do (
+    sdasz80 %ASFLAGS% obj\%%F.rel %%F.s
     if errorlevel 1 ( echo FAIL %%F.s && exit /b 1 )
 )
 
-echo [3/5] Compiling C...
-for %%F in (main cfgbus) do (
-    sdcc %CFLAGS% -c %%F.c -o obj\%%F.rel
-    if errorlevel 1 ( echo FAIL %%F.c && exit /b 1 )
-)
-
-echo [4/5] Linking...
+echo [3/4] Linking...
 REM Vectors live inside _CODE with assembler-computed padding. Pinned areas
 REM are laid out in the linker's own order and _GSINIT lands on top of the
 REM code. The font sits in the last two kilobytes of the image.
 sdcc -mz80 --no-std-crt0 --out-fmt-ihx --code-loc 0x0000 --data-loc 0x6000 ^
     -Wl-b_FONT=0x1800 ^
     obj\crt0.rel ^
-    obj\main.rel ^
-    obj\cfgbus.rel ^
-    obj\fw_glue.rel ^
+    obj\menu.rel ^
     obj\scr.rel obj\kbd.rel obj\font.rel ^
     -o obj\config_rom.ihx
 if errorlevel 1 ( echo FAIL link && exit /b 1 )
 
-echo [5/5] Packing the image...
+echo [4/4] Packing the image...
 makebin -s 65536 obj\config_rom.ihx obj\config_rom.full
 if errorlevel 1 ( echo FAIL makebin && exit /b 1 )
 REM Without the map on purpose: it would also count _DATA at 0x6000, which

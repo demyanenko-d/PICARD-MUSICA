@@ -15,6 +15,7 @@ namespace devices::sd {
 
 inline constexpr uint8_t kCmd0   = 0;  // GO_IDLE_STATE
 inline constexpr uint8_t kCmd1   = 1;  // SEND_OP_COND: инициализация MMC
+inline constexpr uint8_t kCmd6   = 6;  // SWITCH_FUNC: High Speed
 inline constexpr uint8_t kCmd8   = 8;  // SEND_IF_COND
 inline constexpr uint8_t kCmd9   = 9;  // SEND_CSD
 inline constexpr uint8_t kCmd10  = 10; // SEND_CID

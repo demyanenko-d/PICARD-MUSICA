@@ -129,6 +129,14 @@ public:
         return d > 0 ? static_cast<uint32_t>(d) : 0;
     }
 
+    // Очередь пуста: события прошлого сеанса не выйдут в следующем. Зовёт
+    // читатель, когда писатель стоит.
+    void clear() {
+        const uint32_t w = write_.load(std::memory_order_relaxed);
+        read_.store(w, std::memory_order_relaxed);
+        prefetched_ = w;
+    }
+
     // Событий в очереди (ждут своей форы).
     uint32_t pending() const { return write_.load(std::memory_order_acquire) - read_.load(std::memory_order_relaxed); }
 

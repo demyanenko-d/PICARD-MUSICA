@@ -132,6 +132,50 @@ void test_position_jump() {
     CHECK_EQ(ps.pattern_idx, 2); // паттерн 1 пропущен целиком
 }
 
+// Position Jump посреди паттерна уходит в конце своей строки, а не в конце
+// паттерна. У паттернов из одной строки (test_position_jump) конец паттерна
+// наступает и без этого.
+void test_position_jump_mid_pattern() {
+    std::printf("test_sequencer_position_jump_mid_pattern\n");
+    const std::vector<std::vector<PatternCell>> four = {{make_cell()}, {make_cell()}, {make_cell()}, {make_cell()}};
+    Fixture f;
+    f.add_pattern({{make_cell()}, {make_cell(Effect::PositionJump, 2)}, {make_cell()}, {make_cell()}}, 1);
+    f.add_pattern(four, 1);
+    f.add_pattern(four, 1);
+    f.order = {0, 1, 2};
+    f.finalize(1);
+    f.song.default_speed = 1;
+    engine::PlayState ps;
+    CHECK(engine::sequencer_init(f.song, f.psram, ps, nullptr, nullptr)); // row0
+    CHECK(engine::sequencer_tick(f.song, f.psram, ps, nullptr, nullptr)); // -> row1, Bxx
+    CHECK(engine::sequencer_tick(f.song, f.psram, ps, nullptr, nullptr)); // прыжок
+    CHECK_EQ(ps.order_pos, 2);
+    CHECK_EQ(ps.pattern_idx, 2);
+    CHECK_EQ(ps.row, 0);
+
+    // IT с kFlowLoopDelaysSameRowBreak: Bxx на строке сработавшего SBx тоже
+    // уходит с этой строки.
+    Fixture g;
+    g.add_pattern({{make_cell(Effect::PatternLoop, 0), make_cell()},
+                   {make_cell(Effect::PatternLoop, 1), make_cell(Effect::PositionJump, 2)},
+                   {make_cell(), make_cell()},
+                   {make_cell(), make_cell()}},
+                  2);
+    g.add_pattern({{make_cell(), make_cell()}}, 2);
+    g.add_pattern({{make_cell(), make_cell()}, {make_cell(), make_cell()}}, 2);
+    g.order = {0, 1, 2};
+    g.finalize(2);
+    g.song.default_speed = 1;
+    g.song.flow_mode     = soundsinth::model::kFlowLoopDelaysSameRowBreak;
+    engine::PlayState ps2;
+    CHECK(engine::sequencer_init(g.song, g.psram, ps2, nullptr, nullptr));
+    CHECK(engine::sequencer_tick(g.song, g.psram, ps2, nullptr, nullptr)); // -> row1
+    CHECK(engine::sequencer_tick(g.song, g.psram, ps2, nullptr, nullptr));
+    CHECK_EQ(ps2.order_pos, 2);
+    CHECK_EQ(ps2.pattern_idx, 2);
+    CHECK_EQ(ps2.row, 0);
+}
+
 void test_pattern_break_row_target() {
     std::printf("test_sequencer_pattern_break_row_target\n");
     Fixture f;
@@ -468,6 +512,12 @@ void test_init_header_channel_state_under_row0_effects() {
     CHECK_EQ(ch[1].pan, 48);
     CHECK_EQ(ch[2].pan, 64);
     CHECK_EQ(ch[0].channel_volume, 40);
+
+    // Модуль GS - как у карты: 0 и 1 слева, 2 и 3 справа, сужение не
+    // действует.
+    f.song.quirks |= soundsinth::model::kQuirkGsModule;
+    engine::channels_init(f.song, ch, 50);
+    CHECK(ch[0].pan == 0 && ch[1].pan == 0 && ch[2].pan == 64 && ch[3].pan == 64);
 }
 
 // Длительность одного прохода: повтор строки Pattern Delay и возврат Pattern
@@ -764,6 +814,7 @@ void run_sequencer_tests() {
     test_duration_position_goes_back();
     test_sequential_no_effects();
     test_position_jump();
+    test_position_jump_mid_pattern();
     test_pattern_break_row_target();
     test_position_jump_and_pattern_break_same_row();
     test_pattern_loop_per_channel();

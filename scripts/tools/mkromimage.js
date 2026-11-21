@@ -1,6 +1,10 @@
 // Двоичный образ ПЗУ в заголовок для прошивки.
 //
 //   node mkromimage.js <образ.bin> <выход.h> <имя> <размер> <описание>
+//       [карта.map [конец ОЗУ]]
+//
+// С картой области ПЗУ сверяются на наложение, с концом ОЗУ - данные в ОЗУ
+// машины на то, что кончаются не дальше него.
 //
 // Образ дополняется до точного размера: ПЗУ отвечает машине на весь свой
 // диапазон, и хвост обязан быть определён, а не тем, что осталось в
@@ -8,9 +12,9 @@
 
 const fs = require('fs');
 
-const [, , src, dst, name, sizeArg, note, mapFile] = process.argv;
+const [, , src, dst, name, sizeArg, note, mapFile, ramEndArg] = process.argv;
 if (!src || !dst || !name || !sizeArg) {
-    console.error('usage: mkromimage.js <rom.bin> <out.h> <name> <size> [note] [link.map]');
+    console.error('usage: mkromimage.js <rom.bin> <out.h> <name> <size> [note] [link.map [ram_end]]');
     process.exit(1);
 }
 
@@ -22,13 +26,26 @@ let raw = fs.readFileSync(src);
 // уложиться сам.
 if (mapFile && fs.existsSync(mapFile)) {
     let over = 0;
+    const ramEnd = ramEndArg ? parseInt(ramEndArg, 16) : Infinity;
+    const used = [];
     for (const line of fs.readFileSync(mapFile, 'utf8').split(/\r?\n/)) {
         const m = line.match(/^(_\S+)\s+([0-9A-Fa-f]{8})\s+([0-9A-Fa-f]{8})\s+=/);
         if (!m) continue;
         const [, area, startText, lenText] = m;
         const start = parseInt(startText, 16);
         const len = parseInt(lenText, 16);
+        if (len !== 0 && start >= size && start + len > ramEnd) {
+            console.error(`${mapFile}: ${area} 0x${start.toString(16)}..0x${(start + len - 1).toString(16)} goes past RAM end 0x${ramEnd.toString(16)}`);
+            ++over;
+        }
         if (len === 0 || start >= size) continue; // область целиком в ОЗУ машины
+        for (const u of used) {
+            if (start < u.end && u.start < start + len) {
+                console.error(`${mapFile}: ${area} overlaps ${u.area}`);
+                ++over;
+            }
+        }
+        used.push({ area, start, end: start + len });
         if (start + len > size) {
             console.error(`${mapFile}: ${area} 0x${start.toString(16)}..0x${(start + len - 1).toString(16)} does not fit ${size}`);
             ++over;

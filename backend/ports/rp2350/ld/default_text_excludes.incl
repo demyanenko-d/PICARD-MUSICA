@@ -1,0 +1,2 @@
+*libgcc.a:_arm_addsubdf3.o(.text*)
+*(EXCLUDE_FILE(*libgcc.a: *libc.a: *lib*_a-mem*.o *libm.a: *libsoundsinth_bdi.a:* *libymfm.a:ymfm_batch_hot.cpp.obj) .text*)

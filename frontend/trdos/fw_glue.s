@@ -12,9 +12,9 @@
 ;;     (u16, u8)       -> HL, второй через стек
 ;;     возврат u8      -> A
 ;;
-;; Больше половины рамки подходит без переходников: fw_scr_cls,
-;; fw_scr_putc, fw_scr_puts, fw_kbd_get, fw_irq_init и прочие уже берут
-;; аргумент там, где его кладёт SDCC, и объявлены в fw.h напрямую.
+;; Больше половины рамки подходит без переходников: fw_kbd_get,
+;; fw_irq_init и прочие уже берут
+;; аргумент там, где его кладёт SDCC, и объявлены в z80_fw/fw.h.
 ;;
 ;; Переходник стоит десяток тактов на вызов, случающийся раз на сектор, -
 ;; дешевле, чем переписывать горячие пути, считанные по тактам.
@@ -33,37 +33,27 @@
         .globl  _fw_page_check
         .globl  _fw_dir_open_root
         .globl  _fw_dir_open_ent
-        .globl  _fw_dir_next
         .globl  _fw_dir_load
         .globl  _fw_dir_get
         .globl  _fw_dir_page
-        .globl  _fw_find
         .globl  _fw_open
-        .globl  _fw_adopt
-        .globl  _fw_use
         .globl  _fw_seek
         .globl  _fw_read_sectors
         .globl  _fw_read_bytes
-        .globl  _fw_scr_at
 
         .globl  _sd_init
         .globl  _fat_mount
         .globl  _fat_page_check
         .globl  _fat_dir_open
         .globl  _fat_dir_open_root
-        .globl  _fat_dir_next
         .globl  _fat_dir_load
         .globl  _fat_dir_get
-        .globl  _fat_find
         .globl  _fat_open
-        .globl  _fat_adopt
-        .globl  _fat_use
         .globl  _fat_seek
         .globl  _fat_read_sectors
         .globl  _fat_read_bytes
         .globl  _fat_clus
         .globl  _fat_ent_clus
-        .globl  _fw_scr_at_hl
 
         .area   _CODE
 
@@ -120,15 +110,6 @@ fw_g_c4:
         pop     ix
         jp      fw_cy
 
-;; u8 fw_dir_next(void): 1 есть запись, 0 каталог кончился, 0xFF карта.
-_fw_dir_next::
-        push    ix
-        call    _fat_dir_next
-        pop     ix
-        ret     nc
-        ld      a, #0xFF
-        ret
-
 ;; u8 fw_dir_load(void)
 _fw_dir_load::
         push    ix
@@ -143,15 +124,6 @@ _fw_dir_get::
         pop     ix
         jp      fw_cy
 
-;; u8 fw_find(const char *name): 1 нашли, 0 нет, 0xFF карта.
-_fw_find::
-        push    ix
-        call    _fat_find
-        pop     ix
-        ret     nc
-        ld      a, #0xFF
-        ret
-
 ;; void fw_dir_page(u8 page) - включить страницу в окно 0xC000.
 ;;
 ;; Нужна сортировке списка: таблица указателей каталога лежит в этой
@@ -162,26 +134,12 @@ _fw_dir_page::
         pop     ix
         ret
 
-;; u8 fw_open(u8 slot) - номер уже в A.
+;; u8 fw_open(void)
 _fw_open::
         push    ix
         call    _fat_open
         pop     ix
         jp      fw_cy
-
-;; void fw_adopt(void)
-_fw_adopt::
-        push    ix
-        call    _fat_adopt
-        pop     ix
-        ret
-
-;; void fw_use(u8 slot)
-_fw_use::
-        push    ix
-        call    _fat_use
-        pop     ix
-        ret
 
 ;; void fw_seek(u32 pos)
 ;;
@@ -216,8 +174,3 @@ _fw_read_bytes::
         pop     ix
         jp      fw_cy
 
-;; void fw_scr_at(u8 x, u8 y) - SDCC кладёт x в A, y в L; библиотека ждёт
-;; координаты в H и L.
-_fw_scr_at::
-        ld      h, a
-        jp      _fw_scr_at_hl

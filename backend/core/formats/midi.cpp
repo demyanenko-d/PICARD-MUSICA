@@ -1,16 +1,18 @@
 // SPDX-License-Identifier: MIT
 #include "core/formats/midi.h"
-#include "core/formats/midi_convert.h"
-#include "core/formats/midi_sysex.h"
 
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <iterator>
 #include <new>
 #include <type_traits>
 
 #include "platform/compiler.h"
 #include "platform/memory.h"
+
+#include "core/formats/midi_convert.h"
+#include "core/formats/midi_sysex.h"
 #include "core/engine/engine_defs.h" // kSampleRateHz: длительность считается при разборе
 #include "core/memory/sample_cache_catalog.h"
 #include "core/codec/pattern_cell_codec.h"
@@ -85,6 +87,8 @@ struct ScanHooks {
     void* user                                                   = nullptr;
     void (*tempo)(void* user, uint32_t tick, uint32_t us)        = nullptr;
     void (*sysex)(void* user, const uint8_t* data, uint32_t len) = nullptr;
+    // Имя первой дорожки (meta 0x03) - по обычаю название песни.
+    void (*name)(void* user, const uint8_t* data, uint32_t len) = nullptr;
     // Все сообщения канала, и отобранные, и нет: длина трека считается по
     // любому из них.
     void (*channel)(void* user, uint32_t tick, uint8_t kind, uint8_t d2, bool wanted) = nullptr;
@@ -126,6 +130,9 @@ struct EventSource {
                 if (meta == 0x51 && mlen == 3 && c.pos + 2 < c.end && hooks != nullptr && hooks->tempo != nullptr) {
                     const uint32_t us = (static_cast<uint32_t>(file[c.pos]) << 16) | (static_cast<uint32_t>(file[c.pos + 1]) << 8) | file[c.pos + 2];
                     hooks->tempo(hooks->user, c.tick, us);
+                }
+                if (meta == 0x03 && &c == cur && c.pos + mlen <= c.end && hooks != nullptr && hooks->name != nullptr) {
+                    hooks->name(hooks->user, file + c.pos, mlen);
                 }
                 c.pos += mlen;
                 continue;
@@ -384,7 +391,7 @@ Grid choose_grid(EventSource& src, const uint32_t* tempo_ticks, const uint32_t* 
     // Снаружи отрезки темпа, внутри - вес курсорами дорожек и все сетки разом:
     // карта упорядочена, тики дорожек не убывают, поэтому хватает одного
     // прохода по событиям.
-    constexpr uint32_t kGridCount = sizeof(kGrids) / sizeof(kGrids[0]);
+    constexpr uint32_t kGridCount = std::size(kGrids);
     double errs[kGridCount]       = {};
     // Файл без смены темпа - один отрезок в 120 BPM, умолчание SMF. Без него
     // ошибки всех сеток нулевые и выигрывает первая (32/6): темп 960 упирается
@@ -638,6 +645,8 @@ bool load(formats::ByteSource src, uint32_t file_length, memory::TrackMemory& me
         bool has_note           = false;
         uint32_t max_tick       = 0;
         uint32_t events         = 0;
+        const uint8_t* name     = nullptr;
+        uint32_t name_len       = 0;
     } scan{tempo_ticks, tempo_us, 0, drum_channel};
 
     {
@@ -654,7 +663,14 @@ bool load(formats::ByteSource src, uint32_t file_length, memory::TrackMemory& me
             s.tempo_us[s.tempo_count]    = us ? us : 500000u;
             ++s.tempo_count;
         };
-        hooks.sysex   = [](void* u, const uint8_t* data, uint32_t len) { sysex_drum_channels(data, len, static_cast<Scan*>(u)->drum_channel); };
+        hooks.sysex = [](void* u, const uint8_t* data, uint32_t len) { sysex_drum_channels(data, len, static_cast<Scan*>(u)->drum_channel); };
+        hooks.name  = [](void* u, const uint8_t* data, uint32_t len) {
+            Scan& s = *static_cast<Scan*>(u);
+            if (s.name == nullptr) {
+                s.name     = data;
+                s.name_len = len;
+            }
+        };
         hooks.channel = [](void* u, uint32_t tick, uint8_t kind, uint8_t d2, bool wanted) {
             Scan& s = *static_cast<Scan*>(u);
             if (wanted) {
@@ -759,6 +775,23 @@ bool load(formats::ByteSource src, uint32_t file_length, memory::TrackMemory& me
     if (pattern_count == 0 || pattern_count > 4096) return fail("track too long for the grid");
 
     init_song_header(out, grid, tracker_tempo);
+    out.format_version = format;
+    // Для хоста: заголовок файла и имя первой дорожки, кроме "untitled".
+    {
+        const uint16_t raw_division = rd16be(file + 12);
+        out.midi_header[0]          = events.track_count;
+        out.midi_header[1]          = raw_division & 0x8000u ? 0 : raw_division;
+        out.midi_header[2]          = static_cast<uint16_t>(start_bpm + 0.5);
+        uint32_t n                  = scan.name_len < sizeof(out.title) - 1 ? scan.name_len : sizeof(out.title) - 1;
+        while (n > 0 && scan.name[n - 1] == ' ') {
+            --n;
+        }
+        bool untitled = n == 8;
+        for (uint32_t i = 0; untitled && i < n; ++i) {
+            untitled = (scan.name[i] | 0x20) == "untitled"[i];
+        }
+        if (n != 0 && !untitled) std::memcpy(out.title, scan.name, n);
+    }
     uint8_t vibrato_speed = vibrato_speed_at(tracker_tempo);
     // Тиков в секунду у движка 2*tempo/5, с округлением (у скорости вибрато и
     // скольжения - с отбрасыванием): для перевода огибающих и затухания из
@@ -812,8 +845,7 @@ bool load(formats::ByteSource src, uint32_t file_length, memory::TrackMemory& me
     // вместе с файлом и курсорами: строки делаются по ходу игры.
     auto* cv_mem = memory::psram_resident_new<Converter>(mem.psram, 1);
     if (!cv_mem) return fail(".mid converter state does not fit PSRAM");
-    *cv_mem       = Converter{}; // умолчания полей - значение-инициализацией
-    Converter& cv = *cv_mem;
+    Converter& cv = *new (cv_mem) Converter{}; // умолчания полей
     cv.bank       = bank;
     cv.stats      = &s_stats;
     cv.grid       = grid;
@@ -936,7 +968,7 @@ bool load(formats::ByteSource src, uint32_t file_length, memory::TrackMemory& me
     {
         Replay* r = memory::psram_resident_new<Replay>(mem.psram, 1);
         if (!r) return fail(".mid repeat state does not fit PSRAM");
-        *r                   = Replay{};
+        new (r) Replay{};
         r->events            = events;
         r->step              = step;
         r->step.src          = &r->events; // на свою копию источника, не на стековую
@@ -1041,7 +1073,7 @@ bool load_sample_from_bank(memory::TrackMemory& mem, const bank::Bank& bank, con
         bool read_failed = false;
         first            = bank::bank_make_resident(bank, mem.bank_table, bs, mem.psram, &cp_page, &read_failed);
         if (first == memory::kPageChainEnd) {
-            if (error_out) *error_out = read_failed ? bank::kBankReadError : "bank samples do not fit PSRAM";
+            if (error_out) *error_out = read_failed ? bank::kBankReadError : kSamplesDoNotFit;
             return false;
         }
     }

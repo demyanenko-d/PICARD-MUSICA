@@ -25,6 +25,9 @@ void audio_out_start(player::audio::BufferPool& pool, uint32_t sample_rate_hz);
 // audio_out_start.
 void audio_out_set_silent(bool silent);
 
+// Фактическая частота вывода, мГц: делитель тактов не даёт номинальную ровно.
+uint64_t audio_out_rate_mhz();
+
 // Сколько раз вывод не нашёл готового буфера и повторил прежний.
 uint32_t audio_out_underruns();
 

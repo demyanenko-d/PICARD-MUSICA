@@ -7,11 +7,13 @@
 ;;   0x8F00  0 успех, 1 инициализация не удалась, 2 чтение не удалось
 ;;   0x8F01  _sd_type после инициализации
 ;;   0x8F02  на каком секторе споткнулись (индекс 0..2)
+;;   0x8F03  вход: устройство карты для _sd_use, его кладёт эмулятор
 
         .module test_sd
         .globl  _sd_init
         .globl  _sd_read_sector
         .globl  _sd_type
+        .globl  _sd_use
         .globl  start
 
 RESULT  .equ    0x8F00
@@ -27,6 +29,8 @@ start::
         ld      (RESULT+1), a
         ld      (RESULT+2), a
 
+        ld      a, (RESULT+3)
+        call    _sd_use
         call    _sd_init
         jr      nc, init_ok
         ld      a, #1

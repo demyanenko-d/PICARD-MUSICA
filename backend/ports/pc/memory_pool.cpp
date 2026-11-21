@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: MIT
-#include "platform/memory.h"
-
 #include <cstdint>
 #include <cstdlib>
+
+#include "platform/memory.h"
 
 namespace platform {
 

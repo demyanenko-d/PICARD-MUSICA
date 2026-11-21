@@ -116,7 +116,20 @@ struct SampleDescriptor {
     // Петля развёрнута (LoopUnroll): loop_end и length_samples уже
     // развёрнутые, исходный конец - loop_end_before_unroll().
     LoopUnroll loop_unroll = LoopUnroll::None;
-    uint32_t file_offset   = 0; // смещение начала PCM в исходном файле
+    // loop_* - петля удержания (IT): играет до Note-Off, после него голос
+    // переводится на обычную петлю из Song::sus_release
+    // (voice_release_sustain). Байт из дырки перед file_offset.
+    bool sus_loop = false;
+    // Автовибрато сэмпла (IT - поля IMPS, XM - поля инструмента на все его
+    // сэмплы), шкалы OpenMPT (ModSample): rate - прирост фазы за тик, depth
+    // 0..127, sweep - развёртка (семантики IT и XM разные, auto_vibrato_units),
+    // type - форма волны. depth 0 - автовибрато нет.
+    enum class VibType : uint8_t { Sine = 0, Square = 1, RampUp = 2, RampDown = 3, Random = 4 };
+    uint8_t vib_rate     = 0;
+    uint8_t vib_depth    = 0;
+    uint8_t vib_sweep    = 0;
+    VibType vib_type     = VibType::Sine;
+    uint32_t file_offset = 0; // смещение начала PCM в исходном файле
     uint32_t c5_speed = 8363; // частота воспроизведения на ноте C-5, Гц; у MOD всегда 8363, finetune - в поле finetune
     int8_t relative_note = 0; // XM: смещение ноты сэмпла от базовой; IT без линейных слайдов: -12; 0 у остальных
     int8_t finetune        = 0;          // 128 единиц на полутон, как у XM; MOD -8..7 загрузчик умножает на 16
@@ -125,8 +138,9 @@ struct SampleDescriptor {
 };
 
 // Самая крупная статья арены у трекеров (gk-funky.xm - 778 сэмплов): рост
-// должен ловить компилятор.
-static_assert(sizeof(SampleDescriptor) == 40, "SampleDescriptor: 40 bytes, a new field must land in a hole");
+// должен ловить компилятор. 40 -> 44 с автовибрато (2026-11-08): дырок не
+// осталось, четыре байта легли новым словом (gk-funky +3.1 КБ арены).
+static_assert(sizeof(SampleDescriptor) == 44, "SampleDescriptor: 44 bytes, a new field must land in a hole");
 
 // Сколько байт сэмпл занимает в исходном файле. Длина - исходная, до
 // прореживания и разворота петли. У сжатых кодировок она в заголовке не

@@ -24,6 +24,7 @@
 #include <cstdio>
 #include <cstring>
 #include <iterator> // std::size
+#include <new>
 
 #include "hardware/clocks.h"
 #include "hardware/dma.h"
@@ -36,34 +37,39 @@
 #include "hardware/structs/sio.h"
 #include "hardware/structs/systick.h"
 #include "hardware/structs/watchdog.h"
+#include "hardware/sync.h"
 #include "hardware/uart.h"
 #include "hardware/vreg.h"
 #include "hardware/watchdog.h"
 #include "pico/multicore.h"
 #include "pico/stdio_uart.h"
 #include "pico/stdlib.h"
-
 #include "FreeRTOS.h"
 #include "task.h"
 
 #include "platform/boot_mode.h"
 #include "platform/compiler.h"
 #include "platform/config_flash.h"
+#include "platform/debug_ring.h"
 #include "platform/log.h"
 #include "platform/log_rings.h"
 #include "platform/memory.h"
 #include "platform/mono_time.h"
 #include "platform/usb_host.h"
 
-#include "core/config/config_page.h"
 #include "core/config/config_store.h"
 #include "core/memory/track_memory.h"
 
-#include "devices/config/config_apply.h"
-#include "devices/config/config_service.h"
 #include "devices/storage/storage.h"
+#include "devices/divmmc_card/divmmc_card.h"
 #include "devices/zcontroller/zcontroller.h"
+#include "devices/bdi/bdi.h"
 
+#include "player/config/config_page.h"
+#include "player/config/config_apply.h"
+#include "player/config/config_service.h"
+#include "player/config/config_term_service.h"
+#include "player/nav/nav.h"
 #include "player/audio/chain.h"
 #include "player/banks.h"
 #include "player/config.h"
@@ -73,6 +79,7 @@
 #include "player/session.h"
 #include "player/shared_state.h"
 
+#include "wifi/esp_link.h"
 #include "audio/i2s_sink.h"
 #include "firmware_config.h"
 #include "hal/boot_save.h"
@@ -101,10 +108,11 @@ using rp2350::kSysClockKhz;
 constexpr uint32_t kVregSettleMs     = 20;
 constexpr uint32_t kSysClockSettleMs = 20;
 
-// clk_peri (UART и SPI) - от clk_sys с целым делителем 1..4: 300/3 = 100 МГц.
-// Делитель SPI всегда чётный; от 100 МГц карта получает 25 МГц делителем 4,
-// 4 такта clk_peri на бит.
-constexpr uint32_t kPeriClockDiv = 3;
+// clk_peri (UART и SPI) - от clk_sys с целым делителем 1..4: 150 МГц. Делитель
+// SPI всегда чётный: карта получает 37.5, 25, 18.75, 15, 12.5 МГц делителями
+// 4..12 (при двух тактах на бит около 1% секторов снимается повтором CRC).
+// На 300 МГц UART модуля Wi-Fi не работает.
+constexpr uint32_t kPeriClockDiv = 2;
 
 player::protocol::HostProtocol s_protocol;
 
@@ -117,6 +125,14 @@ player::SessionOrchestrator s_orch(s_protocol);
 // Раскладка PSRAM в ядре (ядро собирается и на ПК) рассчитана на
 // чип платы.
 static_assert(psram::kSizeBytes == soundsinth::memory::kPsramChipBytes, "The board PSRAM (PICO_PSRAM_SIZE_BYTES) disagrees with kPsramChipBytes");
+
+bool s_boot_held = false; // машина удержана в сбросе с начала загрузки
+bool s_bdi       = false; // Beta Disk платы: решает загрузка, поднимает Core1
+
+// Файлы ПЗУ с карты для конфигуратора: собираются до второго ядра, в
+// страницу ложатся им.
+// Файлы ПЗУ для диалога setup - блок PSRAM, только при загрузке в setup.
+soundsinth::config::ConfigPageFiles* s_rom_files = nullptr;
 
 // Держать ли машину в сбросе на загрузке платы. Решается до разбора
 // настроек: вывод сброса настраивается первым делом. При RESET_SIGNAL=0
@@ -174,7 +190,8 @@ void reserved_pins_safe_init() {
     // несколько тактов выдавал бы 0, то есть отпускал сброс.
     // При RESET_SIGNAL=0 машина не держится: работает, пока плата грузится.
     gpio_init(bus::PIN_RESET_N);
-    if (boot_holds_host()) {
+    s_boot_held = boot_holds_host();
+    if (s_boot_held) {
         bus::assert_host_reset();
     } else {
         bus::release_host_reset();
@@ -234,11 +251,7 @@ extern "C" void hardfault_handler_c(uint32_t* stacked, uint32_t exc_return) {
     const uint32_t bfar               = (cfsr & M33_CFSR_BFSR_BFARVALID_BITS) ? scb_hw->bfar : 0u;
     const uint32_t mmfar              = (cfsr & kCfsrMmarValid) ? scb_hw->mmfar : 0u;
 
-    // Отказ на Core0: задача логгера больше не выполнится - сначала то, что
-    // оба ядра положили в кольца перед отказом. На Core1 выгрузку колец
-    // продолжает log_task.
     platform::log_go_direct();
-    if (core == 0) platform::log_flush_blocking();
 
     char msg[192];
     // Кадр исключения ARM Cortex-M.
@@ -256,6 +269,11 @@ extern "C" void hardfault_handler_c(uint32_t* stacked, uint32_t exc_return) {
              stacked[kR1], stacked[kR2], static_cast<uint32_t>(reinterpret_cast<uintptr_t>(stacked)), exc_return, bfar, mmfar,
              task ? pcTaskGetName(task) : "-");
     platform::log_put_blocking(msg);
+    // Отказ на Core0: задача логгера больше не выполнится - выгрузить то, что
+    // оба ядра положили в кольца перед отказом; регистры уже напечатаны. Кольца
+    // в PSRAM: отказ шины в окне XIP повторился бы на чтении колец. На Core1
+    // выгрузку продолжает log_task.
+    if (core == 0 && (bfar >> 28) != 1u) platform::log_flush_blocking();
     while (true) {
         tight_loop_contents();
     }
@@ -275,6 +293,8 @@ extern "C" char __flash_binary_end;
 // Стеки вне задач FreeRTOS, их никто не стережёт: Core1 (SCRATCH_X) и MSP
 // Core0 (SCRATCH_Y) - main до планировщика, потом прерывания.
 extern "C" uint32_t __StackOneBottom, __StackOneTop, __StackBottom, __StackTop;
+extern "C" uint8_t __busmem_start__[], __busmem_end__[];
+extern "C" uint8_t __bdi_code_start__[], __bdi_code_end__[], __bdi_code_source__[];
 
 // Перехват HardFault: переопределяет слабый isr_hardfault из crt0.S (там
 // bkpt). Кадр исключения берётся с MSP или PSP по биту 2 LR.
@@ -334,12 +354,13 @@ void log_boot_reason() {
 
 // Настройки: откуда взяты и что сделано с картой. Строка одна - смотреть
 // её будут при каждом непонятном поведении платы.
-void log_config_boot(const devices::config::BootReport& r) {
-    const soundsinth::config::Settings& s = devices::config::settings();
+void log_config_boot(const player::config::BootReport& r) {
+    const soundsinth::config::Settings& s = player::config::settings();
     printf("boot: settings %s", r.flash_valid ? "from flash" : "DEFAULTS (no valid block in flash)");
     if (r.file_applied) {
         printf(", set_config.txt: applied %u, unknown %u, invalid %u", static_cast<unsigned>(r.applied), static_cast<unsigned>(r.unknown),
                static_cast<unsigned>(r.bad));
+        if (r.file_kept) printf(", NOT RENAMED (applies again next boot)");
     }
     if (r.from_configurator) printf(", saved by the configurator");
     if (r.gui_invite) printf(", open.gui present");
@@ -356,11 +377,14 @@ void log_config_boot(const devices::config::BootReport& r) {
            " unmount %u\n",
            static_cast<unsigned>(r.mount_ms), static_cast<unsigned>(r.set_ms), static_cast<unsigned>(r.flash_ms), static_cast<unsigned>(r.save_write_ms),
            static_cast<unsigned>(r.save_rename_ms), static_cast<unsigned>(r.unmount_ms));
-    static const char* const kDiskSys[]  = {"none", "divmmc", "trdos"};
+    static const char* const kDiskSys[] = {"none", "divmmc", "trdos"};
+    static_assert(std::size(kDiskSys) == static_cast<size_t>(soundsinth::config::DiskSys::TrDos) + 1u, "a name for every disk system");
     static const char* const kLiveMidi[] = {"none", "hook", "wire"};
-    printf("boot: disk %s (%s), z-controller %u (%s), gs %u, live midi %s, reset %u, wifi %u\n", kDiskSys[s.disksys], s.disksys_media == 0 ? "sd" : "usb",
-           static_cast<unsigned>(s.zcontroller), s.zcontroller_media == 0 ? "sd" : "usb", static_cast<unsigned>(s.gs), kLiveMidi[s.live_midi],
-           static_cast<unsigned>(s.reset_signal), static_cast<unsigned>(s.wifi));
+    static const char* const kMedia[]    = {"sd", "usb", "none"};
+    static_assert(std::size(kMedia) == static_cast<size_t>(soundsinth::config::Media::None) + 1u, "a name for every medium");
+    printf("boot: disk %s, divmmc cards %s %s, z-controller %s, gs %u, live midi %s, reset %u, wifi %u\n", kDiskSys[s.disksys], kMedia[s.divmmc_card1],
+           kMedia[s.divmmc_card2], kMedia[s.zcontroller], static_cast<unsigned>(s.gs), kLiveMidi[s.live_midi], static_cast<unsigned>(s.reset_signal),
+           static_cast<unsigned>(s.wifi));
     printf("boot: keyboard %u, mouse %u (speed %u), gamepad %u\n", static_cast<unsigned>(s.keyboard_layout), static_cast<unsigned>(s.usb_mouse),
            static_cast<unsigned>(s.mouse_speed), static_cast<unsigned>(s.usb_gamepad));
 }
@@ -394,6 +418,9 @@ int main() {
     // отладочная сессия; сами мы watchdog_enable() не вызываем. Снимается
     // безусловно.
     watchdog_disable();
+    // Память шины вне .bss, crt0 её не обнуляет; нулевая запись таблицы
+    // портов значит "порт не наш".
+    std::memset(__busmem_start__, 0, static_cast<size_t>(__busmem_end__ - __busmem_start__));
     // Узор на стек Core0 ниже main - запас в строках "boot: main stack free" и "stack free:".
     rp2350::stack_paint_below_sp(&__StackBottom);
     s_boot_start_us = time_us_32();
@@ -450,18 +477,16 @@ int main() {
     printf("boot: psram_init done t=%" PRIu32 "ms\n", boot_ms());
 
     log_boot_clocks();
-    // Хвост SRAM за .bss, кучи нет. Карта трапов
-    // лежит в .bss обычным объектом, то есть уже учтена и здесь, и в size.
+    // Хвост SRAM за .bss, кучи нет.
     printf("boot: SRAM past .bss %u B\n", static_cast<unsigned>(&__HeapLimit - &__end__));
 
-    // Сторож раскладки флеша: образ обязан кончаться ниже блоков настроек.
-    // Число - чтобы запас был виден до того, как кончится, а не после.
-    if (const uint8_t* cfg = platform::config_flash_view(0)) {
-        const char* end = &__flash_binary_end;
-        if (end >= reinterpret_cast<const char*>(cfg)) {
-            panic("the image grew into the settings blocks: writing settings would erase its own code");
-        }
-        printf("boot: flash before settings %u B\n", static_cast<unsigned>(reinterpret_cast<const char*>(cfg) - end));
+    // Образ обязан кончаться ниже областей своих ПЗУ (за ними настройки);
+    // запас - в журнал.
+    {
+        const char* end   = &__flash_binary_end;
+        const char* slots = reinterpret_cast<const char*>(XIP_BASE + SOUNDSINTH_ROM_SLOTS_FLASH_OFFSET);
+        if (end >= slots) panic("the image grew into the ROM slots: writing a ROM would erase its own code");
+        printf("boot: flash before ROM slots %u B\n", static_cast<unsigned>(slots - end));
     }
 
     // 256 байт подряд, не весь чип: вопрос один - держит ли PSRAM данные на
@@ -492,8 +517,7 @@ int main() {
     // Носитель нужен и Z-Controller, и DivMMC. На Core0 до
     // multicore_launch_core1: единственное обращение Core0 к носителю.
     // Дальше им владеет цикл Core1; арбитр однопоточный, без блокировок,
-    // трогать карту с двух ядер нельзя. Так же сделано с
-    // track_memory_create.
+    // трогать карту с двух ядер нельзя.
     //
     // Буфер сектора не на стеке: стек Core0 до планировщика 4 КБ
     // (PICO_STACK_SIZE). Буфер упаковки паттернов трека до первой загрузки
@@ -511,14 +535,22 @@ int main() {
     // банк монтирует том для себя и держит его открытым, а записи на карту
     // настройкам нужны свои. До подъёма шины и второго ядра: запись во
     // флеш на время стирания отнимает XIP.
-    const devices::config::BootReport boot = devices::config::config_boot(shared::g_track_memory.scratch);
+    const player::config::BootReport boot = player::config::config_boot(shared::g_track_memory.scratch);
     log_config_boot(boot);
+
+    // Кольцо приёма Wi-Fi: модуль шлёт ответ без ожидания.
+    if (player::config::settings().wifi != 0) {
+        uint8_t* const ring = soundsinth::memory::psram_take_permanent(shared::g_track_memory.psram, rp2350::wifi::kLinkBlockBytes);
+        rp2350::wifi::esp_link_attach(ring);
+        printf("boot: wifi receive ring %" PRIu32 " KB in PSRAM: %s\n", rp2350::wifi::kBodyRingBytes / 1024u, ring != nullptr ? "yes" : "no");
+    }
     printf("boot: settings parsed t=%" PRIu32 "ms\n", boot_ms());
-    devices::config::config_apply(devices::config::settings());
-    // Запрет касается только сброса по своей воле - по клавише F12 и по
-    // сочетанию Ctrl+Alt+Del. Машина
-    // всё равно стоит в сбросе до готовности шины.
-    rp2350::hal::host_signals_allow_reset(devices::config::settings().reset_signal != 0);
+    player::config::config_apply(player::config::settings());
+    // /WAIT через SIO - только при Wi-Fi; в TR-DOS вывод берёт автомат
+    // port_join_hold.
+    if (player::config::settings().wifi != 0) bus::wait_line_init();
+    // Сброс по F12 и Ctrl+Alt+Del - только при RESET_SIGNAL != 0.
+    rp2350::hal::host_signals_allow_reset(player::config::settings().reset_signal != 0);
     // Конфигуратор настроек - режим загрузки, и решается он здесь, до
     // выбора режима шины. Входа три: запрос от клавиш Win+F12, перемычка на
     // плате и файл-приглашение на карте.
@@ -529,22 +561,72 @@ int main() {
         // Ключ дисковой системы не спрашивается: подстановка нужна любой
         // машине, в том числе той, у которой своя (DISKSYS=NONE).
         bus::config_rom_set_enabled(true);
+        // Файлы ПЗУ для диалога выбора - сейчас: дальше карта у второго ядра.
+        void* const files = soundsinth::memory::psram_take_permanent(shared::g_track_memory.psram, sizeof(soundsinth::config::ConfigPageFiles));
+        if (files != nullptr) {
+            s_rom_files = new (files) soundsinth::config::ConfigPageFiles{};
+            player::config::rom_files_scan(shared::g_track_memory.scratch, *s_rom_files);
+        }
+        debug_logf("boot: configurator ROM files %u\n", s_rom_files != nullptr ? static_cast<unsigned>(s_rom_files->count) : 0u);
+        // Меню конфигуратора на плате - тоже PSRAM и тоже только здесь.
+        player::config::config_term_reserve(soundsinth::memory::psram_take_permanent(shared::g_track_memory.psram, player::config::config_term_mem_bytes()));
+        // Утилита USB HID TEST: копии дескрипторов и отчётов - только здесь.
+        rp2350::usb::hid_diag_attach(soundsinth::memory::psram_take_permanent(shared::g_track_memory.psram, rp2350::usb::hid_diag_bytes()));
+        // Инструменты модуля Wi-Fi держат своё в кольце приёма: без сети оно
+        // свободно, а при выключенном Wi-Fi его ещё нет.
+        if (player::config::settings().wifi == 0) {
+            rp2350::wifi::esp_link_attach(soundsinth::memory::psram_take_permanent(shared::g_track_memory.psram, rp2350::wifi::kLinkBlockBytes));
+        }
         // Сброс машины обязателен даже при RESET_SIGNAL=0: иначе войти
         // можно было бы только снятием питания, а это явное действие
         // пользователя, а не самоуправство платы. Приглашение с карты
         // известно только здесь - машину держим с этого места.
         rp2350::hal::host_signals_allow_reset(true);
         bus::assert_host_reset();
+    } else if (!s_boot_held && soundsinth::config::divmmc_selected(player::config::settings())) {
+        // DivMMC выбран файлом с карты, а по блоку флеша машину не держали:
+        // без сброса она уже стоит в своём ПЗУ, и эмуляция встала бы под
+        // работающую машину. RESET_SIGNAL при DivMMC всегда 1.
+        debug_log("boot: settings from the card need a machine reset (DISKSYS=DIVMMC), holding it\n");
+        bus::assert_host_reset();
+    }
+
+    // Карты HID - в PSRAM и только когда хост будет поднят (условие host_init).
+    if (want_config || soundsinth::config::usb_host_used(player::config::settings())) {
+        rp2350::usb::maps_attach(soundsinth::memory::psram_take_permanent(shared::g_track_memory.psram, rp2350::usb::maps_bytes()));
     }
 
     // Режим шины - до подъёма Core1: он решает, кто захватывает автоматы PIO.
-    const uint8_t disksys = devices::config::settings().disksys;
+    const uint8_t disksys = player::config::settings().disksys;
+    const bool trdos      = disksys == static_cast<uint8_t>(soundsinth::config::DiskSys::TrDos);
     bus::rom_emu_set_enabled(want_config || disksys == static_cast<uint8_t>(soundsinth::config::DiskSys::DivMmc));
-    bus::trdos_set_enabled(!want_config && disksys == static_cast<uint8_t>(soundsinth::config::DiskSys::TrDos));
+    // Своё ПЗУ - из области флеша, пустая область оставляет ПЗУ машины.
+    // DOS у него свой, триггер TR-DOS не нужен.
+    bool pentagon = false;
+    if (const uint32_t slot = soundsinth::config::custom_rom_slot(player::config::settings()); slot != 0u && !bus::rom_emu_enabled()) {
+        static_assert(bus::kPentagonRomBytes == platform::kRomSlotBytes, "a custom ROM is one flash slot");
+        const uint8_t* image = platform::rom_slot_view(slot - 1u);
+        pentagon             = bus::pentagon_rom_load(image);
+        printf("boot: ROM slot %u: %s\n", static_cast<unsigned>(slot), pentagon ? "loaded" : "empty, the machine ROM stays");
+    }
+    // Beta Disk платы: в конфигураторе не поднимается; со своим ПЗУ пока
+    // тоже - удержание /WAIT есть только у склейщика режима TR-DOS. PSRAM
+    // дисководов и навигатора - до треков.
+    const bool bdi_wanted = !want_config && trdos;
+    if (bdi_wanted && pentagon) printf("boot: beta disk needs ROM=BOARD for now, off\n");
+    const auto psram = [](uint32_t bytes) { return soundsinth::memory::psram_take_permanent(shared::g_track_memory.psram, bytes); };
+    s_bdi            = bdi_wanted && !pentagon && devices::bdi::bdi_reserve(psram) && player::nav::nav_reserve(psram);
+    if (bdi_wanted && !pentagon && !s_bdi) printf("boot: bdi - no PSRAM for the drives\n");
+    bus::pentagon_rom_set_enabled(pentagon, trdos);
+    // Beta Disk платы берёт DOS от того же триггера: он же включает ПЗУ TR-DOS
+    // машины, когда своего ПЗУ нет.
+    bus::trdos_set_enabled(!want_config && trdos && !pentagon);
+    bus::nav_set_enabled(s_bdi);
     // Сброс машины по тишине на M1 - всегда, какой бы ни была настройка
     // сброса: и кнопку машины, и свой сброс плата должна видеть одинаково.
-    // С DivMMC места нет: pio0 занят эмуляцией ПЗУ.
-    bus::reset_watch_set_enabled(!bus::rom_emu_enabled());
+    // С DivMMC, своим ПЗУ и TR-DOS места нет: pio0 занят; своё ПЗУ и TR-DOS
+    // считают M1 на PWM.
+    bus::reset_watch_set_enabled(!bus::rom_emu_enabled() && !pentagon && !bus::trdos_enabled());
 
     printf("boot: main stack free %" PRIu32 " of %u B\n", rp2350::stack_unpainted_bytes(&__StackBottom, &__StackTop),
            static_cast<unsigned>((&__StackTop - &__StackBottom) * sizeof(uint32_t)));
@@ -552,6 +634,8 @@ int main() {
     // На кольца лога - до запуска Core1: иначе до старта планировщика оба ядра
     // печатали бы напрямую и строки перемешивались. Строки копятся в кольце до
     // появления потребителя.
+    // Кольца - в PSRAM: 16 КБ SRAM рабочей прошивке нужнее.
+    platform::log_rings_attach(soundsinth::memory::psram_take_permanent(shared::g_track_memory.psram, 2u * debug_ring::kRingBytes), debug_ring::kRingBytes);
     platform::log_use_rings();
 
     // Core1 - шина целиком: irq_set_exclusive_handler()/irq_set_enabled()
@@ -562,9 +646,7 @@ int main() {
     multicore_launch_core1([]() {
         rp2350::stack_paint_below_sp(&__StackOneBottom);
         // Эмуляция ПЗУ поднимается первой: она захватывает автоматы PIO по явным
-        // номерам, шина плагина берёт свои следом. Выключенная не занимает ни
-        // одного автомата, а линия блокировки ПЗУ так и остаётся пассивной -
-        // её подняли в пассив при загрузке, и больше её никто не трогает.
+        // номерам, шина плагина берёт свои следом.
         if (bus::rom_emu_enabled()) {
             bus::rom_emu_init();
             debug_log("core1: DivMMC on, ROM emulated\n");
@@ -572,30 +654,53 @@ int main() {
         // Страница настроек заполняется до того, как машина выйдет из
         // сброса: ПЗУ стартует раньше, чем плата успела бы ответить на
         // команду, и отдельной команды "прочитать" поэтому нет.
-        if (bus::config_rom_enabled()) {
-            const uint32_t used = soundsinth::config::config_page_build(devices::config::settings(), bus::config_rom_page(), bus::config_rom_page_bytes());
-            debug_logf("config: page %" PRIu32 " B of %" PRIu32 ", fields %" PRIu32 "\n", used, bus::config_rom_page_bytes(),
-                       soundsinth::config::config_page_field_count());
+        if (bus::config_rom_enabled() && player::config::config_term_begin(bus::config_rom_page(), s_rom_files)) {
+            debug_log("config: terminal page, the menu runs on the board\n");
+        } else if (bus::config_rom_enabled()) {
+            // Без памяти меню ПЗУ не дождётся страницы и скажет, что плата молчит.
+            debug_log("config: no PSRAM for the menu\n");
         }
 
         hostlink::init(s_protocol, player::session_orchestrator_callbacks(s_orch));
-        // Автомат карты свой у каждой стороны, общий только носитель. В
-        // режиме DivMMC карту уже подняла divmmc_reset.
+        // Автомат карты свой у каждой стороны, общий только носитель.
         //
-        // Выключенный настройками Z-Controller портов 0x57/0x77 не
-        // занимает: на машине со своим интерфейсом карты два устройства на
-        // одном чтении дали бы столкновение на шине.
-        if (devices::config::settings().zcontroller != 0) {
+        // Выключенные настройками карты DivMMC и Z-Controller портов не
+        // занимают: на машине со своим интерфейсом карты два устройства на
+        // одном чтении дали бы столкновение на шине. При DISKSYS=DIVMMC
+        // одна из карт включена всегда (settings_clamp).
+        const soundsinth::config::Settings& cfg = player::config::settings();
+        const bool card1                        = soundsinth::config::device_on(cfg.divmmc_card1);
+        const bool card2                        = soundsinth::config::device_on(cfg.divmmc_card2);
+        if (card1 || card2) {
+            devices::divmmc_card::divmmc_card_init(card1, card2);
+            debug_logf("core1: divmmc cards %u %u on 0xE7/0xEB\n", static_cast<unsigned>(card1), static_cast<unsigned>(card2));
+        }
+        if (soundsinth::config::device_on(cfg.zcontroller)) {
             devices::zcontroller::zcontroller_init();
             debug_log("core1: z-controller on 0x57/0x77\n");
         } else {
             debug_log("core1: z-controller disabled by settings\n");
         }
+        // Beta Disk: код автомата ВГ93 и обработчиков - из флеша в банки 8-15
+        // ОЗУ DivMMC (без DivMMC свободны), за ним BdiHost.
+        if (s_bdi) {
+            const auto code = static_cast<size_t>(__bdi_code_end__ - __bdi_code_start__);
+            std::memcpy(__bdi_code_start__, __bdi_code_source__, code);
+            // Код записан данными: выборка команд - только после записи.
+            __dsb();
+            __isb();
+            uint8_t* const free_at = __bdi_code_end__;
+            const bool ok          = devices::bdi::bdi_start(free_at, static_cast<size_t>(&bus_divmmc_ram[0][0] + sizeof(bus_divmmc_ram) - free_at));
+            debug_logf("core1: beta disk %s, code %u B in banks\n", ok ? "on" : "FAILED", static_cast<unsigned>(code));
+        }
         // Эмуляция General Sound на родных портах 0xBB/0xB3 (наш протокол на
         // 0x63/0x67). Регистрация портов после инициализации шины, как у
         // остальных; выключенная настройками, она портов не занимает, и
         // машина её не видит.
-        if (devices::config::settings().gs != 0) {
+        // Живой AY/YM: включается до первой записи в порт, на шину не
+        // отвечает - только слушает.
+        player::live_chips_configure(true);
+        if (player::config::settings().gs != 0) {
             player::gs::bridge_init();
         } else {
             debug_log("gs: disabled by settings\n");
@@ -606,10 +711,9 @@ int main() {
         //
         // В конфигураторе - всегда: управление с клавиатуры USB, даже если
         // она выключена в настройках. В обычном режиме - только когда USB
-        // кому-то нужен: виток стека гасит на этом ядре все прерывания, в
-        // том числе шинные. Без стека вход в конфигуратор - перемычкой или
+        // кому-то нужен: виток стека занимает цикл Core1. Без стека вход в конфигуратор - перемычкой или
         // файлом-приглашением на карте.
-        if (platform::config_rom_active() || soundsinth::config::usb_host_used(devices::config::settings())) {
+        if (platform::config_rom_active() || soundsinth::config::usb_host_used(player::config::settings())) {
             rp2350::usb::host_init();
         } else {
             debug_log("usb: host not started - no USB consumer in settings\n");
@@ -620,9 +724,9 @@ int main() {
         //
         // Здесь, а не на Core0 до запуска этого ядра: чтение таблиц с карты -
         // сотни миллисекунд, и ждать их незачем. USB к этому месту поднят, а
-        // перечисление двигается витком стека между кусками чтения. Машина
-        // ещё в сбросе (отпускает его сеанс ниже), трека нет, и распределитель
-        // PSRAM видит одно ядро.
+        // перечисление двигается витком стека между кусками чтения. Трека
+        // нет, и распределитель PSRAM видит одно ядро. При RESET_SIGNAL=0
+        // машина уже работает.
         debug_logf("core1: opening banks t=%" PRIu32 " ms\n", platform::mono_ms());
         player::banks_open(reinterpret_cast<const uint8_t*>(XIP_BASE + SOUNDSINTH_BANK_FLASH_OFFSET), PICO_FLASH_SIZE_BYTES - SOUNDSINTH_BANK_FLASH_OFFSET);
         debug_logf("core1: banks opened t=%" PRIu32 " ms\n", platform::mono_ms());
@@ -652,6 +756,14 @@ int main() {
     xTaskCreateStatic(rp2350::log_task, "log_task", std::size(s_log_stack), nullptr, tskIDLE_PRIORITY + 1, s_log_stack, &s_log_tcb);
     TaskHandle_t app = xTaskCreateStatic(player::audio_chain_task, "app_task", std::size(s_app_stack), nullptr, tskIDLE_PRIORITY + 1, s_app_stack, &s_app_tcb);
     rp2350::log_task_set_app_handle(app);
+    // Wi-Fi: приём UART1 и задача связи, тоже на Core0.
+    // В конфигураторе задача модуля ведёт его инструменты и к сети не
+    // подключается.
+    if (want_config) {
+        rp2350::wifi::esp_link_start_tools();
+    } else if (player::config::settings().wifi != 0) {
+        rp2350::wifi::esp_link_start(player::config::settings());
+    }
     debug_log("boot: app_task created, entering FreeRTOS scheduler (Core0)\n");
     vTaskStartScheduler(); // никогда не возвращается
 

@@ -50,4 +50,14 @@ HostStats host_stats();
 // Строка о состоянии хоста в журнал. Звать из задачи логгера.
 void host_log_health();
 
+// Карты полей интерфейсов HID - блок PSRAM на Core0 до host_init. Без него
+// хост не поднимается.
+uint32_t maps_bytes();
+void maps_attach(void* mem);
+
+// Память утилиты USB HID TEST (копии дескрипторов и отчётов): даётся только
+// при загрузке в setup, рабочей прошивке не нужна. nullptr - без утилиты.
+uint32_t hid_diag_bytes();
+void hid_diag_attach(void* mem);
+
 } // namespace rp2350::usb

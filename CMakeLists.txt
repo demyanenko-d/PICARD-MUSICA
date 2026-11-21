@@ -121,8 +121,11 @@ add_subdirectory(backend/lib/fatfs)
 # Разборщик дескрипторов HID (LUFA): нужен слою устройств для клавиатуры,
 # мыши и геймпадов. Кучи не трогает.
 add_subdirectory(backend/lib/hidparser)
+# FM-чипы Yamaha: пара YM2203 живого TurboSound FM.
+add_subdirectory(backend/lib/ymfm)
 add_subdirectory(backend/core)
 add_subdirectory(backend/devices)
+add_subdirectory(backend/net)
 add_subdirectory(backend/player)
 
 # Горячий путь синтезатора, читающий PSRAM, - в SRAM: код идёт из флеша, а
@@ -154,10 +157,11 @@ add_library(platform_rp2350 STATIC
     backend/ports/rp2350/hostlink/hostlink.cpp
     backend/ports/rp2350/hal/z80_ports.cpp
     backend/ports/rp2350/hal/host_link.cpp
+    backend/ports/rp2350/hal/bus_worker.cpp
 )
 target_link_libraries(platform_rp2350
     PUBLIC platform soundsinth_core soundsinth_devices soundsinth_player freertos_kernel freertos_config
-    PRIVATE fatfs hardware_pio hardware_dma hardware_irq hardware_clocks hardware_xip_cache hardware_uart hardware_spi pico_multicore pico_sync
+    PRIVATE fatfs hardware_pio hardware_dma hardware_irq hardware_clocks hardware_xip_cache hardware_uart hardware_spi hardware_pwm pico_multicore pico_sync
 )
 # Реализации контрактов platform/ и devices/hal лежат здесь, а зовут их ядро
 # и библиотека устройств: цикл между статическими библиотеками. Объявлен
@@ -166,6 +170,7 @@ target_link_libraries(platform_rp2350
 target_link_libraries(soundsinth_core PRIVATE platform_rp2350)
 target_link_libraries(soundsinth_devices PRIVATE platform_rp2350)
 target_link_libraries(soundsinth_player PRIVATE platform_rp2350)
+target_link_libraries(soundsinth_net PRIVATE platform_rp2350)
 
 # gpio_put/gpio_get через регистры SIO, без сопроцессора GPIO: один и тот же
 # код на обоих ядрах. PUBLIC - для всей прошивки.
@@ -194,6 +199,8 @@ target_compile_options(platform_rp2350 PRIVATE
     $<$<COMPILE_LANGUAGE:CXX>:-fno-exceptions;-fno-unwind-tables;-fno-rtti>)
 target_compile_options(soundsinth_core PRIVATE -Wall -Wextra)
 target_compile_options(soundsinth_devices PRIVATE -Wall -Wextra)
+target_compile_options(soundsinth_bdi PRIVATE -Wall -Wextra)
+target_compile_options(soundsinth_net PRIVATE -Wall -Wextra)
 target_compile_options(soundsinth_player PRIVATE -Wall -Wextra)
 # Плеер вычищен от предупреждений: держит это сборка, а не привычка.
 target_compile_options(soundsinth_player PRIVATE -Werror)
@@ -210,6 +217,8 @@ target_compile_options(soundsinth_core PRIVATE -Wframe-larger-than=1400)
 # не кричать на то, что уже измерено и принято. Опустится максимум -
 # опустить и порог.
 target_compile_options(soundsinth_devices PRIVATE -Wframe-larger-than=750)
+target_compile_options(soundsinth_bdi PRIVATE -Wframe-larger-than=750)
+target_compile_options(soundsinth_net PRIVATE -Wframe-larger-than=750)
 target_compile_options(soundsinth_player PRIVATE -Wframe-larger-than=750)
 target_compile_options(platform_rp2350 PRIVATE -Wframe-larger-than=750)
 # Пул ОС по счёту платы: 8 семафоров и 2 очереди (ПК берёт больше).
@@ -237,6 +246,9 @@ pico_generate_pio_header(platform_rp2350
 pico_generate_pio_header(platform_rp2350
     ${CMAKE_CURRENT_LIST_DIR}/backend/ports/rp2350/hostlink/reset_watch.pio
 )
+pico_generate_pio_header(platform_rp2350
+    ${CMAKE_CURRENT_LIST_DIR}/backend/ports/rp2350/hostlink/pentagon.pio
+)
 
 add_executable(soundsinth_firmware
     backend/ports/rp2350/main.cpp
@@ -245,10 +257,14 @@ add_executable(soundsinth_firmware
     backend/ports/rp2350/hal/spi.cpp
     backend/ports/rp2350/hal/media.cpp
     backend/ports/rp2350/hal/audio_out.cpp
+    backend/ports/rp2350/hal/flash_cache.cpp
     backend/ports/rp2350/hal/host_signals.cpp
     backend/ports/rp2350/hal/config_flash.cpp
     backend/ports/rp2350/hal/boot_mode.cpp
+    backend/ports/rp2350/hal/cxx_runtime.cpp
     backend/ports/rp2350/log.cpp
+    backend/ports/rp2350/wifi/esp_link.cpp
+    backend/ports/rp2350/wifi/esp_tools.cpp
 )
 target_include_directories(soundsinth_firmware PRIVATE
     # Включения по имени файла из корня rp2350 и hostlink/, без пути до
@@ -285,7 +301,7 @@ target_compile_definitions(soundsinth_firmware PRIVATE PICO_HEAP_SIZE=0)
 # Без LTO: -flto только на своих таргетах без pico-sdk даёт при компоновке
 # "dangerous relocation: unsupported relocation" (частичный LTO на Thumb).
 pico_set_program_name(soundsinth_firmware "SoundSinth")
-pico_set_program_version(soundsinth_firmware "0.46")
+pico_set_program_version(soundsinth_firmware "${SOUNDSINTH_VERSION}")
 
 # copy_to_ram выключен: весь бинарник вместе со статикой в SRAM не
 # помещается (ошибка линковки "region RAM overflowed"). Код выполняется из
@@ -310,6 +326,8 @@ target_link_libraries(soundsinth_firmware
     hardware_pio
     hardware_spi   # spi_pins.cpp: реализация devices/hal/spi.h
     hardware_flash # hal/config_flash.cpp: два блока настроек
+    # Архив zxart.ee: транспорт - wifi/esp_link.cpp.
+    soundsinth_net
     platform_rp2350
     # USB-хост на встроенном контроллере. Каналов DMA не занимает: байты
     # между буфером и памятью USB возит сам контроллер.
@@ -334,11 +352,15 @@ set_source_files_properties(
     backend/ports/rp2350/hal/spi.cpp
     backend/ports/rp2350/hal/media.cpp
     backend/ports/rp2350/hal/audio_out.cpp
+    backend/ports/rp2350/hal/flash_cache.cpp
     backend/ports/rp2350/hal/host_signals.cpp
     backend/ports/rp2350/hal/config_flash.cpp
     backend/ports/rp2350/hal/boot_mode.cpp
+    backend/ports/rp2350/hal/cxx_runtime.cpp
     backend/ports/rp2350/usb/usb_host.cpp
     backend/ports/rp2350/usb/usb_msc.cpp
+    backend/ports/rp2350/wifi/esp_link.cpp
+    backend/ports/rp2350/wifi/esp_tools.cpp
     PROPERTIES COMPILE_OPTIONS "-Wall;-Wextra;-Wframe-larger-than=750")
 
 # pico-sdk называет векторы исключений isr_svcall/isr_pendsv/isr_systick,
@@ -351,5 +373,10 @@ target_link_options(soundsinth_firmware PRIVATE
     -Wl,--defsym=isr_pendsv=PendSV_Handler
     -Wl,--defsym=isr_systick=SysTick_Handler
 )
+
+# Верх SRAM - память шины по постоянным адресам: таблицы, ПЗУ и ОЗУ DivMMC,
+# в банках 8-15 ОЗУ DivMMC - код BDI.
+pico_add_linker_script_override_path(soundsinth_firmware ${CMAKE_CURRENT_LIST_DIR}/backend/ports/rp2350/ld
+    FILES memory_ram.incl section_extra_post_data.incl section_extra_post_text.incl default_text_excludes.incl default_rodata_excludes.incl)
 
 pico_add_extra_outputs(soundsinth_firmware)

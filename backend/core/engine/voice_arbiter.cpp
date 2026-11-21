@@ -2,6 +2,7 @@
 #include "core/engine/voice_arbiter.h"
 
 #include "platform/hot_path.h"
+
 #include "core/engine/engine_defs.h"
 #include "core/engine/envelope_gain.h"
 

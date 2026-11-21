@@ -35,15 +35,33 @@ bool header_of(const uint8_t* page, PageHeader& out) {
 
 // Поля за неподвижной частью: номер записи и место в Settings. Номера не
 // переиспользуются: запись, которую прошивка не знает, пропускается.
+// Номера 3, 4, 5 заняты: в сохранённых блоках под ними лежат снятые поля.
 struct Record {
     uint16_t id;
     uint16_t offset;
     uint16_t size;
 };
+// clang-format off
 constexpr Record kRecords[] = {
     {1, offsetof(Settings, joy_8bit), sizeof(Settings::joy_8bit)},
     {2, offsetof(Settings, joy_keys), sizeof(Settings::joy_keys)},
+    {6, offsetof(Settings, wifi_ssid), sizeof(Settings::wifi_ssid)},
+    {7, offsetof(Settings, wifi_pass), sizeof(Settings::wifi_pass)},
+    {8, offsetof(Settings, rom_file), sizeof(Settings::rom_file)},
+    {9, offsetof(Settings, mod_interpolation), sizeof(Settings::mod_interpolation)},
+    {10, offsetof(Settings, sd_speed), sizeof(Settings::sd_speed)},
+    {11, offsetof(Settings, ay_emulation), sizeof(Settings::ay_emulation)},
+    {12, offsetof(Settings, ay_stereo), sizeof(Settings::ay_stereo)},
+    {13, offsetof(Settings, stop_music_on_reset), sizeof(Settings::stop_music_on_reset)},
+    {14, offsetof(Settings, saa1099), sizeof(Settings::saa1099)},
+    {15, offsetof(Settings, divmmc_card1), sizeof(Settings::divmmc_card1)},
+    {16, offsetof(Settings, divmmc_card2), sizeof(Settings::divmmc_card2)},
+    {17, offsetof(Settings, zcontroller), sizeof(Settings::zcontroller)},
+    {18, offsetof(Settings, covox), sizeof(Settings::covox)},
+    {19, offsetof(Settings, soundrive), sizeof(Settings::soundrive)},
+    {20, offsetof(Settings, beeper), sizeof(Settings::beeper)},
 };
+// clang-format on
 
 struct RecordHeader {
     uint16_t id;
@@ -127,7 +145,15 @@ bool page_read(const uint8_t* page, Settings& out) {
     // остаётся тем, чем пришёл.
     out = Settings{};
     std::memcpy(&out, page + kPayloadOffset, h.bytes);
+    // Устройства карты - записями. В блоке прежней прошивки их нет, выбор
+    // выводится из неподвижной части: носитель DivMMC при DISKSYS=DIVMMC,
+    // флаг и носитель Z-Controller.
+    constexpr uint8_t kUnset = 0xff;
+    out.divmmc_card1 = out.zcontroller = kUnset;
     if (h.bytes == kLegacyBytes) ext_read(page, out);
+    constexpr auto kOff = static_cast<uint8_t>(Media::None);
+    if (out.divmmc_card1 == kUnset) out.divmmc_card1 = out.disksys == static_cast<uint8_t>(DiskSys::DivMmc) ? out.legacy_divmmc_media : kOff;
+    if (out.zcontroller == kUnset) out.zcontroller = out.legacy_zcontroller != 0 ? out.legacy_zcontroller_media : kOff;
     settings_clamp(out);
     return true;
 }

@@ -6,38 +6,41 @@
 // Этот заголовок - только чтение. Клиентов двое: эмулятор карты (хост,
 // читает и пишет) и код на МК (только читает). Хост идёт первым: фоновое
 // чтение перед каждым обращением к носителю пропускает его заказы, и
-// очередь решает арбитр, а не клиент. Запись - в отдельном
-// storage_host.h, его включает только эмулятор.
+// очередь решает арбитр, а не клиент. Запись объявлена
+// отдельно: её включает только эмулятор.
 //
 // Не из ISR: обращение к носителю блокирующее, а обработчики портов
 // обязаны возвращаться сразу. При старте зовёт Core0 до запуска Core1
 // (storage_init, bank_sd_open), дальше только цикл Core1. В каждый момент
-// поток один, поэтому внутри нет блокировок и атомиков.
+// поток один, поэтому блокировок нет; атомарен только замок писателя - его
+// берёт и обработчик шины (storage_host.h).
 
 #include <cstddef>
 #include <cstdint>
+
+#include "platform/memory.h"
 
 #include "devices/hal/media.h"
 #include "devices/sd/sd_owner.h"
 
 namespace devices::storage {
 
-inline constexpr uint32_t kSectorBytes = devices::hal::kSectorBytes;
+inline constexpr uint32_t kSectorBytes = hal::kSectorBytes;
 
 // Строк кэша чтения. Кэш не для скрытия задержки - её прячет упреждение
 // эмулятора карты, кладущее заказ на следующий сектор заранее. Он для
 // повторов: таблица FAT и каталог читаются снова и снова. Каждая строка -
 // сектор SRAM.
 //
-// Восемь, и больше не нужно: проверено опытом на плате. Вчетверо больший
-// кэш (32 строки, плюс 12.5 КБ SRAM) дал на той же нагрузке +4 попадания
-// из 438 обращений - 6.4% против 7.3%. Повторов в потоке почти нет, и те,
-// что есть, ловятся восемью строками. Больший кэш, в том числе свой на
-// устройство в PSRAM, отброшен замером - не предлагать заново.
+// Много строк не нужно: на плате кэш в 32 строки (плюс 12.5 КБ SRAM)
+// против восьми дал на той же нагрузке +4 попадания из 438 обращений -
+// 7.3% против 6.4%. Повторов в потоке почти нет. Больший кэш, в том числе
+// свой на устройство в PSRAM, отброшен замером - не предлагать заново.
+// По умолчанию строк четыре.
 //
 // Прямое отображение по lba, степень двойки обязательна.
 #ifndef SOUNDSINTH_STORAGE_CACHE_SECTORS
-#define SOUNDSINTH_STORAGE_CACHE_SECTORS 8u
+#define SOUNDSINTH_STORAGE_CACHE_SECTORS 4u
 #endif
 static_assert((SOUNDSINTH_STORAGE_CACHE_SECTORS & (SOUNDSINTH_STORAGE_CACHE_SECTORS - 1u)) == 0, "the row is found by a remainder: a power of two");
 inline constexpr uint32_t kCacheSectors = SOUNDSINTH_STORAGE_CACHE_SECTORS;
@@ -60,12 +63,11 @@ inline constexpr uint32_t kBlockCacheBytes  = kBlockMediumCount * kBlocksPerMedi
 // Как получить адрес для записи в буфер. У PSRAM запись идёт мимо кэша XIP,
 // и его строки перед этим сбрасываются; у обычной памяти нужно вернуть тот
 // же указатель. nullptr значит "писать можно прямо".
-using BlockCacheWrite = uint8_t* (*)(uint8_t* p, size_t bytes);
 
 // Отдать буфер под блочный кэш. bytes меньше kBlockCacheBytes - буфер не
 // принимается. Без буфера блочного кэша нет вовсе: чтение идёт посекторно
 // через построчный кэш.
-void storage_attach_block_cache(uint8_t* buf, uint32_t bytes, BlockCacheWrite to_write);
+void storage_attach_block_cache(uint8_t* buf, uint32_t bytes, platform::WriteAliasFn to_write);
 
 // Поднять носитель (карта на SPI1). Зовётся один раз при старте;
 // повторный вызов сбросит кэш и переинициализирует карту.
@@ -77,8 +79,8 @@ bool storage_init();
 bool storage_present();
 uint32_t storage_sector_count();
 
-// Записать сектор на носитель платы. Зовётся только механизмом настроек
-// при старте: в работе код платы носитель не меняет.
+// Записать сектор на носитель платы: все записи FatFs на томе карты
+// (настройки, файлы конфигуратора).
 bool storage_write_board(uint32_t lba, const uint8_t* src);
 
 // --- Носитель эмулятора карты ---
@@ -96,13 +98,8 @@ inline constexpr uint8_t kEmulatorCount = sd::kSdOwnerCount;
 
 void storage_set_emulator_medium(sd::SdOwner owner, hal::Medium m);
 hal::Medium storage_emulator_medium(sd::SdOwner owner);
-bool storage_emulator_present(sd::SdOwner owner);
-uint32_t storage_emulator_sectors(sd::SdOwner owner);
-
-// Поколение снимка носителей: растёт только на событиях. Сверке эмулятора
-// оно заменяет обход всех сторон - одно слово из SRAM вместо опроса
-// драйверов, а зовут её с каждого витка цикла Core1.
-uint32_t storage_media_generation();
+// Снимок носителя хозяина (hal::media_state): наличие, ёмкость, номер.
+const hal::MediaState& storage_emulator_state(sd::SdOwner owner);
 
 // Шаг предвыборки: наполнить заказанный блок, если заказ есть. Зовётся
 // из свободного времени цикла Core1 и только изнутри sd_spi_task - её
@@ -120,9 +117,20 @@ bool storage_emulator_read(sd::SdOwner owner, uint32_t lba, uint8_t* dst);
 // ждущие заказы хоста уходят первыми, хост ждёт не дольше одного сектора.
 bool storage_read_background(uint32_t lba, uint8_t* dst);
 
+// Инструменты конфигуратора: любой носитель целиком, мимо эмуляторов.
+// Чтение фоновое - хост идёт первым; запись обновляет кэш.
+bool storage_tool_read(hal::Medium m, uint32_t lba, uint8_t* dst);
+bool storage_tool_write(hal::Medium m, uint32_t lba, const uint8_t* src);
+
 // Чем пропустить хост вперёд: функция, забирающая его заказы. Ставит цикл
 // Core1; пока не поставлена (старт на Core0), фоновое чтение - как обычное.
 void storage_set_host_yield(hal::WaitServiceFn fn, void* user);
+
+// Сектор переписан на носителе (любой писатель: хост, BDI, инструменты,
+// FatFs, удачно или нет): упреждённые копии у эмуляторов карты больше не
+// годны. Ставит эмулятор карты при запуске; слой ниже его не знает.
+using SectorWrittenFn = void (*)(hal::Medium m, uint32_t lba);
+void storage_on_sector_written(SectorWrittenFn fn);
 
 // Строка здоровья носителя в лог (сбои чтения по причинам). Звать из
 // задачи логгера по расписанию.

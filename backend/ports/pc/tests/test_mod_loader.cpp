@@ -183,7 +183,7 @@ void test_synthetic_exact() {
     CHECK_EQ(sd.length_samples, 8u);
     CHECK(!sd.loop_enabled);
     CHECK_EQ(sd.default_volume, static_cast<uint8_t>(64));
-    CHECK_EQ(sd.c5_speed, 8363u);
+    CHECK_EQ(sd.c5_speed, 8287u); // такт Paula PAL
     // Остальные 30 сэмплов - пустые "таблички" (так решено: пусть будут
     // пустые).
     for (int i = 1; i < 31; ++i) {
@@ -238,6 +238,37 @@ void test_synthetic_exact() {
     }
 
     memory::track_memory_destroy(mem);
+}
+
+// Паттернов - по всем 128 позициям, а не по длине песни: иначе сэмплы
+// читаются со сдвигом на 1 КБ. Файл короток для них - по длине песни. 0x80
+// обрывает счёт.
+void test_patterns_past_song_length() {
+    std::printf("test_mod_loader_patterns_past_song_length\n");
+    const struct {
+        bool second_pattern;
+        uint8_t order1, order2;
+        uint16_t patterns;
+    } cases[] = {{true, 1, 0, 2}, {false, 1, 0, 1}, {true, 0x80, 1, 1}};
+    for (const auto& c : cases) {
+        std::vector<uint8_t> file = build_synthetic_mod();
+        if (c.second_pattern) file.insert(file.begin() + 1084 + 1024, 1024, 0);
+        file[953] = c.order1;
+        file[954] = c.order2;
+        formats::MemoryByteSource mbs(file.data(), static_cast<uint32_t>(file.size()));
+        memory::TrackMemory mem;
+        memory::track_memory_create(mem);
+        Song song;
+        CHECK(formats::mod::load(mbs.as_byte_source(), mem, song, nullptr));
+        CHECK_EQ(song.pattern_count, c.patterns);
+        CHECK_EQ(song.order_count, static_cast<uint16_t>(1));
+        if (c.patterns == 2 || !c.second_pattern) {
+            const auto* e = memory::sample_cache_find(mem.sample_cache, 0);
+            CHECK(e != nullptr && e->first_page != memory::kPageChainEnd);
+            if (e != nullptr) CHECK_EQ(reinterpret_cast<const int8_t*>(memory::psram_page_ptr(mem.psram, e->first_page))[0], static_cast<int8_t>(10));
+        }
+        memory::track_memory_destroy(mem);
+    }
 }
 
 void test_real_small_file_smoke() {
@@ -645,6 +676,7 @@ void run_mod_loader_tests() {
     test_old_format_loops();
     test_loop_past_end();
     test_synthetic_exact();
+    test_patterns_past_song_length();
     test_real_small_file_smoke();
     test_panning_heuristics();
     test_amiga_period_extended_octaves();

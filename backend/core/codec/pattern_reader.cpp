@@ -2,6 +2,7 @@
 #include "core/codec/pattern_reader.h"
 
 #include "platform/hot_path.h"
+
 #include "core/codec/pattern_cell_codec.h"
 
 namespace soundsinth::patterns {

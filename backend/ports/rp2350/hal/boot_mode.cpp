@@ -5,24 +5,24 @@
 // Сторожевой scratch[0] занят счётчиком загрузок, тем, что печатает строка
 // "boot: reset".
 
-#include "platform/boot_mode.h"
-
 #include <cstring>
 
+#include "hardware/clocks.h"
 #include "hardware/dma.h"
 #include "hardware/flash.h"
 #include "hardware/gpio.h"
-#include "hardware/structs/psm.h"
-#include "hardware/structs/powman.h"
-#include "hardware/watchdog.h"
-#include "hardware/sync.h"
-#include "pico.h"
 #include "hardware/irq.h"
+#include "hardware/structs/powman.h"
+#include "hardware/structs/psm.h"
+#include "hardware/structs/timer.h"
+#include "hardware/sync.h"
+#include "hardware/watchdog.h"
+#include "pico.h"
 #include "pico/multicore.h"
-#include "pico/platform.h"
 
+#include "platform/board_info.h"
+#include "platform/boot_mode.h"
 #include "platform/config_flash.h"
-
 #include "platform/log.h"
 
 #include "bus.h" // PIN_BOOT_JUMPER
@@ -136,9 +136,16 @@ void platform::boot_reboot_saving(BootRequest req, uint32_t slot, const uint8_t*
     (void)save_and_disable_interrupts();
     __dmb();
     multicore_doorbell_set_other_core(static_cast<uint>(s_bell));
-    for (;;) {
+    // Core0, взявший задание, первым делом выключает это ядро. Не выключил за
+    // секунду - он стоит в отказе: перезапуск без записи, "не сохранено".
+    // Таймер читается и с погашенными прерываниями.
+    constexpr uint32_t kBellWaitUs = 1000000;
+    const uint32_t t0              = timer_hw->timerawl;
+    while (timer_hw->timerawl - t0 < kBellWaitUs) {
         tight_loop_contents();
     }
+    req.saved = false;
+    boot_reboot(req);
 }
 
 bool platform::boot_request_peek(BootRequest& out) {
@@ -182,4 +189,13 @@ uint8_t* platform::config_rom_page() {
 
 uint32_t platform::config_rom_page_bytes() {
     return bus::config_rom_page_bytes();
+}
+
+platform::BoardInfo platform::board_info() {
+    BoardInfo b{};
+    b.chip_revision = rp2350_chip_version();
+    b.sys_hz        = clock_get_hz(clk_sys);
+    b.flash_bytes   = PICO_FLASH_SIZE_BYTES;
+    b.psram_bytes   = PICO_PSRAM_SIZE_BYTES;
+    return b;
 }

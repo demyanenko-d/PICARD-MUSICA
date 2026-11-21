@@ -13,8 +13,20 @@ static u8 bus_status(void) __naked
 
 /*
  * Отправить восемь байт команды в порт статуса.
- * После записи - пауза, пока плата не разберёт команду.
+ * bus_write_cmd - и пауза, пока плата не разберёт команду; bus_write_cmd_now
+ * - без неё.
  */
+static void bus_write_cmd_now(const u8 *cmd) __naked
+{
+    cmd;
+    __asm
+    ld   c, #BUS_PORT_CMD
+    ld   b, #8
+    otir
+    ret
+    __endasm;
+}
+
 static void bus_write_cmd(const u8 *cmd) __naked
 {
     cmd;
@@ -122,6 +134,11 @@ bool_t bus_psram_valid;
 
 u8  bus_voices, bus_peak_voices, bus_cpu, bus_cull;
 bool_t bus_load_valid;
+u8  bus_track_seq;
+#if BUS_SCOPE
+u8  bus_level[2];
+u8  bus_spectrum[16];
+#endif
 
 u32 bus_req_offset;
 u16 bus_req_length;
@@ -140,6 +157,7 @@ u16 bus_req_length;
 #define ST_SPECTRUM      0x18
 #define ST_PSRAM         0x19
 #define ST_ENGINE_LOAD   0x1A
+#define ST_TRACK_META    0x1B
 
 #define HC_RESET  0x01
 #define HC_START  0x02
@@ -156,6 +174,7 @@ u16 bus_req_length;
 #define HC_FIELD_SPECTRUM  0x08
 #define HC_FIELD_PSRAM     0x10
 #define HC_FIELD_LOAD      0x20
+#define HC_FIELD_META      0x40
 
 #define HC_SECTOR_512 2     /* enum размера сектора в HC_START */
 
@@ -174,7 +193,7 @@ typedef struct {
 } BusReadReq;
 
 typedef union {
-    u8 raw[17];
+    u8 raw[19];
 
     struct {                    /* ST_READ_FAST, ST_READ_SLOW */
         BusReadReq req;
@@ -213,7 +232,7 @@ typedef union {
 /* Компилятор, кладущий эти структуры иначе, обязан сломаться здесь, а не
    выдавать мусор в телеметрии. */
 typedef char bus_args_layout_check[
-    (sizeof(BusArgs) == 17 && sizeof(((BusArgs *)0)->read) == 13 &&
+    (sizeof(BusArgs) == 19 && sizeof(((BusArgs *)0)->read) == 13 &&
      sizeof(((BusArgs *)0)->file) == 9 && sizeof(((BusArgs *)0)->pos) == 4 &&
      sizeof(((BusArgs *)0)->psram) == 7 && sizeof(((BusArgs *)0)->load) == 5)
     ? 1 : -1];
@@ -267,7 +286,12 @@ static void cmd_send(u8 code, u8 nargs)
     u8 i;
     s_cmd.code = code;
     for (i = nargs; i < 7; ++i) s_cmd.arg.raw[i] = 0;
-    bus_write_cmd((const u8 *)&s_cmd);
+    /* DONE - без паузы: за ним хост только читает статус, а статус плата
+       прячет на первом байте команды. Пауза держит очередь команд платы
+       (два места), когда команды идут подряд; после DONE так не бывает.
+       Пауза - 1.1 мс на каждое окно и каждый кадр телеметрии. */
+    if (code == HC_DONE) bus_write_cmd_now((const u8 *)&s_cmd);
+    else bus_write_cmd((const u8 *)&s_cmd);
 }
 
 /* Команда без аргументов. */
@@ -286,6 +310,15 @@ static bool_t args_get(u8 n)
 
 /* -- Действия -- */
 
+/* Ждать ST_RESET_DONE, 65536 опросов. FALSE - не дождались. */
+static bool_t wait_reset_done(void)
+{
+    u16 tries = 0;
+    while (bus_status() != ST_RESET_DONE)
+        if (++tries == 0) return FALSE;
+    return TRUE;
+}
+
 /*
  * Сброс: команда и обязательное чтение ответа с подтверждением.
  *
@@ -295,28 +328,17 @@ static bool_t args_get(u8 n)
  *
  * Имя остаётся в s_args.board - вызывающий заберёт, если оно ему нужно.
  */
-static bool_t reset_sync(void)
+bool_t bus_reset(void)
 {
-    u16 tries;
-
     cmd_bare(HC_RESET);
-
-    tries = 0;
-    for (;;) {
-        if (bus_status() == ST_RESET_DONE) break;
-        if (++tries == 0) return FALSE;
-    }
+    if (!wait_reset_done()) return FALSE;
 
     /* Одна попытка перечитать при несовпадении контрольного байта: имя
        платы на экране - индикатор исправности шины, и мусор в нём должен
        быть виден. */
     if (!args_get(sizeof(s_args.board))) {
         cmd_bare(HC_NAK);
-        tries = 0;
-        for (;;) {
-            if (bus_status() == ST_RESET_DONE) break;
-            if (++tries == 0) return FALSE;
-        }
+        if (!wait_reset_done()) return FALSE;
         (void)args_get(sizeof(s_args.board));
     }
 
@@ -329,7 +351,7 @@ bool_t bus_ping(void)
     u8 i;
 
     bus_board_found = FALSE;
-    if (!reset_sync()) return FALSE;
+    if (!bus_reset()) return FALSE;
 
     for (i = 0; i < 16; ++i) bus_board_name[i] = s_args.board.name[i];
     bus_board_name[16] = 0;
@@ -355,17 +377,16 @@ void bus_transport(u8 op)
     cmd_send(HC_TRANS, sizeof(s_cmd.arg.trans));
 }
 
-void bus_reset(void)
-{
-    (void)reset_sync();
-}
-
 void bus_start(u32 file_length, u8 load_order)
 {
     s_cmd.arg.start.file_length = file_length;
     s_cmd.arg.start.sector_size = HC_SECTOR_512;
     s_cmd.arg.start.fields = HC_FIELD_FILE_INFO | HC_FIELD_POSITION |
-                             HC_FIELD_PSRAM | HC_FIELD_LOAD;
+                             HC_FIELD_PSRAM | HC_FIELD_LOAD
+#if BUS_SCOPE
+                             | HC_FIELD_VU | HC_FIELD_SPECTRUM | HC_FIELD_META
+#endif
+                             ;
     s_cmd.arg.start.load_order = load_order;
 
     cmd_send(HC_START, sizeof(s_cmd.arg.start));
@@ -406,106 +427,124 @@ void bus_done(void)
     cmd_send(HC_DONE, sizeof(s_cmd.arg.sent));
 }
 
+/* Байт аргументов с контрольным, по коду ST_RESET_DONE..ST_TRACK_META.
+   Кадр метаданных - только с BUS_SCOPE: без него код 0x1B неизвестен. */
+static const u8 s_arg_len[] = {
+    17,     /* ST_RESET_DONE */
+    13, 13, /* ST_READ_FAST, ST_READ_SLOW */
+    1,      /* ST_SESSION_READY: аргументов нет, контрольный байт есть */
+    9, 4,   /* ST_FILE_INFO, ST_POSITION */
+    3, 17,  /* ST_VU, ST_SPECTRUM */
+    7, 5,   /* ST_PSRAM, ST_ENGINE_LOAD */
+#if BUS_SCOPE
+    19,     /* ST_TRACK_META */
+#endif
+};
+
 /* Разобрать одну команду платы. Возвращает событие. */
 static u8 bus_handle(u8 status)
 {
+    u8 ev = BUS_EV_TELEMETRY;
+#if BUS_SCOPE
+    u8 i, v;
+#endif
+
+    /* Неизвестный код: подтверждать нечего, но и висеть нельзя. */
+    if ((u8)(status - ST_RESET_DONE) >= sizeof(s_arg_len) || !args_get(s_arg_len[status - ST_RESET_DONE])) {
+        cmd_bare(HC_NAK);
+        return BUS_EV_NONE;
+    }
+
     switch (status) {
-        case ST_READ_FAST:
-        case ST_READ_SLOW:
-            if (!args_get(sizeof(s_args.read))) { cmd_bare(HC_NAK); return BUS_EV_NONE; }
-
-            /* Запрос продублирован в кадре - сверяем копии. */
-            if (s_args.read.req.offset != s_args.read.copy.offset ||
-                s_args.read.req.length != s_args.read.copy.length) {
-                cmd_bare(HC_NAK);
-                return BUS_EV_NONE;
-            }
-
-            if (s_args.read.req.length == 0u ||
-                s_args.read.req.length > BUS_WINDOW_BYTES) {
-                cmd_bare(HC_NAK);
-                return BUS_EV_NONE;
-            }
-
-            bus_req_offset = s_args.read.req.offset;
-            if (status == ST_READ_FAST) {
-                /* Быстрый путь принимает только целое окно; длину из кадра
-                   здесь не используем. */
-                bus_req_length = (u16)BUS_WINDOW_BYTES;
-                return BUS_EV_READ_FAST;
-            }
-            bus_req_length = s_args.read.req.length;
-            return BUS_EV_READ;
-
-        case ST_FILE_INFO:
-            if (!args_get(sizeof(s_args.file))) { cmd_bare(HC_NAK); return BUS_EV_NONE; }
-            /* 0xFF - длительность ещё не известна: крупный .mid дочитывается
-               фоном, плата пришлёт кадр заново. */
-            bus_dur_valid = (bool_t)(s_args.file.dur_min != 0xFFu);
-            bus_dur_min = bus_dur_valid ? bcd_to_u8(s_args.file.dur_min) : 0;
-            bus_dur_sec = bus_dur_valid ? bcd_to_u8(s_args.file.dur_sec) : 0;
-            bus_samples = s_args.file.samples;
-            bus_patterns = s_args.file.patterns;
-            bus_instruments = s_args.file.instruments;
-            bus_file_info_valid = TRUE;
-            cmd_bare(HC_DONE);
-            return BUS_EV_TELEMETRY;
-
-        case ST_POSITION:
-            if (!args_get(sizeof(s_args.pos))) { cmd_bare(HC_NAK); return BUS_EV_NONE; }
-            bus_pos_min = bcd_to_u8(s_args.pos.min);
-            bus_pos_sec = bcd_to_u8(s_args.pos.sec);
-            /* Состояние - младшие два бита, остальное признаки управления. */
-            bus_state = (u8)(s_args.pos.state & 0x03u);
-            bus_paused = (bool_t)((s_args.pos.state & 0x04u) != 0);
-            bus_seek_ok = (bool_t)((s_args.pos.state & 0x08u) != 0);
-            cmd_bare(HC_DONE);
-            return BUS_EV_TELEMETRY;
-
-        case ST_PSRAM:
-            if (!args_get(sizeof(s_args.psram))) { cmd_bare(HC_NAK); return BUS_EV_NONE; }
-            bus_psram_total = s_args.psram.total;
-            bus_psram_queued = s_args.psram.queued;
-            bus_psram_loaded = s_args.psram.loaded;
-            bus_psram_valid = TRUE;
-            cmd_bare(HC_DONE);
-            return BUS_EV_TELEMETRY;
-
-        case ST_ENGINE_LOAD:
-            if (!args_get(sizeof(s_args.load))) { cmd_bare(HC_NAK); return BUS_EV_NONE; }
-            bus_voices = s_args.load.voices;
-            bus_peak_voices = s_args.load.peak;
-            bus_cpu = s_args.load.cpu;
-            bus_cull = s_args.load.cull;
-            bus_load_valid = TRUE;
-            cmd_bare(HC_DONE);
-            return BUS_EV_TELEMETRY;
-
-        case ST_SESSION_READY:
-            /* Аргументов нет, но контрольный байт есть у всех команд -
-               так у хоста один путь чтения на все случаи. */
-            if (!args_get(1)) { cmd_bare(HC_NAK); return BUS_EV_NONE; }
-            cmd_bare(HC_DONE);
-            return BUS_EV_READY;
-
-        /* Кадры, которые приложению не нужны: принять и подтвердить, иначе
-           плата будет ждать ответа. */
-        case ST_VU:
-            if (!args_get(3)) { cmd_bare(HC_NAK); return BUS_EV_NONE; }
-            cmd_bare(HC_DONE);
-            return BUS_EV_NONE;
-
-        case ST_SPECTRUM:
-        case ST_RESET_DONE:
-            if (!args_get(17)) { cmd_bare(HC_NAK); return BUS_EV_NONE; }
-            cmd_bare(HC_DONE);
-            return BUS_EV_NONE;
-
-        default:
-            /* Неизвестный код: подтверждать нечего, но и висеть нельзя. */
+    case ST_READ_FAST:
+    case ST_READ_SLOW:
+        /* Запрос продублирован в кадре - сверяем копии. */
+        if (s_args.read.req.offset != s_args.read.copy.offset || s_args.read.req.length != s_args.read.copy.length ||
+            s_args.read.req.length == 0u || s_args.read.req.length > BUS_WINDOW_BYTES) {
             cmd_bare(HC_NAK);
             return BUS_EV_NONE;
+        }
+        bus_req_offset = s_args.read.req.offset;
+        /* Быстрый путь принимает только целое окно; длину из кадра здесь не
+           используем. */
+        if (status == ST_READ_FAST) {
+            bus_req_length = (u16)BUS_WINDOW_BYTES;
+            return BUS_EV_READ_FAST;
+        }
+        bus_req_length = s_args.read.req.length;
+        return BUS_EV_READ;
+
+    case ST_FILE_INFO:
+        /* 0xFF - длительность ещё не известна: крупный .mid дочитывается
+           фоном, плата пришлёт кадр заново. */
+        bus_dur_valid = (bool_t)(s_args.file.dur_min != 0xFFu);
+        bus_dur_min = bus_dur_valid ? bcd_to_u8(s_args.file.dur_min) : 0;
+        bus_dur_sec = bus_dur_valid ? bcd_to_u8(s_args.file.dur_sec) : 0;
+        bus_samples = s_args.file.samples;
+        bus_patterns = s_args.file.patterns;
+        bus_instruments = s_args.file.instruments;
+        bus_file_info_valid = TRUE;
+        ++bus_track_seq;
+        break;
+
+    case ST_POSITION:
+        bus_pos_min = bcd_to_u8(s_args.pos.min);
+        bus_pos_sec = bcd_to_u8(s_args.pos.sec);
+        /* Состояние - младшие два бита, остальное признаки управления. */
+        bus_state = (u8)(s_args.pos.state & 0x03u);
+        bus_paused = (bool_t)((s_args.pos.state & 0x04u) != 0);
+        bus_seek_ok = (bool_t)((s_args.pos.state & 0x08u) != 0);
+        break;
+
+    case ST_PSRAM:
+        bus_psram_total = s_args.psram.total;
+        bus_psram_queued = s_args.psram.queued;
+        bus_psram_loaded = s_args.psram.loaded;
+        bus_psram_valid = TRUE;
+        break;
+
+    case ST_ENGINE_LOAD:
+        bus_voices = s_args.load.voices;
+        bus_peak_voices = s_args.load.peak;
+        bus_cpu = s_args.load.cpu;
+        bus_cull = s_args.load.cull;
+        bus_load_valid = TRUE;
+        break;
+
+    case ST_SESSION_READY:
+        ev = BUS_EV_READY;
+        break;
+
+#if BUS_SCOPE
+    case ST_VU:
+        for (i = 0; i < 2; ++i) {
+            v = s_args.raw[i];
+            bus_level[i] = v;
+            if (v > bus_level_max[i]) bus_level_max[i] = v;
+        }
+        break;
+
+    case ST_SPECTRUM:
+        for (i = 0; i < 16; ++i) {
+            v = s_args.raw[i];
+            bus_spectrum[i] = v;
+            if (v > bus_spec_max[i]) bus_spec_max[i] = v;
+        }
+        break;
+
+    case ST_TRACK_META:
+        plat_track_meta(s_args.raw);
+        break;
+#endif
+
+    default:
+        /* ST_RESET_DONE, а без BUS_SCOPE и VU со спектром: принять и
+           подтвердить, иначе плата будет ждать ответа. */
+        ev = BUS_EV_NONE;
+        break;
     }
+    cmd_bare(HC_DONE);
+    return ev;
 }
 
 /* Пауза между опросами статуса, десятки микросекунд. */
@@ -537,4 +576,12 @@ u8 bus_poll(void)
     }
 
     return event;
+}
+
+u8 bus_poll_now(bool_t reads)
+{
+    u8 status = bus_status();
+    if (status == ST_NONE || status == ST_NONE_ALT) return BUS_EV_NONE;
+    if (!reads && (status == ST_READ_FAST || status == ST_READ_SLOW)) return BUS_EV_NONE;
+    return bus_handle(status);
 }

@@ -6,6 +6,7 @@
 #include <cstring>
 
 #include "platform/compiler.h"
+
 #include "core/formats/load_stats.h"
 #include "core/codec/loop_unroll.h"
 #include "core/codec/pack_file_pcm.h"
@@ -63,10 +64,19 @@ constexpr uint8_t kCvtDelta                = 0x04u; // у сжатого - ва�
 constexpr uint8_t kSampleSustainLoop       = 0x20u; // бит flags сэмпла: петля удержания
 constexpr uint32_t kSampleVibDepthOffset   = 77;    // ViD - глубина автовибрато сэмпла
 
+// Фиксированный Zxx-макрос (Zxx >= 0x80) в один байт: kZxxNone - не
+// фильтровый, иначе бит 0x80 - резонанс (без него срез), младшие 7 бит -
+// значение. Резонанс 127 прижат к 126: 0xFF занят под kZxxNone.
+constexpr uint8_t kZxxNone          = 0xffu;
+constexpr uint32_t kZxxMacros       = 128;
+constexpr uint32_t kSfxMacros       = 16;
+constexpr uint32_t kMacroGlobal     = 9;  // служебные макросы перед SFx в блоке файла
+constexpr uint32_t kMacroEntryBytes = 32; // текст одного макроса в блоке файла
+
 // Буквы A-Z те же, что у S3M, кроме: Pattern Break не в BCD, Vxx/Wxy уже в
 // шкале 0..128. Из расширений OpenMPT 27-31 разбирается только 28
-// (SmoothMidiMacro).
-void decode_effect(uint8_t command, uint8_t param, soundsinth::model::EffectCommand& out) {
+// ('\' - как Zxx). zxx - разобранные фиксированные макросы, kZxxMacros байт.
+void decode_effect(uint8_t command, uint8_t param, const uint8_t* zxx, soundsinth::model::EffectCommand& out) {
     switch (command + '@') {
         case 'A':
             out.type  = Effect::SetSpeed;
@@ -232,16 +242,78 @@ void decode_effect(uint8_t command, uint8_t param, soundsinth::model::EffectComm
             out.param = param;
             break;
         case 'Z':
-            out.type  = Effect::SetMidiMacro;
-            out.param = param;
-            break;
-        case '\\':
-            out.type  = Effect::SmoothMidiMacro;
-            out.param = param;
+        case '\\': // \xx (расширение OpenMPT) - как Zxx, сглаживания по тикам нет
+            if (param < 0x80u) {
+                out.type  = Effect::SetMidiMacro; // через SFx-макрос, класс в Song::sfx_macro
+                out.param = param;
+            } else if (zxx[param - 0x80u] != kZxxNone) {
+                const uint8_t m = zxx[param - 0x80u];
+                out.type        = (m & 0x80u) ? Effect::SetFilterResonance : Effect::SetFilterCutoff;
+                out.param       = m & 0x7fu;
+            } else {
+                ++soundsinth::model::g_tracker_load_stats.effect_cells_dropped;
+            }
             break;
         default: // '[', ']', '^', '_' (расширения OpenMPT XParam, DelayCut, Finetune) не разбираются
             if (command != 0) ++soundsinth::model::g_tracker_load_stats.effect_cells_dropped;
             break;
+    }
+}
+
+// Блок MIDI-макросов (special бит 0x08): kMacroGlobal служебных + kSfxMacros
+// параметрических SFx + kZxxMacros фиксированных Zxx, по 32 байта текста,
+// сразу за таблицами указателей (перед ним - история правок, бит 0x02).
+// Исполняются только фильтровые макросы, как у OpenMPT: F0F000 - срез,
+// F0F001 - резонанс, значение 0..127 прямо в канал, больше - макрос не
+// исполняется. Параметрические ("...z") дают классы Song::sfx_macro,
+// фиксированные ("...hh") - байты zxx. Без блока - умолчания Impulse
+// Tracker: SF0 срез, Z80..Z8F резонанс 0, 8, ..., 120.
+void parse_midi_macros(BinaryReader& r, uint32_t offset, bool embedded, uint32_t file_size, Song& out, uint8_t* zxx) {
+    constexpr uint32_t kBlockBytes = (kMacroGlobal + kSfxMacros + kZxxMacros) * kMacroEntryBytes;
+    std::memset(zxx, kZxxNone, kZxxMacros);
+    if (!embedded || offset > file_size || file_size - offset < kBlockBytes) {
+        out.sfx_macro[0] = Song::FilterMacro::Cutoff;
+        for (uint32_t i = 0; i < 16; ++i) {
+            zxx[i] = static_cast<uint8_t>(0x80u | (i * 8u));
+        }
+        return;
+    }
+    // Класс одной записи; value - значение фиксированного макроса, kZxxNone -
+    // на месте значения параметр 'z'.
+    auto classify = [&](uint32_t idx, uint8_t& value) {
+        char t[kMacroEntryBytes];
+        value = kZxxNone;
+        if (!r.seek(offset + idx * kMacroEntryBytes)) return Song::FilterMacro::None;
+        r.bytes(t, kMacroEntryBytes);
+        if (!r.ok()) return Song::FilterMacro::None;
+        char c[10] = {}; // "F0F001" + значение или 'z', пробелы выброшены, регистр поднят
+        uint32_t n = 0;
+        for (uint32_t i = 0; i < kMacroEntryBytes && t[i] != '\0'; ++i) {
+            if (t[i] == ' ') continue;
+            if (n >= sizeof(c) - 1) return Song::FilterMacro::None; // длиннее фильтрового
+            c[n++] = (t[i] >= 'a' && t[i] <= 'z') ? static_cast<char>(t[i] - 32) : t[i];
+        }
+        c[n] = '\0';
+        if (std::memcmp(c, "F0F00", 5) != 0 || (c[5] != '0' && c[5] != '1')) return Song::FilterMacro::None;
+        const Song::FilterMacro cls = (c[5] == '0') ? Song::FilterMacro::Cutoff : Song::FilterMacro::Resonance;
+        if (c[6] == 'Z' && c[7] == '\0') return cls; // параметрический
+        auto hex     = [](char h) { return (h >= '0' && h <= '9') ? h - '0' : (h >= 'A' && h <= 'F') ? h - 'A' + 10 : -1; };
+        const int hi = hex(c[6]);
+        const int lo = hex(c[7]);
+        if (hi < 0 || lo < 0 || c[8] != '\0' || hi * 16 + lo > 127) return Song::FilterMacro::None;
+        value = static_cast<uint8_t>(hi * 16 + lo);
+        return cls;
+    };
+    for (uint32_t i = 0; i < kSfxMacros; ++i) {
+        uint8_t v                   = 0;
+        const Song::FilterMacro cls = classify(kMacroGlobal + i, v);
+        if (cls != Song::FilterMacro::None && v == kZxxNone) out.sfx_macro[i] = cls;
+    }
+    for (uint32_t i = 0; i < kZxxMacros; ++i) {
+        uint8_t v                   = 0;
+        const Song::FilterMacro cls = classify(kMacroGlobal + kSfxMacros + i, v);
+        if (cls == Song::FilterMacro::None || v == kZxxNone) continue; // не фильтровый или 'z' в фиксированном слоте
+        zxx[i] = (cls == Song::FilterMacro::Resonance) ? static_cast<uint8_t>(0x80u | (v > 126 ? 126u : v)) : v;
     }
 }
 
@@ -704,8 +776,16 @@ SOUNDSINTH_NOINLINE const char* parse_instrument(const uint8_t* hdr, const uint8
     return nullptr;
 }
 
+// Петля удержания сэмпла как в файле; в дескриптор её кладёт вызывающий.
+struct SusLoopRaw {
+    uint32_t start = 0;
+    uint32_t end   = 0;
+    bool on        = false;
+    bool bidi      = false;
+};
+
 // Сэмпл IMPS по прочитанному заголовку hdr (80 байт).
-SOUNDSINTH_NOINLINE void parse_sample_header(const uint8_t* hdr, uint16_t cwtv, uint32_t file_size, SampleDescriptor& sd) {
+SOUNDSINTH_NOINLINE void parse_sample_header(const uint8_t* hdr, uint16_t cwtv, uint32_t file_size, SampleDescriptor& sd, SusLoopRaw& sus) {
     RawSampleInfo ri;
 
     const uint8_t sample_gvl      = hdr[17]; // GvL - глобальная громкость сэмпла, 0..64
@@ -749,8 +829,19 @@ SOUNDSINTH_NOINLINE void parse_sample_header(const uint8_t* hdr, uint16_t cwtv, 
         ++soundsinth::model::g_tracker_load_stats.samples_dropped;
         return;
     }
-    if (sflags & kSampleSustainLoop) ++soundsinth::model::g_tracker_load_stats.ignored_sustain_loops;
-    if (hdr[kSampleVibDepthOffset] != 0) ++soundsinth::model::g_tracker_load_stats.ignored_autovibrato;
+    // Автовибрато: ViS(76) - прирост фазы, ViD(77) - глубина (бит 0x80
+    // отрезается, как у OpenMPT: сырые 128 в архиве дают 0 и не звучат),
+    // ViR(78) - развёртка, ViT(79) - форма. Типы IT -> общая шкала VibType
+    // (AutoVibratoIT2XM OpenMPT). При нулевом ViS IT-ветка не исполняется,
+    // поля всё равно заполняются - решает auto_vibrato_units.
+    static constexpr SampleDescriptor::VibType kItVibType[8] = {
+        SampleDescriptor::VibType::Sine,   SampleDescriptor::VibType::RampDown, SampleDescriptor::VibType::Square, SampleDescriptor::VibType::Random,
+        SampleDescriptor::VibType::RampUp, SampleDescriptor::VibType::Sine,     SampleDescriptor::VibType::Sine,   SampleDescriptor::VibType::Sine};
+    sd.vib_rate  = hdr[76] > 64 ? 64 : hdr[76];
+    sd.vib_depth = hdr[kSampleVibDepthOffset] & 0x7fu;
+    sd.vib_sweep = hdr[78];
+    sd.vib_type  = kItVibType[hdr[79] & 0x07u];
+    if (sd.vib_depth != 0 && sd.vib_rate != 0) ++soundsinth::model::g_tracker_load_stats.autovibrato;
 
     sd.encoding = ri.is_compressed ? (ri.is16bit ? SampleEncoding::ItCompressed16 : SampleEncoding::ItCompressed8)
                                    : (ri.is16bit ? SampleEncoding::Pcm16 : SampleEncoding::Pcm8);
@@ -765,7 +856,16 @@ SOUNDSINTH_NOINLINE void parse_sample_header(const uint8_t* hdr, uint16_t cwtv, 
     sd.loop_end           = loop_end;
     sd.loop_enabled       = (sflags & 0x10u) != 0 && loop_end > sd.loop_start;
     sd.loop_bidirectional = (sflags & 0x40u) != 0;
-    sd.file_offset        = sample_pointer;
+    // Петля удержания: смещения 64/68, бит 0x20 - включена, 0x80 - ping-pong.
+    sus.start = static_cast<uint32_t>(hdr[64]) | (static_cast<uint32_t>(hdr[65]) << 8) | (static_cast<uint32_t>(hdr[66]) << 16) |
+                (static_cast<uint32_t>(hdr[67]) << 24);
+    uint32_t sus_end = static_cast<uint32_t>(hdr[68]) | (static_cast<uint32_t>(hdr[69]) << 8) | (static_cast<uint32_t>(hdr[70]) << 16) |
+                       (static_cast<uint32_t>(hdr[71]) << 24);
+    if (sus_end > length_samples) sus_end = length_samples;
+    sus.end        = sus_end;
+    sus.on         = (sflags & kSampleSustainLoop) != 0 && sus.start < sus.end;
+    sus.bidi       = (sflags & 0x80u) != 0;
+    sd.file_offset = sample_pointer;
     // C5Speed 0 - 8363, меньше 256 - 256, как у OpenMPT.
     sd.c5_speed        = (c5speed == 0) ? 8363 : (c5speed < 256 ? 256 : c5speed);
     sd.relative_note   = 0;
@@ -785,7 +885,7 @@ SOUNDSINTH_NOINLINE void parse_sample_header(const uint8_t* hdr, uint16_t cwtv, 
 // смещение упакованного. max_channel_used - наибольший номер канала плюс 1.
 // nullptr - разобраны, иначе причина.
 SOUNDSINTH_NOINLINE const char* unpack_patterns(BinaryReader& r, memory::TrackMemory& mem, uint32_t file_size, uint16_t pattern_count, Pattern* patterns,
-                                                PatternCell* cells, PackedChannelMemory* channel_state, uint8_t& max_channel_used) {
+                                                PatternCell* cells, PackedChannelMemory* channel_state, const uint8_t* zxx, uint8_t& max_channel_used) {
     for (uint32_t p = 0; p < pattern_count; ++p) {
         const uint32_t ptr       = patterns[p].psram_offset; // указатель из таблицы
         patterns[p].psram_offset = Pattern::kInvalidOffset;
@@ -891,7 +991,7 @@ SOUNDSINTH_NOINLINE const char* unpack_patterns(BinaryReader& r, memory::TrackMe
             if (mask & 0x08u) {
                 const uint8_t command = r.u8();
                 const uint8_t param   = r.u8();
-                decode_effect(command, param, cell.effect);
+                decode_effect(command, param, zxx, cell.effect);
                 st.last.effect = cell.effect;
             }
             if (!r.ok()) return ("file truncated inside pattern data");
@@ -934,10 +1034,11 @@ bool load(formats::ByteSource src, memory::TrackMemory& mem, Song& out, const ch
     const uint16_t sample_count     = r.u16();
     const uint16_t pattern_count    = r.u16();
     // Версия трекера, сохранившего файл (cmwt - совместимая версия формата); нужна для mix_levels и flow_mode.
-    const uint16_t cwtv  = r.u16();
-    const uint16_t cmwt  = r.u16();
-    const uint16_t flags = r.u16();
-    r.skip(2); // special
+    const uint16_t cwtv             = r.u16();
+    const uint16_t cmwt             = r.u16();
+    out.format_version              = cmwt;
+    const uint16_t flags            = r.u16();
+    const uint16_t special          = r.u16(); // бит 0x02 - история правок, 0x08 - блок MIDI-макросов
     const uint8_t global_volume_raw = r.u8();
     const uint8_t mv_raw            = r.u8(); // mv (mixing volume)
     const uint8_t speed_raw         = r.u8();
@@ -960,6 +1061,14 @@ bool load(formats::ByteSource src, memory::TrackMemory& mem, Song& out, const ch
                               (cwtv == 0x0214 && cmwt == 0x0202 && reserved == 0) || (cwtv == 0x0217 && cmwt == 0x0200 && reserved == 0) ||
                               (cwtv == 0x0300 && cmwt == 0x0300 && reserved == 0 && order_count == 256 && sep == 128 && pwd == 0);
     out.mix_levels = modplug_made ? soundsinth::model::Song::MixLevels::Original : soundsinth::model::Song::MixLevels::Compatible;
+    // Чем сделан: старший нибл cwtv, как у OpenMPT.
+    if ((cwtv >> 12) == 5) {
+        soundsinth::model::set_program(out, "OpenMPT", 7);
+    } else if ((cwtv >> 12) == 1) {
+        soundsinth::model::set_program(out, "Schism Tracker", 14);
+    } else if ((cwtv >> 12) == 0) {
+        modplug_made ? soundsinth::model::set_program(out, "ModPlug Tracker", 15) : soundsinth::model::set_program(out, "Impulse Tracker", 15, cwtv);
+    }
     // cmwt < 2.00 - старая раскладка инструмента (ITOldInstrument), общий
     // размер тот же, 554 байта; читается ниже отдельной веткой.
     const bool old_instrument_format = cmwt < 0x200;
@@ -1004,6 +1113,8 @@ bool load(formats::ByteSource src, memory::TrackMemory& mem, Song& out, const ch
     if (old_effects) out.quirks |= soundsinth::model::kQuirkItOldEffects;
     // Oxx за концом сэмпла у IT не глушит ноту - свойство формата, безусловно.
     out.quirks |= soundsinth::model::kQuirkItOffsetPastEndRestarts;
+    // Инструмент без своего среза/резонанса не сбрасывает канальные значения.
+    out.quirks |= soundsinth::model::kQuirkItFilterRetain;
     // Нота на сэмпл без данных обрывает канал; нота вне keymap - нет, старая
     // продолжает звучать.
     out.quirks |= soundsinth::model::kQuirkCutOnEmptySample;
@@ -1094,6 +1205,7 @@ bool load(formats::ByteSource src, memory::TrackMemory& mem, Song& out, const ch
     // строка паттерна и память каналов.
     memory::ScratchArena scratch(mem.loader_scratch_buffer, memory::kLoaderScratchBytes);
     static_assert(memory::ScratchPlan{}
+                          .add<uint8_t>(kZxxMacros)
                           .add<uint8_t>(kInstrumentHeaderBytes)
                           .add<uint8_t>(kKeymapSlots)
                           .add<KeymapRange>(kKeymapSlots)
@@ -1101,6 +1213,24 @@ bool load(formats::ByteSource src, memory::TrackMemory& mem, Song& out, const ch
                           .add<PackedChannelMemory>(kMaxChannels)
                           .end <= memory::kLoaderScratchBytes,
                   "IT loader buffers do not fit loader_scratch_buffer");
+    static_assert(alignof(KeymapRange) <= 4 && alignof(PatternCell) <= 4 && alignof(PackedChannelMemory) <= 4, "loader_scratch_buffer is aligned to 4 only");
+
+    // Фиксированные Zxx-макросы: нужны при разборе паттернов, в scratch -
+    // кадр it::load на стеке Core1.
+    uint8_t* zxx = scratch.alloc<uint8_t>(kZxxMacros);
+    if (!zxx) return fail("file too large for the loader scratch buffer (macros)");
+    {
+        uint32_t midi_off = kOrderTableOffset + order_count + 4u * (static_cast<uint32_t>(instrument_count) + sample_count + pattern_count);
+        bool embedded     = (special & 0x08u) != 0;
+        if (special & 0x02u) { // история правок: u16 записей по 8 байт перед макросами
+            if (midi_off + 2u <= file_size && r.seek(midi_off)) {
+                midi_off += 2u + 8u * static_cast<uint32_t>(r.u16());
+            } else {
+                embedded = false;
+            }
+        }
+        parse_midi_macros(r, midi_off, embedded, file_size, out, zxx);
+    }
 
     if (!instrument_mode) {
         // Режим сэмплов (без NNA и кражи голосов): синтезируется маппинг 1:1, как
@@ -1155,7 +1285,30 @@ bool load(formats::ByteSource src, memory::TrackMemory& mem, Song& out, const ch
             r.bytes(hdr, kSampleHeaderBytes);
             if (!r.ok() || std::memcmp(hdr, "IMPS", 4) != 0) continue;
 
-            parse_sample_header(hdr, cwtv, file_size, samples[i]);
+            SusLoopRaw sus;
+            parse_sample_header(hdr, cwtv, file_size, samples[i], sus);
+            if (sus.on) {
+                // Петля удержания становится loop_* дескриптора (играет до
+                // Note-Off), обычная петля уходит в Song::sus_release.
+                // Записи соседних arena_new непрерывны: других резидентных
+                // выделений в цикле сэмплов нет, инвариант проверяется.
+                auto* rel = memory::arena_new<soundsinth::model::Song::SusRelease>(mem.resident, 1);
+                if (!rel) return fail("resident memory overflowed (sustain loops)");
+                if (out.sus_release == nullptr) out.sus_release = rel;
+                if (rel != out.sus_release + out.sus_release_count) return fail("sustain loop table is not contiguous");
+                SampleDescriptor& sd  = samples[i];
+                rel->sample_index     = static_cast<uint16_t>(i);
+                rel->loop_enabled     = sd.loop_enabled && sd.loop_start < sd.loop_end && sd.loop_end <= sd.length_samples;
+                rel->loop_start       = sd.loop_start;
+                rel->loop_end         = sd.loop_end;
+                sd.loop_start         = sus.start;
+                sd.loop_end           = sus.end;
+                sd.loop_enabled       = true;
+                sd.loop_bidirectional = sus.bidi; // ping-pong удержания развернёт unroll_pingpong_loops
+                sd.sus_loop           = true;
+                ++out.sus_release_count;
+                ++soundsinth::model::g_tracker_load_stats.sustain_loops;
+            }
         }
         // Сетка периодов Amiga - как у S3M: c5_speed звучит на ноте 48 (C-4).
         // У IT - на C-5 (60), у OpenMPT это одна и та же нота.
@@ -1176,7 +1329,7 @@ bool load(formats::ByteSource src, memory::TrackMemory& mem, Song& out, const ch
     PackedChannelMemory* channel_state = scratch.alloc<PackedChannelMemory>(kMaxChannels);
     if (!cells || !channel_state) return fail("file too large for the loader scratch buffer (patterns)");
     uint8_t max_channel_used = 0;
-    if (const char* e = unpack_patterns(r, mem, file_size, pattern_count, patterns, cells, channel_state, max_channel_used)) {
+    if (const char* e = unpack_patterns(r, mem, file_size, pattern_count, patterns, cells, channel_state, zxx, max_channel_used)) {
         return fail(e);
     }
     // Паттерны пусты - 4 канала.

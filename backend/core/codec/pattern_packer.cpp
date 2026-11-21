@@ -4,6 +4,7 @@
 #include <cstring>
 
 #include "platform/compiler.h"
+
 #include "core/codec/pattern_cell_codec.h"
 
 namespace soundsinth::patterns {

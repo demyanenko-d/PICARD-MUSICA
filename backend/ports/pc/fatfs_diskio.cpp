@@ -4,8 +4,6 @@
 // <cstdio>. На MCU этот файл заменяется драйвером SD-карты, ff.c
 // (third_party/fatfs) не меняется.
 
-#include "pc/fatfs_disk.h"
-
 #include <cstdio>
 
 #ifdef _WIN32
@@ -21,9 +19,14 @@
 #include "ff.h" // определяет BYTE/LBA_t/... - должен идти раньше diskio.h
 #include "diskio.h"
 
+#include "devices/storage/partition.h"
+
+#include "pc/fatfs_disk.h"
+
 namespace {
-constexpr long kSectorSize = 512;
-std::FILE* g_image_file    = nullptr;
+constexpr long kSectorSize         = 512;
+std::FILE* g_image_file            = nullptr;
+platform_pc::SectorReader g_reader = nullptr;
 } // namespace
 
 namespace platform_pc {
@@ -37,11 +40,16 @@ bool mount_disk_image(const char* path) {
     return g_image_file != nullptr;
 }
 
+void mount_sector_reader(SectorReader reader) {
+    g_reader = reader;
+}
+
 } // namespace platform_pc
 
 extern "C" {
 
 DSTATUS disk_status(BYTE pdrv) {
+    if (pdrv == 0 && g_reader) return STA_PROTECT;
     if (pdrv != 0 || !g_image_file) {
         return STA_NOINIT;
     }
@@ -49,6 +57,7 @@ DSTATUS disk_status(BYTE pdrv) {
 }
 
 DSTATUS disk_initialize(BYTE pdrv) {
+    if (pdrv == 0 && g_reader) return STA_PROTECT;
     if (pdrv != 0 || !g_image_file) {
         return STA_NOINIT;
     }
@@ -56,6 +65,12 @@ DSTATUS disk_initialize(BYTE pdrv) {
 }
 
 DRESULT disk_read(BYTE pdrv, BYTE* buff, LBA_t sector, UINT count) {
+    if (pdrv == 0 && g_reader) {
+        for (UINT i = 0; i < count; ++i) {
+            if (!g_reader(static_cast<unsigned long>(sector + i), buff + i * kSectorSize)) return RES_ERROR;
+        }
+        return RES_OK;
+    }
     if (pdrv != 0 || !g_image_file) {
         return RES_NOTRDY;
     }
@@ -69,6 +84,7 @@ DRESULT disk_read(BYTE pdrv, BYTE* buff, LBA_t sector, UINT count) {
 }
 
 DRESULT disk_write(BYTE pdrv, const BYTE* buff, LBA_t sector, UINT count) {
+    if (pdrv == 0 && g_reader) return RES_WRPRT;
     // FF_FS_READONLY=1 (ffconf.h) - FatFs сам не должен звать это в
     // штатной работе; оставлено на случай будущей записи (см. ffconf.h).
     if (pdrv != 0 || !g_image_file) {
@@ -84,6 +100,14 @@ DRESULT disk_write(BYTE pdrv, const BYTE* buff, LBA_t sector, UINT count) {
 }
 
 DRESULT disk_ioctl(BYTE pdrv, BYTE cmd, void* buff) {
+    if (pdrv == 0 && g_reader) {
+        if (cmd == CTRL_SYNC) return RES_OK;
+        if (cmd == GET_SECTOR_SIZE) {
+            *static_cast<WORD*>(buff) = static_cast<WORD>(kSectorSize);
+            return RES_OK;
+        }
+        return RES_PARERR;
+    }
     if (pdrv != 0 || !g_image_file) {
         return RES_NOTRDY;
     }
@@ -107,3 +131,8 @@ DWORD get_fattime(void) {
 }
 
 } // extern "C"
+
+// Образ на ПК - том без таблицы разделов.
+uint32_t devices::storage::fat_volume_base(uint8_t) {
+    return 0;
+}

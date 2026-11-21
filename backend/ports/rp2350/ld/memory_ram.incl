@@ -1,0 +1,24 @@
+/* Замена memory_ram.incl из pico-sdk: верх основной SRAM отдан памяти шины.
+   Адреса в ней постоянны при любой сборке: таблицы, ПЗУ и ОЗУ DivMMC не
+   сдвигаются от роста .data и .bss. RAM кончается там, где начинается
+   BUSMEM, поэтому __HeapLimit и проверка переполнения считаются без неё.
+
+   0x20055400  карта трапов DivMMC  1 КБ, граница 1 КБ
+   0x20055800  таблица портов при DOS 1 КБ
+   0x20055C00  таблица портов        1 КБ
+   0x20056000  ПЗУ DivMMC            8 КБ
+   0x20058000  таблицы страниц      32 КБ
+   0x20060000  ОЗУ DivMMC, 16 x 8 КБ 128 КБ, граница 64 КБ:
+               банки 0-7 - своё ПЗУ Пентагона, банки 8-15 - код BDI
+
+   Две таблицы портов - пара на границе 2 КБ для port_detect_dos. Без
+   DivMMC копия его ПЗУ свободна целиком. */
+BUSMEM_LENGTH = 0x2AC00;
+
+MEMORY
+{
+    RAM(rwx) : ORIGIN = RAM_ORIGIN, LENGTH = RAM_LENGTH - BUSMEM_LENGTH
+    BUSMEM(rw) : ORIGIN = RAM_ORIGIN + RAM_LENGTH - BUSMEM_LENGTH, LENGTH = BUSMEM_LENGTH
+}
+
+bus_divmmc_ram = ORIGIN(BUSMEM) + LENGTH(BUSMEM) - 0x20000;

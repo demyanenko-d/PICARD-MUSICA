@@ -57,6 +57,25 @@
 #define SOUNDSINTH_VOLUME_RAMP_SAMPLES 44u
 #endif
 
+// Виды интерполяции, которые есть только в рендере на ПК. Проход голоса на
+// плате лежит в SRAM копией на каждый кодек и вид, и копия без пользы - это
+// 1.2..1.3 КБ. Эрмитову не включает ни один загрузчик, лесенка - ключ
+// pc_player.
+#ifndef SOUNDSINTH_INTERP_HOLD
+#if PICO_ON_DEVICE
+#define SOUNDSINTH_INTERP_HOLD 0
+#else
+#define SOUNDSINTH_INTERP_HOLD 1
+#endif
+#endif
+#ifndef SOUNDSINTH_INTERP_HERMITE
+#if PICO_ON_DEVICE
+#define SOUNDSINTH_INTERP_HERMITE 0
+#else
+#define SOUNDSINTH_INTERP_HERMITE 1
+#endif
+#endif
+
 // --- Сброс голосов при перегрузке ---
 
 // Сброс лишних голосов при перегрузке процессора. Если рендер не успевает,

@@ -1,7 +1,7 @@
 ;; test_file.s - открыть файл по имени и прочитать его двумя режимами.
 ;;
-;; Имя ищем длинное и с кириллицей: если поиск сравнивает не то и не так,
-;; на таком имени это видно сразу.
+;; Поиск по имени - здесь же, tf_find: обход каталога и побайтное сравнение.
+;; Имя длинное и с кириллицей.
 ;;
 ;; Проверяются байты, а не "программа не упала": эмулятор сверяет всё
 ;; прочитанное с образом. Отдельно - что точный режим отдаёт то же самое,
@@ -21,9 +21,9 @@
         .globl  _sd_init
         .globl  _fat_mount
         .globl  _fat_dir_open_root
-        .globl  _fat_find
+        .globl  _fat_dir_next
+        .globl  _fat_ent_name
         .globl  _fat_open
-        .globl  _fat_use
         .globl  _fat_seek
         .globl  _fat_read_sectors
         .globl  _fat_read_bytes
@@ -33,7 +33,6 @@
         .globl  _fat_file_ext_count
         .globl  _fat_page_check
         .globl  _fat_page_work
-        .globl  _fat_page_pre
         .globl  _fat_page_dir
         .globl  _fat_port_shadow
         .globl  start
@@ -58,8 +57,6 @@ start::
         ld      (_fat_port_shadow), a
         ld      a, #1
         ld      (_fat_page_work), a
-        ld      a, #3
-        ld      (_fat_page_pre), a
         ld      a, #4
         ld      (_fat_page_dir), a
         call    _fat_page_check
@@ -86,7 +83,7 @@ tf_mount_ok:
 tf_root_ok:
 
         ld      hl, #tf_name
-        call    _fat_find
+        call    tf_find
         jp      c, tf_io
         or      a
         jr      nz, tf_found
@@ -94,7 +91,6 @@ tf_root_ok:
         jp      tf_fail
 tf_found:
 
-        xor     a
         call    _fat_open
         jr      nc, tf_open_ok
         ld      a, #6
@@ -152,14 +148,13 @@ tf_slow_ok:
         jp      tf_fail
 tf_root2_ok:
         ld      hl, #tf_name2
-        call    _fat_find
+        call    tf_find
         jp      c, tf_io
         or      a
         jr      nz, tf_found2
         ld      a, #9
         jp      tf_fail
 tf_found2:
-        xor     a
         call    _fat_open
         jr      nc, tf_open2_ok
         ld      a, #10
@@ -201,6 +196,28 @@ tf_io:
         ld      a, #4
         jp      tf_fail
 
+;; Найти в открытом каталоге запись с именем (HL), ноль в конце.
+;; Выход: A=1 нашли, всё в _fat_ent_*; A=0 не нашли; CY=1 ошибка карты.
+tf_find:
+        ld      (tf_want), hl
+tf_find_next:
+        call    _fat_dir_next
+        ret     c
+        or      a
+        ret     z
+        ld      hl, (tf_want)
+        ld      de, #_fat_ent_name
+tf_find_cmp:
+        ld      a, (de)
+        cp      (hl)
+        jr      nz, tf_find_next
+        inc     hl
+        inc     de
+        or      a
+        jr      nz, tf_find_cmp
+        inc     a               ; A=1, CY=0
+        ret
+
 tf_copy4:
         ld      b, #4
 tf_copy4_l:
@@ -222,3 +239,6 @@ tf_name:
         .db     0x84, 0xab, 0xa8, 0xad, 0xad, 0xeb, 0xa9, 0x20
         .db     0xe1, 0xaf, 0xab, 0xae, 0xe8, 0xad, 0xae, 0xa9
         .db     0x2e, 0x69, 0x74, 0x00
+
+        .area   _DATA
+tf_want:        .ds     2

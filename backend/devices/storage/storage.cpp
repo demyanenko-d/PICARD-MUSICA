@@ -1,22 +1,24 @@
 // SPDX-License-Identifier: MIT
-// Арбитр носителя. Сам носитель - за контрактом порта. SMUC - задел.
+// Арбитр носителя. Сам носитель - за контрактом порта.
 
 #include "devices/storage/storage.h"
 
+#include <atomic>
 #include <cinttypes>
 #include <cstring>
 
 #include "platform/hot_path.h"
 #include "platform/log.h"
 
+#include "core/util/le_bytes.h"
+
 #include "devices/hal/media.h"
-#include "devices/sd/card_protocol.h" // devices::sd::sd_card_log_handshake
+#include "devices/sd/card_protocol.h" // sd::sd_card_log_handshake
+#include "devices/storage/fat_layout.h"
 #include "devices/storage/storage_host.h"
 
 namespace devices::storage {
 namespace {
-
-namespace hal = devices::hal;
 
 // --- Кэш чтения ---
 //
@@ -44,7 +46,7 @@ CacheLine& line_for(uint32_t lba) {
 }
 
 // Попадания и промахи по сторонам: нулевая - плата, дальше хозяева
-// эмуляторов. Кэш один на всех и всего восемь строк, а носители у
+// эмуляторов. Кэш один на всех и строк в нём мало, а носители у
 // сторон разные: без раздельного счёта не видно, толкают ли они друг
 // друга и стоит ли заводить каждой свой.
 inline constexpr uint8_t kStatBoard = 0;
@@ -56,9 +58,18 @@ inline uint8_t stat_side_of(sd::SdOwner owner) {
 uint32_t s_hits[kStatSides]   = {};
 uint32_t s_misses[kStatSides] = {};
 
+void count(bool hit, uint8_t side) {
+    ++(hit ? s_hits : s_misses)[side < kStatSides ? side : 0u];
+}
+
 // Носитель каждого эмулятора. Умолчание - карта: до разбора настроек
 // флешки всё равно нет.
-hal::Medium s_emulator_medium[kEmulatorCount] = {hal::Medium::Card, hal::Medium::Card};
+hal::Medium s_emulator_medium[kEmulatorCount] = {hal::Medium::Card, hal::Medium::Card, hal::Medium::Card};
+
+inline constexpr uint32_t kMediumCount = 2;
+static_assert(static_cast<uint32_t>(hal::Medium::Usb) < kMediumCount, "writer lock is indexed by medium");
+std::atomic<uint8_t> s_writer[kMediumCount] = {{static_cast<uint8_t>(sd::SdOwner::None)}, {static_cast<uint8_t>(sd::SdOwner::None)}};
+std::atomic<uint32_t> s_writes_denied{0};
 
 // Чужой номер (None) получает носитель DivMMC, а не отказ. Здесь это
 // безопасно: номер приходит от автомата эмулятора, а не с шины, и ответ -
@@ -74,10 +85,12 @@ hal::Medium medium_of(sd::SdOwner owner) {
 constexpr hal::Medium kBoardMedium = hal::Medium::Card;
 
 // Пропуск хоста вперёд (storage_set_host_yield). s_yielding - повторно не
-// входить: хост читает обычным путём, но крюк мог бы позвать фоновое.
-hal::WaitServiceFn s_host_yield = nullptr;
-void* s_host_yield_user         = nullptr;
-bool s_yielding                 = false;
+// входить: хост читает обычным путём, но обслуживание шины могло бы позвать
+// фоновое.
+SectorWrittenFn s_sector_written = nullptr;
+hal::WaitServiceFn s_host_yield  = nullptr;
+void* s_host_yield_user          = nullptr;
+bool s_yielding                  = false;
 
 // Единица арбитража - сектор: перед каждым обращением фонового клиента к
 // носителю. Раза на страницу распаковщика мало: между ними f_lseek читает
@@ -123,9 +136,9 @@ void cache_drop_line(uint32_t lba, hal::Medium m) {
 // большие, и при чтении подряд отображение выбрасывало бы тот, который
 // вот-вот понадобится.
 //
-// Постройчного кэша это не отменяет: тот ловит повторы (таблица FAT,
+// Построчного кэша это не отменяет: тот ловит повторы (таблица FAT,
 // каталог), а этот - чтение подряд. Носитель, у которого пачка не
-// дешевле, сюда не заходит вовсе - media_run_sectors отдаёт ему единицу.
+// дешевле, сюда не заходит.
 struct Block {
     uint32_t base = 0; // первый сектор блока, кратен своему размеру
     bool valid    = false;
@@ -139,8 +152,8 @@ uint32_t s_block_clock = 0;
 // Буфер снаружи. Нет буфера - нет и блочного кэша. Алиас записи у платы -
 // psram_write_alias: адрес мимо кэша XIP, строки кэша при этом
 // сбрасываются. Читать его только через writable.
-uint8_t* s_block_buf                = nullptr;
-BlockCacheWrite s_block_write_alias = nullptr;
+uint8_t* s_block_buf                       = nullptr;
+platform::WriteAliasFn s_block_write_alias = nullptr;
 
 // Заказ предвыборки по носителю: блок, который стоит подтянуть, пока хост
 // жуёт нынешний. База ноль значит "заказа нет" - блок с базой ноль
@@ -169,16 +182,22 @@ uint8_t* writable(uint8_t* p, uint32_t bytes) {
     return s_block_write_alias != nullptr ? s_block_write_alias(p, bytes) : p;
 }
 
-// Индекс блока внутри набора носителя: по нему считается адрес данных.
-Block* SOUNDSINTH_HOT_PATH(block_find)(uint32_t base, uint32_t mi, uint32_t* out_index) {
+// Секторов в блоке носителя m; ноль - носитель блоками не читается (нет
+// буфера или пачка не дешевле одиночных). Ширина пачки у носителя
+// постоянна, поэтому сектор лежит только в блоке с базой lba - lba % size.
+uint32_t SOUNDSINTH_HOT_PATH(block_size)(hal::Medium m) {
+    if (s_block_buf == nullptr) return 0;
+    const uint32_t run = hal::media_run_sectors(m);
+    return run <= 1u ? 0u : (run < kBlockSectors ? run : kBlockSectors);
+}
+
+// Номер годного блока с базой base в наборе носителя mi;
+// kBlocksPerMedium - такого нет.
+uint32_t SOUNDSINTH_HOT_PATH(block_find)(uint32_t mi, uint32_t base) {
     for (uint32_t i = 0; i < kBlocksPerMedium; ++i) {
-        Block& b = s_blocks[mi][i];
-        if (b.valid && b.base == base) {
-            if (out_index != nullptr) *out_index = i;
-            return &b;
-        }
+        if (s_blocks[mi][i].valid && s_blocks[mi][i].base == base) return i;
     }
-    return nullptr;
+    return kBlocksPerMedium;
 }
 
 // Жертва: свободный, иначе самый давний. Своя у каждого носителя.
@@ -235,44 +254,24 @@ SOUNDSINTH_ALWAYS_INLINE void follow_media_generation() {
     if (gen != s_media_gen_seen) drop_for_media_change(gen);
 }
 
-// Годный блок набора mi, внутри которого лежит сектор lba (block_find
-// ищет по базе блока). index - его номер в наборе.
-Block* block_holding(uint32_t lba, uint32_t mi, uint32_t* index) {
-    for (uint32_t i = 0; i < kBlocksPerMedium; ++i) {
-        Block& b = s_blocks[mi][i];
-        if (!b.valid) continue;
-        if (lba < b.base || lba - b.base >= kBlockSectors) continue;
-        *index = i;
-        return &b;
-    }
-    return nullptr;
-}
-
-// Блок с этим сектором - негоден. Зовётся на неудачной записи: что
-// осталось на носителе, неизвестно, и отдавать прежнее содержимое нельзя.
-void block_drop(uint32_t lba, hal::Medium m) {
-    if (s_block_buf == nullptr) return;
-    uint32_t i = 0;
-    if (Block* b = block_holding(lba, medium_index(m), &i)) b->valid = false;
-}
-
-// Записанный сектор - и в блок, если он там лежит. Без этого блок отдавал
-// бы прежние данные: построчный кэш запись обновляет, а блок оставался бы
-// со старым содержимым.
-void block_patch(uint32_t lba, hal::Medium m, const uint8_t* data) {
-    if (s_block_buf == nullptr) return;
-    const uint32_t mi = medium_index(m);
-    uint32_t i        = 0;
-    const Block* b    = block_holding(lba, mi, &i);
-    if (b == nullptr) return;
-    std::memcpy(writable(block_data(mi, i) + (lba - b->base) * kSectorBytes, kSectorBytes), data, kSectorBytes);
+// Годный блок с сектором lba носителя m и адрес сектора в нём; nullptr -
+// сектор не в блоке.
+Block* block_with(uint32_t lba, hal::Medium m, uint8_t** sector) {
+    const uint32_t size = block_size(m);
+    if (size == 0) return nullptr;
+    const uint32_t mi   = medium_index(m);
+    const uint32_t base = lba - lba % size;
+    const uint32_t bi   = block_find(mi, base);
+    if (bi == kBlocksPerMedium) return nullptr;
+    *sector = block_data(mi, bi) + (lba - base) * kSectorBytes;
+    return &s_blocks[mi][bi];
 }
 
 } // namespace
 
 // --- Публичное ---
 
-void storage_attach_block_cache(uint8_t* buf, uint32_t bytes, BlockCacheWrite to_write) {
+void storage_attach_block_cache(uint8_t* buf, uint32_t bytes, platform::WriteAliasFn to_write) {
     if (buf != nullptr && bytes < kBlockCacheBytes) return;
     blocks_drop_all();
     s_block_buf         = buf;
@@ -284,6 +283,10 @@ bool storage_init() {
     // секторы относятся к другой карте.
     cache_drop_all();
     blocks_drop_all();
+    // Замок писателя живёт до перезагрузки, а это и есть её начало.
+    for (std::atomic<uint8_t>& w : s_writer) {
+        w.store(static_cast<uint8_t>(sd::SdOwner::None), std::memory_order_relaxed);
+    }
     const bool ok    = hal::media_init();
     s_media_gen_seen = hal::media_state_generation();
     return ok;
@@ -298,25 +301,28 @@ uint32_t storage_sector_count() {
 }
 
 namespace {
-// side - сторона счётчиков: kStatBoard или stat_side_of(хозяин).
-bool SOUNDSINTH_HOT_PATH(read_from)(hal::Medium m, uint32_t lba, uint8_t* dst, bool background, uint8_t side) {
+// side - сторона счётчиков: kStatBoard или stat_side_of(хозяин). Одна
+// копия на всех вызывающих: встроенная, она стояла в SRAM дважды.
+SOUNDSINTH_NOINLINE bool SOUNDSINTH_HOT_PATH(read_from)(hal::Medium m, uint32_t lba, uint8_t* dst, bool background, uint8_t side) {
     // Признак - из снимка в SRAM, а не у драйвера: проверка стоит ДО
     // поиска в кэше, то есть даже попадание платило бы дорогой во флеш
     // через протокол карты или стек USB. За заказом хоста в это время
     // стоит Z80.
     follow_media_generation();
-    if (dst == nullptr || !hal::media_state(m).present) return false;
+    const hal::MediaState& st = hal::media_state(m);
+    if (dst == nullptr || !st.present || lba >= st.sectors) return false;
 
-    // Носитель, у которого пачка дешевле одиночных, читается блоками.
-    const uint32_t run = hal::media_run_sectors(m);
-    if (run > 1u && s_block_buf != nullptr) {
-        const uint32_t size = run < kBlockSectors ? run : kBlockSectors;
+    // Носитель, у которого пачка дешевле одиночных, читается блоками. Блок
+    // заказывается, только если лежит на носителе целиком: пачка за концом -
+    // отказ карты и её переинициализация. Хвост короче блока читается
+    // посекторно.
+    const uint32_t size = block_size(m);
+    if (size != 0) {
         const uint32_t base = lba - (lba % size);
         const uint32_t mi   = medium_index(m);
-        uint32_t bi         = 0;
-        Block* b            = block_find(base, mi, &bi);
-        if (b == nullptr) {
-            ++s_misses[side < kStatSides ? side : 0u];
+        const uint32_t bi   = block_find(mi, base);
+        if (bi == kBlocksPerMedium) {
+            count(false, side);
             // Спрошенный сектор отдаётся сразу одиночным чтением, а блок
             // заказывается фоном. Блок целиком стоит много дороже сектора
             // (замер флешки: 895 мкс за сектор против 455 на сектор в
@@ -324,19 +330,21 @@ bool SOUNDSINTH_HOT_PATH(read_from)(hal::Medium m, uint32_t lba, uint8_t* dst, b
             // забирает этот.
             if (background) yield_to_host();
             if (!hal::media_read(m, lba, dst)) return false;
-            s_prefetch_base[mi]       = base;
-            s_prefetch_background[mi] = background;
+            if (base + size <= st.sectors) {
+                s_prefetch_base[mi]       = base;
+                s_prefetch_background[mi] = background;
+            }
             return true;
         }
-        ++s_hits[side < kStatSides ? side : 0u];
+        count(true, side);
         ++s_block_hits;
-        b->used = ++s_block_clock;
+        s_blocks[mi][bi].used = ++s_block_clock;
         std::memcpy(dst, block_data(mi, bi) + (lba - base) * kSectorBytes, kSectorBytes);
         // Дошли до второй половины блока - заказать следующий. Читают
         // подряд, и пока машина жуёт остаток этого, следующий успеет
         // приехать: 8 КБ через IN это около двадцати пяти миллисекунд, а
         // блок с флешки - семь.
-        if (lba - base >= size / 2u && block_find(base + size, mi, nullptr) == nullptr) {
+        if (lba - base >= size / 2u && base + 2u * size <= st.sectors && block_find(mi, base + size) == kBlocksPerMedium) {
             s_prefetch_base[mi]       = base + size;
             s_prefetch_background[mi] = background;
         }
@@ -346,10 +354,10 @@ bool SOUNDSINTH_HOT_PATH(read_from)(hal::Medium m, uint32_t lba, uint8_t* dst, b
     const CacheLine& ln = line_for(lba);
     if (ln.valid && ln.lba == lba && ln.medium == m) {
         std::memcpy(dst, ln.data, kSectorBytes);
-        ++s_hits[side < kStatSides ? side : 0u];
+        count(true, side);
         return true;
     }
-    ++s_misses[side < kStatSides ? side : 0u];
+    count(false, side);
 
     if (background) yield_to_host();
     if (!hal::media_read(m, lba, dst)) return false;
@@ -377,36 +385,29 @@ hal::Medium storage_emulator_medium(sd::SdOwner owner) {
     return medium_of(owner);
 }
 
-// Из снимка: сверку зовут с каждого витка цикла Core1, а числа меняются
-// считанные разы за работу.
-SOUNDSINTH_HOT_PATH_ATTR("storage_emulator_present")
-bool storage_emulator_present(sd::SdOwner owner) {
-    return hal::media_state(medium_of(owner)).present;
-}
-
-SOUNDSINTH_HOT_PATH_ATTR("storage_emulator_sectors")
-uint32_t storage_emulator_sectors(sd::SdOwner owner) {
-    return hal::media_state(medium_of(owner)).sectors;
-}
-
-SOUNDSINTH_HOT_PATH_ATTR("storage_media_generation")
-uint32_t storage_media_generation() {
-    return hal::media_state_generation();
+// Из снимка: его читают опрос Z-Controller и сверка на каждом витке цикла
+// Core1, а числа меняются считанные разы за работу.
+SOUNDSINTH_HOT_PATH_ATTR("storage_emulator_state")
+const hal::MediaState& storage_emulator_state(sd::SdOwner owner) {
+    return hal::media_state(medium_of(owner));
 }
 
 namespace {
 // Заказ одного носителя. true - блок читался (удачно или нет): за вызов
 // одно обращение к носителю.
-bool prefetch_medium(uint32_t mi) {
+SOUNDSINTH_NOINLINE bool prefetch_medium(uint32_t mi) {
     const uint32_t base = s_prefetch_base[mi];
-    if (base == kNoPrefetch) return false;
-    s_prefetch_base[mi] = kNoPrefetch;
     const hal::Medium m = static_cast<hal::Medium>(mi);
-    const uint32_t run  = hal::media_run_sectors(m);
-    if (run <= 1u || !hal::media_state(m).present) return false;
-    const uint32_t size = run < kBlockSectors ? run : kBlockSectors;
-    if (block_find(base, mi, nullptr) != nullptr) return false; // успели прочитать обычным путём
+    // Занятый носитель: заказ ждёт, а не снимается вложенным шагом.
+    if (base == kNoPrefetch || hal::media_busy(m)) return false;
+    s_prefetch_base[mi] = kNoPrefetch;
+    const uint32_t size = block_size(m);
+    if (size == 0 || !hal::media_state(m).present) return false;
+    // Сначала пропуск хоста, потом проверка: хост в пропуске мог прочитать
+    // этот же блок, и второе наполнение положило бы его в два слота - запись
+    // правит один, чтение попадает в другой.
     if (s_prefetch_background[mi]) yield_to_host();
+    if (block_find(mi, base) != kBlocksPerMedium) return false; // успели прочитать обычным путём
     if (block_fill(base, m, size)) ++s_prefetch_fills;
     return true;
 }
@@ -432,6 +433,10 @@ bool SOUNDSINTH_HOT_PATH(storage_emulator_read)(sd::SdOwner owner, uint32_t lba,
     return read_from(medium_of(owner), lba, dst, false, stat_side_of(owner));
 }
 
+void storage_on_sector_written(SectorWrittenFn fn) {
+    s_sector_written = fn;
+}
+
 void storage_set_host_yield(hal::WaitServiceFn fn, void* user) {
     s_host_yield_user = user;
     s_host_yield      = fn;
@@ -439,23 +444,29 @@ void storage_set_host_yield(hal::WaitServiceFn fn, void* user) {
 
 namespace {
 // Запись насквозь, общая для платы и эмуляторов.
-bool write_to(hal::Medium m, uint32_t lba, const uint8_t* src) {
+SOUNDSINTH_NOINLINE bool write_to(hal::Medium m, uint32_t lba, const uint8_t* src) {
     follow_media_generation();
     if (src == nullptr || !hal::media_state(m).present) return false;
 
-    if (!hal::media_write(m, lba, src)) {
-        // Что на носителе после неудачной записи - неизвестно, строка
-        // выбрасывается: лучше перечитать.
+    // Блок ищется после записи: её ожидание обслуживает шину, и упреждение
+    // за это время могло занять слот другим блоком.
+    const bool ok = hal::media_write(m, lba, src);
+    if (s_sector_written != nullptr) s_sector_written(m, lba);
+    uint8_t* in_block = nullptr;
+    Block* const b    = block_with(lba, m, &in_block);
+    if (!ok) {
+        // Что на носителе после неудачной записи - неизвестно, строка и
+        // блок с сектором выбрасываются: лучше перечитать.
         cache_drop_line(lba, m);
-        block_drop(lba, m);
+        if (b != nullptr) b->valid = false;
         return false;
     }
 
-    // Строка обновляется, а не выбрасывается: записанное тут же
+    // Строка и блок обновляются, а не выбрасываются: записанное тут же
     // перечитывают - FatFs правит каталог и таблицу размещения по
     // прочитанному, хост перечитывает только что записанное.
     cache_put(lba, m, src);
-    block_patch(lba, m, src);
+    if (b != nullptr) std::memcpy(writable(in_block, kSectorBytes), src, kSectorBytes);
     return true;
 }
 } // namespace
@@ -464,10 +475,42 @@ bool storage_write_board(uint32_t lba, const uint8_t* src) {
     return write_to(kBoardMedium, lba, src);
 }
 
+bool storage_tool_read(hal::Medium m, uint32_t lba, uint8_t* dst) {
+    return read_from(m, lba, dst, true, kStatBoard);
+}
+
+bool storage_tool_write(hal::Medium m, uint32_t lba, const uint8_t* src) {
+    return write_to(m, lba, src);
+}
+
 bool storage_write(sd::SdOwner owner, uint32_t lba, const uint8_t* src) {
     // Носитель тот же, что у чтения этого хозяина: иначе машина
     // пишет на одну сторону, а перечитывает с другой.
     return write_to(medium_of(owner), lba, src);
+}
+
+bool SOUNDSINTH_HOT_PATH(storage_claim_writer)(sd::SdOwner owner) {
+    std::atomic<uint8_t>& w = s_writer[static_cast<uint8_t>(medium_of(owner))];
+    const auto who          = static_cast<uint8_t>(owner);
+    auto expected           = static_cast<uint8_t>(sd::SdOwner::None);
+    if (w.compare_exchange_strong(expected, who, std::memory_order_relaxed)) return true;
+    if (expected == who) return true;
+    s_writes_denied.fetch_add(1, std::memory_order_relaxed);
+    return false;
+}
+
+void storage_release_writers() {
+    for (std::atomic<uint8_t>& w : s_writer) {
+        w.store(static_cast<uint8_t>(sd::SdOwner::None), std::memory_order_relaxed);
+    }
+}
+
+sd::SdOwner storage_writer(hal::Medium m) {
+    return static_cast<sd::SdOwner>(s_writer[static_cast<uint8_t>(m)].load(std::memory_order_relaxed));
+}
+
+uint32_t storage_writes_denied() {
+    return s_writes_denied.load(std::memory_order_relaxed);
 }
 
 void storage_log_health() {
@@ -478,8 +521,9 @@ void storage_log_health() {
         total += s_hits[i] + s_misses[i];
     }
     if (total == 0) return;
-    debug_logf("storage: sector cache (hit/miss): board %" PRIu32 "/%" PRIu32 ", divmmc %" PRIu32 "/%" PRIu32 ", zctrl %" PRIu32 "/%" PRIu32 "\n", s_hits[0],
-               s_misses[0], s_hits[1], s_misses[1], s_hits[2], s_misses[2]);
+    debug_logf("storage: sector cache (hit/miss): board %" PRIu32 "/%" PRIu32 ", divmmc %" PRIu32 "/%" PRIu32 ", zctrl %" PRIu32 "/%" PRIu32
+               ", divmmc2 %" PRIu32 "/%" PRIu32 "\n",
+               s_hits[0], s_misses[0], s_hits[1], s_misses[1], s_hits[2], s_misses[2], s_hits[3], s_misses[3]);
     // Блочное упреждение: сколько секторов отдано из блока, сколько блоков
     // наполнено и сколько из них - заранее, а не по промаху. Наполнено
     // заранее много - значит хост за сектором не ждал.
@@ -493,19 +537,7 @@ void storage_log_health() {
 
 namespace {
 
-// Разметка MBR в секторе 0.
-constexpr uint32_t kMbrPartitionTable   = 446;
-constexpr uint32_t kMbrPartitionCount   = 4;
-constexpr uint32_t kMbrEntryBytes       = 16;
-constexpr uint32_t kMbrEntryType        = 4;
-constexpr uint32_t kMbrEntryFirstSector = 8;
-constexpr uint32_t kMbrEntrySectorCount = 12;
-constexpr uint32_t kMbrSignature        = 510; // 0x55, 0xaa
-constexpr uint32_t kSectorsPerMb        = 1024u * 1024u / kSectorBytes;
-
-uint32_t read_le32(const uint8_t* p) {
-    return static_cast<uint32_t>(p[0]) | (static_cast<uint32_t>(p[1]) << 8) | (static_cast<uint32_t>(p[2]) << 16) | (static_cast<uint32_t>(p[3]) << 24);
-}
+constexpr uint32_t kSectorsPerMb = 1024u * 1024u / kSectorBytes;
 
 void log_partitions(const uint8_t* sector) {
     debug_log("\nboot: partitions:");
@@ -516,7 +548,7 @@ void log_partitions(const uint8_t* sector) {
         if (type == 0) continue;
         any = true;
         debug_logf(" [%u] type 0x%02X, from sector %" PRIu32 ", %" PRIu32 " MB;", static_cast<unsigned>(i), static_cast<unsigned>(type),
-                   read_le32(e + kMbrEntryFirstSector), read_le32(e + kMbrEntrySectorCount) / kSectorsPerMb);
+                   soundsinth::util::le32(e + kMbrEntryFirstSector), soundsinth::util::le32(e + kMbrEntrySectorCount) / kSectorsPerMb);
     }
     if (any) return;
     debug_log(" TABLE EMPTY -- card is not partitioned");
@@ -530,7 +562,7 @@ void log_partitions(const uint8_t* sector) {
 bool storage_boot_check(uint8_t* sector) {
     const bool ok = storage_init();
     // Рукопожатие само не печатает: его зовёт и переинициализация.
-    devices::sd::sd_card_log_handshake();
+    sd::sd_card_log_handshake();
     debug_logf("boot: storage_init %s", ok ? "PASS" : "FAIL");
     if (!ok) return false;
     const bool rd = sector != nullptr && read_from(kBoardMedium, 0, sector, false, kStatBoard);

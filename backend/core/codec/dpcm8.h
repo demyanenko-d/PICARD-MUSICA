@@ -12,6 +12,7 @@
 #include <cstdint>
 
 #include "platform/hot_path.h"
+
 #include "core/audio/saturate.h"
 
 namespace soundsinth::dpcm8 {

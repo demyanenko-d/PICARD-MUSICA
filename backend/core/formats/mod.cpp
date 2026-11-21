@@ -27,6 +27,14 @@ using soundsinth::model::SampleEncoding;
 using soundsinth::model::SlideRate;
 using soundsinth::model::Song;
 
+// Частота ноты C-5 (период 428) на такте Paula PAL, 3546895 / 428: высота
+// европейской Амиги и ProTracker. 8363 у PC-трекеров - такт NTSC, на 16
+// центов выше.
+constexpr uint32_t kPaulaPalClockHz = 3546895;
+constexpr uint32_t kPeriodC5        = 428;
+constexpr uint32_t kPalC5Hz         = (kPaulaPalClockHz + kPeriodC5 / 2) / kPeriodC5;
+static_assert(kPalC5Hz == 8287, "PAL C-5 rate");
+
 constexpr uint32_t kTitleBytes        = 20;
 constexpr uint32_t kSampleCount       = 31;
 constexpr uint32_t kSampleHeaderBytes = 30;
@@ -425,6 +433,7 @@ bool load(formats::ByteSource src, memory::TrackMemory& mem, Song& out, const ch
     const uint32_t pattern_data_offset = layout.pattern_data_offset;
     const bool old_format              = layout.old_format;
 
+    if (!old_format) soundsinth::model::set_program(out, sig, sizeof(sig));
     r.seek(0);
     r.bytes(out.title, kTitleBytes);
 
@@ -468,16 +477,29 @@ bool load(formats::ByteSource src, memory::TrackMemory& mem, Song& out, const ch
     // Как у libxmp (мусор в order у dragnet.mod): список обрывается на
     // первом байте > 0x7F. order_count обрезается здесь, дальше значений вне
     // [0, pattern_count) нет.
+    //
+    // Паттернов в файле - по всем 128 позициям: за длиной песни тоже ссылки на
+    // записанные паттерны, без них сэмплы читаются со сдвигом. Файл для них
+    // короток - за длиной мусор, тогда по длине песни, как у OpenMPT.
     uint16_t effective_order_count = 0;
+    uint8_t max_in_song            = 0;
     uint8_t max_pattern_seen       = 0;
-    bool any_pattern               = false;
-    for (uint32_t i = 0; i < song_length && i < kOrderEntries; ++i) {
-        if (order_bytes[i] > 0x7f) break;
-        effective_order_count = static_cast<uint16_t>(i + 1);
-        if (!any_pattern || order_bytes[i] > max_pattern_seen) {
-            max_pattern_seen = order_bytes[i];
-            any_pattern      = true;
+    for (uint32_t i = 0; i < kOrderEntries && order_bytes[i] <= 0x7f; ++i) {
+        if (i < song_length) {
+            effective_order_count = static_cast<uint16_t>(i + 1);
+            if (order_bytes[i] > max_in_song) max_in_song = order_bytes[i];
         }
+        if (order_bytes[i] > max_pattern_seen) max_pattern_seen = order_bytes[i];
+    }
+    const bool any_pattern = effective_order_count != 0;
+    if (any_pattern && max_pattern_seen > max_in_song) {
+        uint32_t sample_bytes = 0;
+        for (uint32_t i = 0; i < sample_count; ++i) {
+            sample_bytes += static_cast<uint32_t>(raw_samples[i].length_words) * 2u;
+        }
+        const uint32_t per_pattern = static_cast<uint32_t>(channel_count) * kRowsPerPattern * kCellBytes;
+        const uint32_t need        = layout.pattern_data_offset + (static_cast<uint32_t>(max_pattern_seen) + 1u) * per_pattern + sample_bytes;
+        if (need > r.size()) max_pattern_seen = max_in_song;
     }
     const uint16_t pattern_count = any_pattern ? static_cast<uint16_t>(max_pattern_seen + 1) : 0;
 
@@ -555,7 +577,7 @@ bool load(formats::ByteSource src, memory::TrackMemory& mem, Song& out, const ch
         sd.loop_enabled       = loop.enabled;
         sd.loop_bidirectional = false;
         sd.file_offset        = running_file_offset;
-        sd.c5_speed           = 8363; // период 428 на такте Paula NTSC; finetune - отдельно, в sd.finetune
+        sd.c5_speed           = kPalC5Hz; // период 428 на такте Paula PAL; finetune - отдельно, в sd.finetune
         sd.relative_note      = 0;
         sd.finetune           = rs.finetune;
         sd.default_volume     = (rs.volume > kVolumeMax) ? kVolumeMax : rs.volume;

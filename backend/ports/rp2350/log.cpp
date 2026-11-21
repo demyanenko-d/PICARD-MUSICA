@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 // Журнал платы: консоль (UART0 на GPIO32/33) и задача логгера на Core0.
 //
-// Механизм колец - в platform/log_rings.h, здесь только то, чем он пишет,
+// Механизм колец общий, здесь только то, чем он пишет,
 // и расписание строк, которые печатают модули.
 //
 // Своей диагностики здесь нет - только когда и что позвать. Сами строки
@@ -16,7 +16,6 @@
 #include "hardware/uart.h"
 #include "pico.h"
 #include "pico/time.h"
-
 #include "FreeRTOS.h"
 #include "task.h"
 
@@ -31,8 +30,13 @@
 #include "devices/sd/spi_emu.h"
 #include "devices/storage/storage.h"
 
+#include "player/config/config_service.h"
 #include "player/gs/bridge.h"
-#include "player/live/ay_tap.h"
+#include "player/hal/audio_out.h"
+#include "player/live/ay_live.h"
+#include "player/live/dac_live.h"
+#include "player/live/saa_live.h"
+#include "player/live/live_tap.h"
 #include "player/live/session.h"
 #include "player/session.h"
 #include "player/shared_state.h"
@@ -44,6 +48,7 @@
 #include "rtos/ticks.h"
 #include "stack_paint.h"
 #include "usb/usb_host.h"
+#include "wifi/esp_link.h"
 
 // --- Консоль ---
 
@@ -59,6 +64,7 @@ void platform::log_put_blocking(const char* msg) {
 
 void platform::log_wait_ready() {
     while (!uart_is_writable(uart0)) {
+        tight_loop_contents();
     }
 }
 
@@ -94,8 +100,8 @@ TaskHandle_t s_app_task = nullptr;
 
 // Стоит ли Core1: обороты его цикла и обслуживания без ожидания не меняются
 // дольше секунды - строка с фазой, где он ждёт, и строка при
-// возобновлении. Обслуживание без ожидания спит до обращения хоста, поэтому "стоит, загрузка" - это и хост, ушедший посреди
-// окна.
+// возобновлении. Обслуживание без ожидания спит до обращения хоста,
+// поэтому "стоит, загрузка" - это и хост, ушедший посреди окна.
 void log_core1_liveness() {
     static uint32_t s_seen    = 0;
     static uint32_t s_seen_us = 0;
@@ -127,9 +133,9 @@ void log_core1_liveness() {
 void log_stack_marks() {
     constexpr uint32_t kStackPulseCalls = 4;
     struct Marks {
-        uint32_t app, log, render, seq, idle, msp, core1;
+        uint32_t app, log, render, seq, wifi, idle, msp, core1;
         bool operator==(const Marks& o) const {
-            return app == o.app && log == o.log && render == o.render && seq == o.seq && idle == o.idle && msp == o.msp && core1 == o.core1;
+            return app == o.app && log == o.log && render == o.render && seq == o.seq && wifi == o.wifi && idle == o.idle && msp == o.msp && core1 == o.core1;
         }
     };
     static Marks s_last     = {};
@@ -138,6 +144,7 @@ void log_stack_marks() {
                                static_cast<uint32_t>(uxTaskGetStackHighWaterMark(nullptr)) * sizeof(StackType_t),
                                platform::os_task_stack_unused_bytes(platform::TaskRole::Render),
                                platform::os_task_stack_unused_bytes(platform::TaskRole::Sequencer),
+                               rp2350::wifi::esp_link_stack_free(),
                                static_cast<uint32_t>(uxTaskGetStackHighWaterMark(xTaskGetIdleTaskHandle())) * sizeof(StackType_t),
                                stack_unpainted_bytes(&__StackBottom, &__StackTop),
                                stack_unpainted_bytes(&__StackOneBottom, &__StackOneTop)};
@@ -146,8 +153,9 @@ void log_stack_marks() {
     s_last  = m;
     char h[192];
     snprintf(h, sizeof(h),
-             "stack free: app %" PRIu32 " log %" PRIu32 " render %" PRIu32 " seq %" PRIu32 " idle %" PRIu32 " msp %" PRIu32 " core1 %" PRIu32 "\n", m.app,
-             m.log, m.render, m.seq, m.idle, m.msp, m.core1);
+             "stack free: app %" PRIu32 " log %" PRIu32 " render %" PRIu32 " seq %" PRIu32 " wifi %" PRIu32 " idle %" PRIu32 " msp %" PRIu32 " core1 %" PRIu32
+             "\n",
+             m.app, m.log, m.render, m.seq, m.wifi, m.idle, m.msp, m.core1);
     debug_log(h);
 }
 
@@ -186,8 +194,9 @@ void log_task(void* /*arg*/) {
     uint32_t gs_at    = kGsFirstMs;
     uint32_t sd_at    = kSdFirstMs;
     // Живой режим - своим сроком и отдельно от плотного блока карты: там
-    // строки не влезали в кольцо лога.
-    uint32_t live_at = 2000;
+    // строки не влезают в кольцо лога.
+    uint32_t live_at        = 2000;
+    const bool live_enabled = player::config::settings().live_midi != static_cast<uint8_t>(soundsinth::config::LiveMidi::None);
     for (;;) {
         // Выгрести и доложить о потерях самого журнала: это его дело, не платы.
         const bool pending = platform::log_service(64);
@@ -200,6 +209,20 @@ void log_task(void* /*arg*/) {
         if (due(now, gs_at)) {
             gs_at = now + kSlowPeriodMs;
             player::gs::bridge_log_stats();
+            player::live::ay_live_log_stats();
+            player::live::saa_live_log_stats();
+            player::live::dac_live_log_stats();
+            // Вывод звука: недоборы буфера слышны щелчком в любом режиме, не
+            // только при треке.
+            static uint32_t s_under = 0, s_late = 0; // строка - с первого недобора
+            const uint32_t under = player::hal::audio_out_underruns(), late = player::hal::audio_out_late();
+            if (under != s_under || late != s_late) {
+                const player::hal::ReadyStats r = player::hal::audio_out_ready_stats();
+                debug_logf("audio: underruns %" PRIu32 " (bg %" PRIu32 ") late %" PRIu32 " | ready q0 %" PRIu32 " q1 %" PRIu32 "\n", under,
+                           player::hal::audio_out_underruns_bg(), late, r.ready[0], r.ready[1]);
+                s_under = under;
+                s_late  = late;
+            }
         }
         if (due(now, sd_at)) {
             sd_at = now + kSlowPeriodMs;
@@ -208,11 +231,17 @@ void log_task(void* /*arg*/) {
             bus::divmmc_log_stats();
             devices::storage::storage_log_health();
             rp2350::usb::host_log_health();
-            // Банка во флеше нет: .mid не играет ни файлом, ни живым потоком.
-            // Строка повторяется в каждом разборе - строку загрузки застаёт
-            // не всякий, а причина отказа у неё одна на все проявления.
-            if (!shared::g_flash_bank.valid()) {
-                debug_log("WARNING: no bank in flash - MIDI does not play, flash bank.uf2\n");
+            // Нет банка: строка повторяется в каждом разборе - строку загрузки
+            // застаёт не всякий. Банк с карты играет .mid файлом; флеш-банк
+            // нужен живому MIDI и .mid у плеера GS.
+            if (shared::g_banks_ready.load(std::memory_order_acquire) && !shared::g_flash_bank.valid()) {
+                const auto& s        = player::config::settings();
+                const bool want_bank = s.live_midi != static_cast<uint8_t>(soundsinth::config::LiveMidi::None) || s.gs != 0;
+                if (!shared::g_bank.valid()) {
+                    debug_log("WARNING: no bank - .mid does not play, flash bank.uf2\n");
+                } else if (want_bank) {
+                    debug_log("WARNING: no bank in flash - live MIDI and .mid via GS unavailable, flash bank.uf2\n");
+                }
             }
         }
         devices::sd::sd_spi_log_trace_if_new();
@@ -220,8 +249,9 @@ void log_task(void* /*arg*/) {
         if (player::live::session_active() && due(now, live_at)) {
             live_at = now + 5000;
             player::live::session_log_stats();
-        } else if (player::live::ay_tap_seen() != 0 && due(now, live_at)) {
-            // Записи в порты AY идут, а живой режим не включился.
+        } else if (live_enabled && player::live::tap_seen() != 0 && due(now, live_at)) {
+            // Записи в порты AY идут, а живой режим не включился. При
+            // LIVE_MIDI=NONE отвод никто не разбирает, и числа без смысла.
             live_at = now + 5000;
             player::live::ay_tap_log_stats();
         }

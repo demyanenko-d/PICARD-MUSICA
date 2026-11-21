@@ -157,6 +157,8 @@ int main(int argc, char** argv) {
         const bank::BankSample& s = b.samples[p.sample];
         // Каждый сэмпл в чистую память: цепочки страниц иначе кончатся.
         memory::track_memory_reset_for_new_track(*mem);
+        // Блок трека держит весь чип; паттернов нет - отдать его сэмплам.
+        (void)memory::psram_freeze_pattern_zone(mem->psram);
         uint16_t cp_page     = memory::kPageChainEnd;
         const uint16_t first = bank::bank_make_resident(b, table.get(), p.sample, mem->psram, &cp_page);
         if (first == memory::kPageChainEnd) {

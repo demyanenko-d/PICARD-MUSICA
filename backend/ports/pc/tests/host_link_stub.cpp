@@ -31,6 +31,10 @@ uint32_t g_last_seen_us = 0;
 // Потери на шине: тест подставляет их, чтобы проверить разбор диагностики
 // принятого модуля.
 uint32_t g_lost_port_writes = 0;
+// Одноразовый крюк обслуживания: на вызове номер g_service_hook_at (с
+// единицы, от установки) - событие посреди долгой работы сеанса.
+void (*g_service_hook)()   = nullptr;
+uint32_t g_service_hook_at = 0;
 
 void reset() {
     g_service          = 0;
@@ -54,6 +58,11 @@ namespace player::hal {
 
 void host_service() {
     ++test_host::g_service;
+    if (test_host::g_service_hook != nullptr && --test_host::g_service_hook_at == 0u) {
+        void (*const hook)()      = test_host::g_service_hook;
+        test_host::g_service_hook = nullptr;
+        hook();
+    }
 }
 
 void host_service_and_wait() {

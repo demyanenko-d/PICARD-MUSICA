@@ -1,17 +1,18 @@
 // SPDX-License-Identifier: MIT
-// Логика шины Z80: как прошивка разговаривает с шиной.
+// Логика шины Z80.
 //
 // Автоматы PIO разделены по сигналу: циклы IORQ отдельно от циклов MREQ и
 // трапов.
 
 #pragma once
 
-#include "hw_config.h"
-
 #include <cstdint>
 
 #include "hardware/gpio.h"
+#include "hardware/structs/sio.h"
 #include "pico/time.h"
+
+#include "hw_config.h"
 
 namespace player::protocol {
 class HostProtocol;
@@ -63,15 +64,35 @@ constexpr uint PIN_RESET_N = 47;
 // TR-DOS. Плата ведёт его всегда, даже когда триггер выключен: там за ним
 // вход, а плавающий вход это неопределённость.
 //
-// Вывод старше 31, и окно выводов у блока PIO с шинными автоматами - 0..31.
-// Поэтому ведёт его SIO, а автоматы триггера только отдают маску, и несёт
-// её DMA.
+// При TR-DOS и своём ПЗУ с DOS_N вывод ведёт dos_drive в pio2 (окно
+// 16..47), иначе SIO.
 constexpr uint PIN_DOS_N = 36;
 
 // Перемычка режима загрузки: замкнута на землю - плата поднимает
 // конфигуратор. Вывод уже несёт перемычку на плате и прошивкой больше
 // нигде не читается; подтяжка вверх своя, внешней на нём нет.
 constexpr uint PIN_BOOT_JUMPER = 37;
+
+// /WAIT шины Z80 - открытый сток: в выходном регистре всегда ноль, линию
+// тянет вниз включение выхода, отпускает выключение. Единицу плата не
+// выдаёт никогда: к ней линию тянет машина. Вывод берут Wi-Fi (через SIO;
+// CTS модуля на нём не используется) и TR-DOS (автомат port_join_hold).
+constexpr uint PIN_WAIT_N = 34;
+
+inline void wait_line_init() {
+    gpio_init(PIN_WAIT_N);
+    gpio_disable_pulls(PIN_WAIT_N);
+    gpio_put(PIN_WAIT_N, 0);
+    gpio_set_dir(PIN_WAIT_N, GPIO_IN);
+}
+
+inline void assert_wait() {
+    sio_hw->gpio_hi_oe_set = 1u << (PIN_WAIT_N - 32u);
+}
+
+inline void release_wait() {
+    sio_hw->gpio_hi_oe_clr = 1u << (PIN_WAIT_N - 32u);
+}
 
 // Снять признак ПЗУ TR-DOS. Зовётся при сбросе машины: после сброса Beta
 // стоит в исходном, и признак обязан совпасть.
@@ -92,17 +113,28 @@ bool rom_emu_enabled();
 void trdos_set_enabled(bool on);
 bool trdos_enabled();
 
-// Слежение за сбросом машины: нет выборки M1 дольше 50 тактов Z80 на 3.5 МГц -
-// машина в сбросе. Всегда, кроме режима DivMMC (pio0 занят эмуляцией ПЗУ).
-// Ставится там же и тогда же, что режим шины.
+// Навигатор образов по NMI в режиме TR-DOS: включает загрузка, если поднят
+// Beta Disk платы. Ставится там же и тогда же, что режим шины.
+void nav_set_enabled(bool on);
+// Страница обмена навигатора - начало банка N0, у Z80 0x2000; nullptr -
+// навигатора на шине нет.
+uint8_t* nav_page();
+// Меню навигатора открыто: флаг NMI до второго байта его RETN.
+bool nav_open();
+// Последняя запись машины в 7FFD целиком, после сброса ноль.
+uint8_t port_7ffd();
+
+// Слежение за сбросом машины: нет выборки M1 - машина в сбросе. Без
+// дисковой системы и своего ПЗУ - автомат в pio0 (50 тактов Z80 на 3.5 МГц),
+// с ними - счётчик M1 на PWM и опрос с Core0 (дольше 50 мкс). Ставится там
+// же и тогда же, что режим шины.
 void reset_watch_set_enabled(bool on);
 bool reset_watch_enabled();
 // Сколько сбросов машины замечено с загрузки.
 uint32_t machine_resets_seen();
 
-// Снять ПЗУ TR-DOS по сбросу машины. С триггером TR-DOS вывод у автомата:
-// "снять" уходит в очередь выдатчика, а детектор переходит в released -
-// запись в SIO до вывода не доходит. Без триггера - уровень через SIO.
+// Снять ПЗУ TR-DOS по сбросу машины: флаги DOS, ПЗУ 48, закрытия 7FFD и
+// навигатора. Без триггера - уровень вывода через SIO.
 void trdos_release();
 
 // Режим конфигуратора настроек. Ставится до rom_emu_set_enabled и вместе с
@@ -116,6 +148,19 @@ bool config_rom_enabled();
 // Плата пишет её прямо - это её массив в SRAM.
 uint8_t* config_rom_page();
 uint32_t config_rom_page_bytes();
+
+// Своё ПЗУ Пентагона: 64 КБ, страницы 0 - сервис, 1 - TR-DOS, 2 - 128,
+// 3 - 48; страница = (DOS ? 0 : 2) + бит 4 порта 7FFD. Отдаётся из ОЗУ
+// DivMMC, поэтому только без DivMMC. Ставится до подъёма шины, как режим
+// эмуляции ПЗУ. drive_dos - вести DOS_N на машину (DISKSYS=TRDOS: порты
+// дисковода машины отвечают только при нём).
+inline constexpr uint32_t kPentagonRomBytes = 65536;
+// Разложить образ в памяти отдачи. false - образ стёрт (одни 0xFF).
+bool pentagon_rom_load(const uint8_t* image);
+void pentagon_rom_set_enabled(bool on, bool drive_dos);
+bool pentagon_rom_enabled();
+// Блок 64 КБ на границе 64 КБ внутри ОЗУ DivMMC.
+uint8_t* pentagon_rom_block();
 
 // Единица на выводе - хост в сбросе: на плате линию инвертирует 74HCT04,
 // за ним диод (сброс на шине двунаправленный).
@@ -146,8 +191,7 @@ void plugin_ports_init(player::protocol::HostProtocol& protocol);
 // следующее.
 //
 // Регистрации и ответы можно звать и до plugin_ports_init(): таблицы
-// статические, init их не стирает, копию ответа для пути портов эмуляции
-// ПЗУ включает признак DivMMC, поставленный при загрузке.
+// статические, init их не стирает.
 
 using PortWriteFn = void (*)(uint8_t port, uint8_t data);
 
@@ -155,8 +199,8 @@ using PortWriteFn = void (*)(uint8_t port, uint8_t data);
 // (__not_in_flash_func).
 void port_on_write(uint8_t port, PortWriteFn fn);
 
-// Что ответить на следующее чтение порта. Значение ложится тем же путём,
-// что у port_answer.
+// Что ответить на следующее чтение порта. Значение ложится в ячейку ответа
+// порта.
 void port_set_read(uint8_t port, uint8_t value);
 
 // Хук после состоявшегося чтения: здесь готовят ответ на следующее.
@@ -173,14 +217,11 @@ struct PioStats {
     uint32_t dat_bytes = 0; // байтов в порт данных
 
     // Потерянные слова на записи: push noblock в ports.pio молча
-    // выбрасывает слово при полной RX FIFO. Должен быть 0. Ненулевое - хост
-    // пишет чаще, чем ISR записи успевает разбирать, частоту
-    // надо снизить на шаг.
+    // выбрасывает слово при полной RX FIFO. Должен быть 0. Ненулевое - разбор
+    // записи не успевает за процессором.
     uint32_t wr_fifo_overruns = 0;
-    // Заполненность той же FIFO на входе в ISR. Глубина 8
-    // (PIO_FIFO_JOIN_RX), 8 - следующий байт некуда было бы положить. Это
-    // запас: видно, живём ли на грани постоянно (средняя пропускная
-    // способность) или ловим редкие задержки входа в ISR.
+    // Наибольшее число слов, разобранных bus_wr_isr за вызов: цикл дочитывает
+    // пришедшее по ходу, поэтому бывает больше глубины FIFO (8).
     uint8_t wr_fifo_max_level = 0;
 };
 
@@ -193,8 +234,8 @@ PioStats bus_stats();
 // Работает, когда настройками выбран DivMMC.
 
 // Поднимает эмуляцию: таблица страниц, автоматы PIO, цепочки DMA,
-// блокировка ПЗУ машины. Хост в этот момент должен быть в сбросе, сброс
-// отпускать после.
+// блокировка ПЗУ машины. Звать до выхода машины из сброса, если сброс
+// разрешён.
 void rom_emu_init();
 
 // Время последнего чтения порта состояния (time_us_32): клиент хоста читает
@@ -207,9 +248,8 @@ uint32_t host_status_read_us();
 // log_task (Core0), счёт печатает print_bus_health.
 void bus_queues_poll();
 
-// Порты плагина через путь портов эмуляции ПЗУ (режим DivMMC): что сейчас
-// отвечается по портам команд и данных и сколько байтов rom_serve не
-// выставил.
+// Порты протокола: что сейчас отвечается по портам команд и данных и
+// сколько байтов rom_serve не выставил.
 struct GenericPortsState {
     uint32_t tab_cmd    = 0; // запись s_porttab: адрес ячейки ответа, 0 - порт не наш
     uint32_t tab_dat    = 0;
@@ -228,8 +268,8 @@ GenericPortsState generic_ports_state();
 //                     Потеря здесь - несработавший вход или выход DivMMC,
 //                     то есть машина исполняет чужую память; по остальным
 //                     счётчикам это неотличимо от нормы.
-// Очереди трапов и TR-DOS: числа - опросов, заставших флаг потери (флаги
-// липкие, опрос раз в 1-10 мс), а не слов.
+// Очереди трапов: числа - опросов, заставших флаг потери (флаги липкие,
+// опрос раз в 1-10 мс), а не слов.
 struct BusMeasurements {
     uint32_t serve_late_full;
     uint32_t trap_lost;   // rom_trap: push noblock в полную RX
@@ -238,11 +278,20 @@ struct BusMeasurements {
     uint32_t detect_lost; // TXOVER детектора: слово варианта от трапа
     uint32_t join_stall;  // RXSTALL склейщика: стоял, слово ушло позже
     uint32_t route_stall;
-    bool trdos;            // детектор TR-DOS заведён
-    uint32_t trdos_lost;   // отметка смены DOS_N выброшена (push noblock)
-    uint32_t trdos_desync; // вывод DOS_N не по состоянию автомата два опроса
-    uint8_t trdos_level;
-    bool trdos_asserted;
+    bool trdos;          // триггер TR-DOS заведён
+    uint8_t trdos_level; // вывод DOS_N
+    bool trdos_asserted; // флаг DOS
+    // Фронты линий хоста (опросов с защёлкнутым фронтом): пары спад/подъём
+    // для DOS_N, NMI_N, ROM_BLK_N, RESET_N. В простое приращения нулевые;
+    // ненулевое без видимой причины - ложный переход или помеха на линии.
+    uint32_t sig_edges[8];
+    // Очередь вариантов детектора: ожидания места ядром и чистки по сроку
+    // (машина не читала память дольше kVariantWaitUs).
+    uint32_t variant_waits;
+    uint32_t variant_clears;
+    // Худший проход bus_wr_isr: такты ядра (DWT) и слова за тот проход.
+    uint32_t wr_isr_cyc_max;
+    uint32_t wr_isr_cyc_drained;
 };
 BusMeasurements bus_measurements();
 
@@ -258,6 +307,26 @@ void port_answer(uint8_t port, uint8_t value);
 void port_answer_page(uint8_t port, const uint8_t* page);
 
 void port_release(uint8_t port);
+
+// Порты Beta Disk: только при DOS (режимы без DivMMC). Порт отвечает байтом
+// ячейки устройства, вне DOS - прежним ответом; nullptr снимает. Чтение
+// такого порта при DOS зовёт один хук на все порты, мимо port_on_read_done.
+bool port_dos_cell(uint8_t port, const uint8_t* cell);
+void port_dos_on_read_done(PortReadFn fn);
+// Чтение порта при DOS держит /WAIT, где склейщик это умеет: fn(порт) - из
+// обработчика шины, пока Z80 стоит; ответ - port_hold_answer, из
+// обработчика или позже. Хук один на все порты, ставит его последний вызов.
+bool port_dos_hold(uint8_t port, PortReadFn fn);
+// То же для порта обычной таблицы (при DOS - и для его копии); хук тоже
+// один на все такие порты. Снимает удержание port_answer.
+bool port_hold(uint8_t port, PortReadFn fn);
+void port_hold_answer(uint8_t v);
+// /WAIT через SIO, где склейщик держать не умеет (всё, кроме TR-DOS): Z80
+// встаёт на следующем цикле шины. ready - вывод у SIO (WIFI=1) и
+// склейщика с удержанием нет.
+bool wait_late_ready();
+void wait_late(bool on);
+bool port_hold_active();
 // Что порт отвечает сейчас, для журнала: байт ячейки 0..255, или снят
 // (kPortReleased - отвечает машина), или страница (kPortPaged).
 inline constexpr int32_t kPortReleased = -1;

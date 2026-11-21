@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: MIT
 // Шина SPI под карту: выводы платы и блок SPI1.
 
-#include "devices/hal/spi.h"
-
 #include "hardware/gpio.h"
 #include "hardware/spi.h"
 
 #include "platform/hot_path.h"
+
+#include "devices/hal/spi.h"
 
 namespace {
 

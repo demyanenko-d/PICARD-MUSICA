@@ -6,6 +6,7 @@
 
 #include "platform/compiler.h"
 #include "platform/hot_path.h"
+
 #include "core/config.h"
 #include "core/engine/engine_defs.h"
 #include "core/model/amiga_period.h"
@@ -28,6 +29,14 @@ using soundsinth::model::VolumeColumnCommand;
 using soundsinth::model::VolumeColumnType;
 
 namespace {
+
+// Панорама 8xx/E8x, суженная на глубину MOD_PANNING. Округление к ближнему.
+uint8_t narrow_pan(uint8_t pan, uint8_t percent) {
+    if (percent >= 100) return pan;
+    const int32_t dev = static_cast<int32_t>(pan) - kPanCenter;
+    const int32_t num = dev * percent;
+    return static_cast<uint8_t>(kPanCenter + (num >= 0 ? (num + 50) / 100 : -((-num + 50) / 100)));
+}
 
 // Раскладка Axy/Dxy/Kxy/Pxy: верхний нибл - слайд вверх, нижний - вниз.
 // Оба ненулевые - редкий, но реальный случай; побеждает "вниз" у S3M
@@ -541,7 +550,7 @@ SOUNDSINTH_NOINLINE void apply_channel_effect(DispatchContext* ctx, ChannelState
                 param = param * 2 > 255 ? 255 : param * 2;
             }
             const uint32_t scaled = param / 4;
-            cs.pan                = static_cast<uint8_t>(scaled > kPanMax ? kPanMax : scaled);
+            cs.pan                = narrow_pan(static_cast<uint8_t>(scaled > kPanMax ? kPanMax : scaled), ctx->mod_pan_percent);
             cs.surround           = false;
             break;
         }
@@ -551,7 +560,7 @@ SOUNDSINTH_NOINLINE void apply_channel_effect(DispatchContext* ctx, ChannelState
             // другая формула. Как у OpenMPT: pan_0_256 =
             // (param*256 + 8) / 15; здесь сразу в шкале 0..64, округление +2/15.
             const uint32_t scaled = (static_cast<uint32_t>(effect.param) * kPanMax + 2) / 15;
-            cs.pan                = static_cast<uint8_t>(scaled > kPanMax ? kPanMax : scaled);
+            cs.pan                = narrow_pan(static_cast<uint8_t>(scaled > kPanMax ? kPanMax : scaled), ctx->mod_pan_percent);
             cs.surround           = false;
             break;
         }
@@ -575,6 +584,26 @@ SOUNDSINTH_NOINLINE void apply_channel_effect(DispatchContext* ctx, ChannelState
             break;
         case Effect::SetPanbrelloWaveform:
             cs.panbrello_waveform = effect.param & 0x03u;
+            break;
+        // Zxx/\xx < 0x80 - через выбранный SFx-макрос; классы заполняет
+        // только загрузчик IT, у прочих форматов все None и команда пуста.
+        // Параметр >= 0x80 - фиксированный макрос: у IT разобран загрузчиком,
+        // у S3M/XM не исполняется.
+        case Effect::SetMidiMacro: {
+            if (effect.param >= 0x80u) break;
+            const auto m = ctx->song->sfx_macro[cs.active_macro];
+            if (m == soundsinth::model::Song::FilterMacro::Cutoff) cs.filter_cutoff = effect.param;
+            if (m == soundsinth::model::Song::FilterMacro::Resonance) cs.filter_resonance = effect.param;
+            break;
+        }
+        case Effect::SetFilterCutoff: // Zxx >= 0x80, макрос разобран загрузчиком
+            cs.filter_cutoff = effect.param;
+            break;
+        case Effect::SetFilterResonance:
+            cs.filter_resonance = effect.param;
+            break;
+        case Effect::SetActiveMidiMacro:
+            cs.active_macro = effect.param & 0x0fu;
             break;
         default:
             break;
@@ -685,6 +714,10 @@ void process_volume_column(ChannelState& cs, const VolumeColumnCommand& vc, cons
 }
 
 } // namespace
+
+int8_t it_sine(uint8_t phase) {
+    return kItVibratoSineTable[phase];
+}
 
 SOUNDSINTH_NOINLINE void SOUNDSINTH_HOT_PATH(advance_envelope_and_fadeout)(ChannelState& cs, bool amiga_pitch, QuirkFlags quirks,
                                                                            uint32_t envelope_time_step_q8) {
@@ -806,18 +839,18 @@ SOUNDSINTH_NOINLINE void SOUNDSINTH_HOT_PATH(advance_envelope_and_fadeout)(Chann
 }
 
 void channels_init(const Song& song, ChannelState* channels, uint8_t pan_percent) {
-    const bool paula = (song.quirks & soundsinth::model::kQuirkModHardwarePanning) != 0;
-    // Отклонение от центра: при 100% это ровно половина шкалы, то есть края
-    // 0 и kPanMax, как у железа. Деление целое, с округлением к ближнему.
-    if (pan_percent > 100) pan_percent = 100;
-    const uint8_t spread = static_cast<uint8_t>((static_cast<uint32_t>(kPanCenter) * pan_percent + 50u) / 100u);
-    const uint8_t pan_l  = static_cast<uint8_t>(kPanCenter - spread);
-    const uint8_t pan_r  = static_cast<uint8_t>(kPanCenter + spread);
+    const bool paula    = (song.quirks & soundsinth::model::kQuirkModHardwarePanning) != 0;
+    const bool gs       = (song.quirks & soundsinth::model::kQuirkGsModule) != 0;
+    const uint8_t pan_l = gs ? uint8_t{0} : narrow_pan(0, pan_percent);
+    const uint8_t pan_r = gs ? kPanMax : narrow_pan(kPanMax, pan_percent);
     for (uint8_t ch = 0; ch < song.channel_count; ++ch) {
         channels[ch] = ChannelState{};
         // Разводка Paula у MOD (каналы 0 и 3 по модулю 4 влево, 1 и 2 вправо) -
         // свойство устройства; загрузчик MOD channel_pan не заполняет.
-        channels[ch].pan            = paula ? (((ch % 4) == 0 || (ch % 4) == 3) ? pan_l : pan_r) : song.channel_pan[ch];
+        // Модуль GS - как у карты: 0 и 1 влево, 2 и 3 вправо (gsz80).
+        const uint8_t q             = static_cast<uint8_t>(ch % 4);
+        const bool left             = gs ? q < 2 : (q == 0 || q == 3);
+        channels[ch].pan            = paula ? (left ? pan_l : pan_r) : song.channel_pan[ch];
         channels[ch].channel_volume = song.channel_volume[ch];
         channels[ch].surround       = ((song.channel_surround >> ch) & 1u) != 0;
     }
@@ -906,6 +939,9 @@ void trigger_note(DispatchContext* ctx, uint8_t ch, const PatternCell& cell, uin
     if ((cs.vibrato_waveform & 0x04u) == 0) cs.vibrato_phase = 0;
     if ((cs.tremolo_waveform & 0x04u) == 0 && !effect_before_volcol) cs.tremolo_phase = 0;
     cs.glissando_porta = false;
+    // Автовибрато сэмпла - с нуля на каждый настоящий триггер, как у OpenMPT.
+    cs.auto_vib_pos   = 0;
+    cs.auto_vib_depth = 0;
     // Огибающие - указатели из Instrument; cell.instrument уже проверен. С
     // carry (IT) позиция огибающей новой нотой не сбрасывается, как у
     // OpenMPT и libxmp.
@@ -919,13 +955,23 @@ void trigger_note(DispatchContext* ctx, uint8_t ch, const PatternCell& cell, uin
     if (cs.pitch_envelope == nullptr || !cs.pitch_envelope->carry) cs.pitch_envelope_tick = 0;
     cs.pitch_envelope_offset = 0; // нейтрально
     // Фильтр (IT): срез и резонанс из инструмента, только если он их задаёт
-    // (бит 0x80). Не задаёт - открытый срез и нулевой резонанс, фильтра нет,
-    // пока его не включит огибающая или Zxx.
+    // (бит 0x80). Не задаёт: у IT канал держит текущие значения - их мог
+    // поставить Zxx (kQuirkItFilterRetain, как InstrumentChange OpenMPT); у
+    // прочих форматов и .mid - открытый срез и нулевой резонанс.
     cs.filter_envelope = ins.filter_envelope;
     if (cs.filter_envelope == nullptr || !cs.filter_envelope->carry) cs.filter_envelope_tick = 0;
-    cs.filter_env_modifier = kFilterEnvNeutral; // нейтрально до первого продвижения огибающей
-    cs.filter_cutoff       = (ins.filter_cutoff & 0x80u) ? static_cast<uint8_t>(ins.filter_cutoff & 0x7fu) : kFilterCutoffOpen;
-    cs.filter_resonance    = (ins.filter_resonance & 0x80u) ? static_cast<uint8_t>(ins.filter_resonance & 0x7fu) : 0;
+    cs.filter_env_modifier   = kFilterEnvNeutral; // нейтрально до первого продвижения огибающей
+    const bool filter_retain = (song.quirks & soundsinth::model::kQuirkItFilterRetain) != 0;
+    if (ins.filter_cutoff & 0x80u) {
+        cs.filter_cutoff = static_cast<uint8_t>(ins.filter_cutoff & 0x7fu);
+    } else if (!filter_retain) {
+        cs.filter_cutoff = kFilterCutoffOpen;
+    }
+    if (ins.filter_resonance & 0x80u) {
+        cs.filter_resonance = static_cast<uint8_t>(ins.filter_resonance & 0x7fu);
+    } else if (!filter_retain) {
+        cs.filter_resonance = 0;
+    }
     apply_midi_trigger_filter(cs, song, ins, cell);
     // Состояние Note-Off - заново на каждый настоящий триггер.
     cs.key_released = false;
@@ -1055,6 +1101,45 @@ SOUNDSINTH_NOINLINE void dispatch_cell(DispatchContext* ctx, uint8_t ch, const P
             const QuirkFlags cut_quirk = unmapped ? soundsinth::model::kQuirkCutOnUnmappedNote : soundsinth::model::kQuirkCutOnEmptySample;
             if ((song.quirks & cut_quirk) != 0) {
                 stop_voice(cs);
+            }
+        }
+    }
+
+    // Нота без номера инструмента - инструмент канала: сэмпл по этой ноте с
+    // начала, и доигравший тоже. Громкость и панорама прежние - их
+    // возвращает только номер инструмента. У XM прежние и огибающие с
+    // затуханием. Как NoteChange у OpenMPT (bResetEnv - не у XM) и set_patch
+    // по инструменту канала у libxmp.
+    if (is_real_note(cell.note) && cell.instrument == 0 && cs.last_instrument != 0 && !suppress_retrigger_for_tone_porta) {
+        uint16_t sample_idx   = 0;
+        uint8_t resolved_note = cell.note;
+        if (resolve_sample_index(song, cs.last_instrument, cell.note, &sample_idx, &resolved_note) && song.samples[sample_idx].length_samples > 0) {
+            PatternCell with_instrument = cell;
+            with_instrument.instrument  = cs.last_instrument;
+            const uint8_t volume        = cs.volume;
+            const uint8_t pan           = cs.pan;
+            const bool surround         = cs.surround;
+            const auto env_tick         = cs.envelope_tick;
+            const auto env_vol          = cs.envelope_volume;
+            const auto pan_tick         = cs.pan_envelope_tick;
+            const auto pan_value        = cs.pan_envelope_value;
+            const auto pit_tick         = cs.pitch_envelope_tick;
+            const auto pit_value        = cs.pitch_envelope_offset;
+            const auto fadeout          = cs.fadeout_level;
+            const bool fading           = cs.note_fading;
+            trigger_note(ctx, ch, with_instrument, sample_idx, resolved_note);
+            cs.volume   = volume;
+            cs.pan      = pan;
+            cs.surround = surround;
+            if (xm_fine_memory) {
+                cs.envelope_tick         = env_tick;
+                cs.envelope_volume       = env_vol;
+                cs.pan_envelope_tick     = pan_tick;
+                cs.pan_envelope_value    = pan_value;
+                cs.pitch_envelope_tick   = pit_tick;
+                cs.pitch_envelope_offset = pit_value;
+                cs.fadeout_level         = fadeout;
+                cs.note_fading           = fading;
             }
         }
     }

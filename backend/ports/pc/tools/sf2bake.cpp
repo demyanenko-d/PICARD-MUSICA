@@ -2865,7 +2865,6 @@ int main(int argc, char** argv) {
         }
         soundsinth::memory::PsramStore store;
         soundsinth::memory::psram_create(store);
-        soundsinth::memory::psram_reset_track(store);
 
         uint32_t checked = 0, bad = 0;
         // Каждый сэмпл гонять незачем - их тысячи, а проверяется механизм.
@@ -2875,6 +2874,8 @@ int main(int argc, char** argv) {
             const BankSample& bs = samples[i];
             uint16_t cp_page     = soundsinth::memory::kPageChainEnd;
             soundsinth::memory::psram_reset_track(store);
+            // Блок трека держит весь чип; паттернов нет - отдать его сэмплам.
+            (void)soundsinth::memory::psram_freeze_pattern_zone(store);
             const uint16_t first = bank_make_resident(rb, dec_table.get(), static_cast<uint16_t>(i), store, &cp_page);
             if (first == soundsinth::memory::kPageChainEnd) {
                 ++bad;

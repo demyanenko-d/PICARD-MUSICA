@@ -6,9 +6,9 @@
 // Чистая логика без обращений к железу: физический уровень (hostlink на
 // плате) только перекладывает байты, PC-тесты гоняют этот класс напрямую.
 //
-// Плата не считает, сколько байт хост прочитал. Команда стоит
+// Сколько байт хост прочитал, протокол не считает. Команда стоит
 // выставленной, пока хост не скажет "выполнено"; перечитать кадр можно
-// в любой момент, тем же вооружением.
+// в любой момент, тем же выставлением.
 
 #include <cstdint>
 
@@ -20,14 +20,15 @@ enum class PlaybackState : uint8_t {
     Loading = 0, // идёт загрузка, звука ещё нет
     Playing = 1,
     Ended   = 2,
+    Failed  = 3, // файл не принят: не разобран или не поместился
 };
 
 // Старшие биты того же байта: состояние занимает младшие два, остальное -
 // признаки управления. Хост обязан брать состояние маской, иначе пауза
 // прочтётся как неизвестное состояние.
-inline constexpr uint8_t kStateMask     = 0x03;
-inline constexpr uint8_t kStatePaused   = 0x04; // воспроизведение остановлено
-inline constexpr uint8_t kStateSeekable = 0x08; // перемотка доступна
+inline constexpr uint8_t kStateMask     = 0x03u;
+inline constexpr uint8_t kStatePaused   = 0x04u; // воспроизведение остановлено
+inline constexpr uint8_t kStateSeekable = 0x08u; // перемотка доступна
 
 // Что хост просит сделать с воспроизведением (kHcTransport).
 enum class TransportOp : uint8_t {
@@ -48,6 +49,8 @@ enum class ConfigExit : uint8_t {
 class HostProtocol {
 public:
     static constexpr uint16_t kDataBufferBytes = 4096;
+    // Кадров телеметрии между окнами данных: VU и спектр.
+    static constexpr uint8_t kTelemetryPerWindow = 2;
 
     // Кадр аргументов на плате. Хост читает кадр в буфер на 17 байт: полезная
     // часть длиннее 16 байт (спектр, имя платы) требует правки и плагина.
@@ -71,9 +74,13 @@ public:
     static constexpr uint8_t kStSpectrum     = 0x18;
     static constexpr uint8_t kStPsramStats   = 0x19;
     static constexpr uint8_t kStEngineLoad   = 0x1a; // средняя полифония и загрузка ядра
-    // Страница настроек пересчитана: ПЗУ-конфигуратору можно перерисовывать
-    // экран. Аргумент - признак, приняты ли значения.
-    static constexpr uint8_t kStConfigDone = 0x1b;
+    static constexpr uint8_t kStTrackMeta    = 0x1b; // метаданные трека: формат, чипы, теги
+    // Коды 0x15-0x34 - телеметрия: вид k отвечает кодом kStFileInfo + k,
+    // место на 32 вида. До kInternalBase - резерв публичного API.
+    static constexpr uint8_t kTelemetryKindsMax = 32;
+    // С этого кода и команды - внутренний обмен с нашими ПЗУ (конфигуратор),
+    // в публичную документацию не входит.
+    static constexpr uint8_t kInternalBase = 0x70;
 
     // --- Команды хоста (запись в порт статуса) ---
     static constexpr uint8_t kHcReset = 0x01;
@@ -84,11 +91,8 @@ public:
     // Управление воспроизведением: arg0 - TransportOp. Обмен не меняет, как
     // и маркер: неподтверждённая команда платы возвращается на шину.
     static constexpr uint8_t kHcTransport = 0x06;
-    // Конфигуратор: пересчитать страницу настроек по значениям, которые
-    // ПЗУ в неё положило. Ответ - kStConfigDone.
-    static constexpr uint8_t kHcConfigRefresh = 0x07;
     // Конфигуратор: уйти в перезагрузку. arg0 - ConfigExit.
-    static constexpr uint8_t kHcConfigExit = 0x08;
+    static constexpr uint8_t kHcConfigExit = kInternalBase;
 
     // Вид телеметрии - номер k: флаг в полезной части kHcStart - бит 1 << k,
     // код ответа - kStFileInfo + k. На этом держится обход в try_arm_telemetry.
@@ -98,13 +102,23 @@ public:
     static constexpr uint8_t kTelemetrySpectrumLsb   = 3;
     static constexpr uint8_t kTelemetryPsramStatsLsb = 4;
     static constexpr uint8_t kTelemetryEngineLoadLsb = 5;
-    static constexpr uint8_t kTelemetryKindCount     = 6;
+    static constexpr uint8_t kTelemetryTrackMetaLsb  = 6;
+    static constexpr uint8_t kTelemetryKindCount     = 7;
     static constexpr uint8_t kTelemetryFileInfo      = 1u << kTelemetryFileInfoLsb;
     static constexpr uint8_t kTelemetryPosition      = 1u << kTelemetryPositionLsb;
     static constexpr uint8_t kTelemetryVu            = 1u << kTelemetryVuLsb;
     static constexpr uint8_t kTelemetrySpectrum      = 1u << kTelemetrySpectrumLsb;
     static constexpr uint8_t kTelemetryPsramStats    = 1u << kTelemetryPsramStatsLsb;
     static constexpr uint8_t kTelemetryEngineLoad    = 1u << kTelemetryEngineLoadLsb;
+    static constexpr uint8_t kTelemetryTrackMeta     = 1u << kTelemetryTrackMetaLsb;
+
+    // Кадр метаданных: тип (бит 7 - последний кадр метаданных),
+    // номер блока << 4 | длина - 1, 16 байт блока с хвостом нулями.
+    static constexpr uint8_t kTrackMetaBytes = 18;
+    static constexpr uint8_t kTrackMetaLast  = 0x80;
+    // Поставщик кадров метаданных: кадр номер frame в out. false - такого
+    // кадра нет. Последний кадр метаданных несёт kTrackMetaLast.
+    using TrackMetaFn = bool (*)(void* user, uint8_t frame, uint8_t (&out)[kTrackMetaBytes]);
 
     // Сколько раз подряд принимается "не понял" на одну команду. Без
     // предела физически нечитаемое место давало бы вечный цикл.
@@ -118,12 +132,12 @@ public:
         void (*on_reset)(void* user) = nullptr;
     };
 
-    // Вооружение делает платформа: кодирует слова ответа и публикует статус
+    // Выставление делает платформа: кодирует слова ответа и публикует статус
     // последним действием. Контрольный байт уже включён в args/n: его
     // считает протокол, чтобы стороны не разошлись в том, что суммируется.
     using ArmFn = void (*)(void* user, uint8_t code, const uint8_t* args, uint8_t n);
     // Снять статус, не трогая слова аргументов: байт команды хоста пришёл во
-    // время вооружения (poll).
+    // время выставления (poll).
     using HideFn = void (*)(void* user);
 
     HostProtocol() { reset(); }
@@ -145,18 +159,19 @@ public:
     // --- Основной поток ---
     //
     // Разобрать пришедшую команду хоста и, если ничего не выставлено,
-    // вооружить следующую. Звать можно сколь угодно часто.
+    // выставить следующую. Звать можно сколь угодно часто.
     void poll();
 
     void reset();
 
-    // Плата закрывает сессию сама (загрузка не удалась): сбросить запрос и
-    // готовность. Кадр команды хоста, подтверждение и счётчик NAK не
-    // трогаются - команда на шине остаётся делом хоста.
+    // Сессию закрывает вызывающий, а не команда хоста (загрузка не
+    // удалась): сбросить запрос и готовность. Кадр команды хоста,
+    // подтверждение и счётчик NAK не трогаются - команда на шине остаётся
+    // делом хоста.
     void end_session();
 
     // Запрос куска файла от логики платы. Очередь из одного элемента,
-    // вооружается, когда освободится статус. Запрос в полёте один: окно
+    // выставляется, когда освободится статус. Запрос в полёте один: окно
     // относится к смещению последнего запроса вызывающего.
     void request_file_chunk(uint32_t offset, uint16_t length);
     void mark_session_ready();
@@ -173,33 +188,33 @@ public:
     // Сколько раз хост сообщил, что не разобрал аргументы, и сколько команд
     // сдано после исчерпания попыток. На исправной связке ноль; рост первого
     // - единственный внешний признак, что кадр аргументов портится по дороге.
-    uint32_t nak_total() const { return nak_total_; }
-    uint32_t nak_giveups() const { return nak_giveups_; }
+    uint32_t nak_total() const { return cnt_.naks; }
+    uint32_t nak_giveups() const { return cnt_.nak_giveups; }
     // Команд хоста с неизвестным кодом: на исправной связке ноль, рост -
     // сдвиг кадра команд.
-    uint32_t unknown_commands() const { return unknown_commands_; }
+    uint32_t unknown_commands() const { return cnt_.unknown; }
     // Кадров команд, отброшенных при полном кольце: хост прислал три, пока
     // poll() не звали.
     uint32_t cmd_overruns() const { return cmd_overruns_; }
     // Окон, где байт потерян (счёт ISR меньше подтверждённого), и окон,
     // подтверждённых короче запроса. На исправной связке ноль, кроме хвоста
     // файла у второго.
-    uint32_t data_short() const { return data_short_; }
-    uint32_t short_done() const { return short_done_; }
+    uint32_t data_short() const { return cnt_.data_short; }
+    uint32_t short_done() const { return cnt_.short_done; }
 
     // Отсечённое обоими буферами считается: иначе порча не видна.
     //
     // data_overflow - байт в порт данных сверх окна (пишет ISR), done_overflow -
     // длина в DONE больше окна (пишет poll). На исправной связке оба ноль: хост
     // шлёт не больше kDataBufferBytes.
-    // arg_overflow - вооружение с полезной частью длиннее kMaxPayload.
+    // arg_overflow - выставление с полезной частью длиннее kMaxPayload.
     // Ошибка нашего кода: появилась команда, под которую не увеличили
     // kArgBytes.
-    uint32_t data_overflow() const { return data_overflow_; }
-    uint32_t done_overflow() const { return done_overflow_; }
-    uint32_t arg_overflow() const { return arg_overflow_; }
+    uint32_t data_overflow() const { return cnt_.data_overflow; }
+    uint32_t done_overflow() const { return cnt_.done_overflow; }
+    uint32_t arg_overflow() const { return cnt_.arg_overflow; }
     // Событий журнала, потерянных при полном кольце: разбор не успевал.
-    uint32_t debug_events_lost() const { return debug_events_lost_; }
+    uint32_t debug_events_lost() const { return cnt_.events_lost; }
 
     // Счётчики сбоев связи разом. Все накопительные с включения; разность
     // против снимка на старте сессии (kHcStart) - сбои этой загрузки.
@@ -214,7 +229,7 @@ public:
         uint32_t data_short    = 0;
         uint32_t short_done    = 0;
     };
-    Counters counters() const;
+    Counters counters() const { return cnt_; }
     // Сбои с последнего kHcStart.
     Counters session_counters() const;
     // Сбои прошлой сессии - между двумя последними kHcStart: итог сессии,
@@ -222,12 +237,12 @@ public:
     Counters previous_session_counters() const { return prev_session_; }
 
     // Кто кого ждёт - для строки журнала при залипании: хост не опрашивает
-    // (вооружено, не подтверждено), плата ждёт окна (awaiting_data) или
-    // вооружать нечего (всё по нулям).
+    // (выставлено, не подтверждено), плата ждёт окна (awaiting_data) или
+    // выставлять нечего (всё по нулям).
     struct StateSnapshot {
         uint8_t armed_code        = 0;
         bool awaiting_ack         = false;
-        uint8_t readiness         = 0; // 0 не готова, 1 готова, 2 объявлена
+        uint8_t readiness         = 0; // Readiness: 0 не готова, 1 готова, 2 объявлена
         bool queued_request       = false;
         bool awaiting_data        = false;
         uint8_t telemetry_dirty   = 0;
@@ -240,10 +255,8 @@ public:
     StateSnapshot state_snapshot() const;
 
     // --- Телеметрия ---
-    // Длительность ещё не известна (крупный .mid дочитывается фоном) -
-    // kTimeUnknown в минутах: хост рисует прочерки и ждёт повторного кадра.
-    // Кадр публикуется без сравнения с прежним, поэтому досылка - просто
-    // второй вызов с настоящим временем.
+    // Длительность неизвестна (проход длительности не влез в память трека) -
+    // kTimeUnknown в минутах и секундах: хост рисует прочерки.
     static constexpr uint8_t kTimeUnknown = 0xff;
     void set_file_info(uint8_t minutes, uint8_t seconds, uint16_t num_samples, uint16_t num_patterns, uint16_t num_instruments);
     // flags - kStatePaused/kStateSeekable поверх состояния.
@@ -252,13 +265,9 @@ public:
     // Запрос управления от хоста; забирает его и обнуляет. Зовёт сеанс.
     TransportOp take_transport_request();
 
-    // Конфигуратор просит пересчитать страницу. Снимается чтением, как и
-    // транспорт: решение принимает цикл сеанса, не прерывание.
-    bool take_config_refresh();
-    // Чем конфигуратор просит кончить. None - не просил.
+    // Чем конфигуратор просит кончить. None - не просил. Снимается чтением,
+    // как и транспорт: решение принимает цикл сеанса, не прерывание.
     ConfigExit take_config_exit();
-    // Ответ конфигуратору: страница пересчитана (или значения отвергнуты).
-    void arm_config_done(bool accepted);
     void set_vu(uint8_t left, uint8_t right);
     void set_spectrum(const uint8_t bands16[16]);
     void set_psram_stats(uint16_t total_samples, uint16_t queued, uint16_t loaded);
@@ -267,6 +276,10 @@ public:
     // peak_voices - максимум, cpu_percent - доля Core0 на звук 0..100,
     // cull_level 0..3 - насколько движок режет голоса при перегрузке.
     void set_engine_load(uint8_t typical_voices, uint8_t peak_voices, uint8_t cpu_percent, uint8_t cull_level);
+    // Метаданные трека: с кадра 0, один раз, после кадра 0x15. nullptr -
+    // метаданных нет, недосланное бросается. Поставщик живёт, пока его не
+    // сменят.
+    void set_track_meta(TrackMetaFn fn, void* user);
 
     // --- Диагностика ---
     enum class DebugEventKind : uint8_t {
@@ -299,6 +312,9 @@ private:
     void rotate_session_counters();
     // Позиция без сравнения с прежней: новой сессии кадр нужен всегда.
     void store_position(uint8_t minutes_bcd, uint8_t seconds_bcd, uint8_t state);
+    // Кадр вида bit (kTelemetry*): новое значение - в dst и в отправку,
+    // прежнее повторно не шлётся.
+    void update_kind(uint8_t* dst, const uint8_t* next, uint8_t n, uint8_t bit);
     void arm_next();
     void arm(uint8_t code, const uint8_t* payload, uint8_t payload_len);
     void rearm();
@@ -306,6 +322,7 @@ private:
     // kMaxNak попыток сдаться.
     void retry_armed();
     void try_arm_telemetry();
+    void arm_track_meta();
     void handle_done();
     void push_debug_event(DebugEventKind kind, uint8_t arg0, uint16_t arg1, uint32_t arg2);
 
@@ -314,7 +331,7 @@ private:
     HideFn hide_fn_ = nullptr;
     void* arm_user_ = nullptr;
 
-    // Команда спрятана: байт команды хоста пришёл во время её вооружения.
+    // Команда спрятана: байт команды хоста пришёл во время её выставления.
     // Возвращается, когда кадр хоста разобран (poll). published_ - за
     // текущий вызов poll команда уже выставлена (arm или rearm).
     bool status_hidden_ = false;
@@ -331,33 +348,25 @@ private:
     bool cmd_drop_                       = false;
     uint32_t cmd_overruns_               = 0;
 
-    // Команда вооружена и ещё не подтверждена. Статус на шине снимает
+    // Команда выставлена и ещё не подтверждена. Статус на шине снимает
     // платформа на первом байте команды хоста, а этот флаг - только
-    // подтверждение. Пока он взведён, вооружать новое нельзя, иначе
+    // подтверждение. Пока он взведён, выставлять новое нельзя, иначе
     // подтверждение достанется не той команде (poll()), и возвращать по
     // NAK или маркеру можно только такую команду (retry_armed).
     bool awaiting_ack_ = false;
 
-    // Последняя вооружённая команда - для перевыставления по "не понял".
+    // Последняя выставленная команда - для перевыставления по "не понял".
     uint8_t armed_code_            = kStNone;
     uint8_t armed_args_[kArgBytes] = {};
     uint8_t armed_len_             = 0;
     uint8_t nak_streak_            = 0;
-    uint32_t nak_total_            = 0;
-    uint32_t nak_giveups_          = 0;
-    uint32_t unknown_commands_     = 0;
-    uint32_t data_short_           = 0;
-    uint32_t short_done_           = 0;
     uint8_t short_streak_          = 0;
-    uint32_t data_overflow_        = 0; // пишет ISR записи
-    uint32_t done_overflow_        = 0;
-    uint32_t arg_overflow_         = 0;
-    uint32_t debug_events_lost_    = 0;
+    Counters cnt_{};          // data_overflow пишет ISR записи, остальное - poll
     Counters session_base_{}; // counters() на последнем kHcStart
     Counters prev_session_{}; // session_counters() на последнем kHcStart
 
     // Готова - mark_session_ready, объявлена хосту - arm_next, один раз.
-    enum class Readiness : uint8_t { NotReady, Ready, Announced };
+    enum class Readiness : uint8_t { NotReady = 0, Ready = 1, Announced = 2 };
     Readiness readiness_        = Readiness::NotReady;
     uint32_t sector_size_bytes_ = 0;
     uint32_t file_length_       = 0;
@@ -383,15 +392,19 @@ private:
     uint8_t position_[3]  = {};
     // Последний запрос управления от хоста; ISR пишет, сеанс забирает.
     TransportOp transport_request_  = TransportOp::None;
-    bool config_refresh_request_    = false;
     ConfigExit config_exit_request_ = ConfigExit::None;
     uint8_t vu_[2]                  = {};
     uint8_t spectrum_[16]           = {};
     uint8_t psram_[6]               = {};
     uint8_t engine_load_[4]         = {};
     static_assert(sizeof(file_info_) <= kMaxPayload && sizeof(spectrum_) <= kMaxPayload && sizeof(psram_) <= kMaxPayload, "the telemetry kind fits the frame");
-    uint8_t telemetry_dirty_  = 0;
-    uint8_t telemetry_cursor_ = 0; // вид, с которого начнётся следующий обход
+    uint8_t telemetry_dirty_     = 0;
+    uint8_t telemetry_cursor_    = 0; // вид, с которого начнётся следующий обход
+    uint8_t telemetry_credit_    = 0; // сколько кадров телеметрии ещё можно впереди ждущего окна
+    TrackMetaFn track_meta_fn_   = nullptr;
+    void* track_meta_user_       = nullptr;
+    uint8_t track_meta_frame_    = 0; // следующий кадр метаданных
+    uint32_t track_meta_giveups_ = 0; // cnt_.nak_giveups на выставлении прошлого кадра
 
     // Пишет poll, читает try_pop_debug_event - один поток Core1.
     DebugEvent debug_events_[kDebugEventCapacity] = {};

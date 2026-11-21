@@ -14,8 +14,10 @@
 #include <cstdint>
 
 #include "platform/os.h"
-#include "player/audio/parked_task.h"
+
 #include "core/engine/tracker_engine.h"
+
+#include "player/audio/parked_task.h"
 
 namespace player::audio {
 

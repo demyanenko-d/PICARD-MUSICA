@@ -28,6 +28,7 @@
 
 #include <cstdint>
 
+#include "core/config.h"
 #include "core/codec/dpcm8.h"
 #include "core/engine/engine_defs.h"
 #include "core/model/instrument.h"
@@ -57,8 +58,12 @@ struct Voice {
     int32_t pitch_memo = 0;
 
     // --- Петля (SampleDescriptor::loop_*, только прямая) ---
-    bool loop_enabled   = false;
-    bool hermite        = false; // эрмитова интерполяция; здесь - в дырке выравнивания
+    bool loop_enabled = false;
+    bool hermite      = false; // эрмитова интерполяция; здесь - в дырке выравнивания
+    bool steps        = false; // лесенка Paula, только Raw8; та же дырка
+    // Голос стойки чипов: отсчёты 1:1 из буфера канала стойки (номер - в
+    // first_page), без PSRAM и интерполяции. Та же дырка.
+    bool stream         = false;
     uint32_t loop_start = 0;
     uint32_t loop_end   = 0; // decoded_count >= loop_end -> перемотка на loop_start (не на конец сэмпла)
     // Позиция декодера на отсчёте loop_start, ставится один раз на голос.
@@ -101,13 +106,20 @@ static_assert(sizeof(Voice) == 60, "Voice: fields were reordered or added - reco
 // всем звучащим голосам выставляет синхронизация того же тика, до рендера.
 // Эрмитова интерполяция этого сэмпла: у Raw16 её нет, он играет линейно.
 inline bool voice_hermite(const soundsinth::model::SampleDescriptor& sample, soundsinth::model::QuirkFlags quirks) {
+#if SOUNDSINTH_INTERP_HERMITE
     return (quirks & soundsinth::model::kQuirkHermiteInterpolation) != 0 && sample.resident_encoding != soundsinth::model::ResidentEncoding::Raw16;
+#else
+    (void)sample;
+    (void)quirks;
+    return false;
+#endif
 }
 
 struct TriggerStart {
     bool sounds     = false;
     bool loop_ok    = false;
-    uint32_t offset = 0; // отсчёт начала, уже с правилами формата
+    bool steps      = false; // лесенка Paula (kQuirkPaulaSteps у сэмпла Raw8)
+    uint32_t offset = 0;     // отсчёт начала, уже с правилами формата
 };
 TriggerStart voice_trigger_start(const soundsinth::model::SampleDescriptor& sample, uint16_t first_page, uint32_t start_offset,
                                  soundsinth::model::QuirkFlags quirks);
@@ -121,6 +133,12 @@ void voice_trigger_prepared(Voice& voice, memory::PsramStore& psram, const sound
 void voice_trigger(Voice& voice, memory::PsramStore& psram, const soundsinth::model::SampleDescriptor& sample, uint16_t first_page, uint8_t note,
                    soundsinth::model::FrequencyModel frequency_model, uint32_t start_offset = 0, soundsinth::model::QuirkFlags quirks = 0,
                    uint16_t checkpoint_first_page = memory::kPageChainEnd, bool set_step = true);
+
+// Перевод голоса с петли удержания на обычную (Note-Off, IT): параметры -
+// из Song::SusRelease, у незацикленного loop_end - конец данных. Позиция не
+// трогается. Dpcm8 позади новой точки петли ставит её по цепочке
+// контрольных точек сразу; без цепочки петля снимается.
+void voice_release_sustain(Voice& voice, memory::PsramStore& psram, uint32_t loop_start, uint32_t loop_end, bool loop_enabled, uint16_t checkpoint_first_page);
 
 // Пересчёт step по кэшу питча. Не встраиваются, лежат во флеше: зовутся,
 // только когда питч сдвинулся.
@@ -170,6 +188,13 @@ inline void voice_set_linear_pitch(Voice& voice, int32_t amount_units, uint32_t 
 // voice.active = false. У зацикленного всегда n_frames, пока голос не
 // остановят извне.
 uint32_t voice_render(Voice& voice, memory::PsramStore& psram, int16_t* out, uint32_t n_frames);
+
+// Без интерполяции, лесенкой: родной отсчёт держится до следующего, как у
+// Paula Амиги. Только рендер на ПК: на плате три лишних варианта прохода
+// заняли бы SRAM.
+#if SOUNDSINTH_INTERP_HOLD
+void voice_set_hold_render(bool on);
+#endif
 
 // Диагностические счётчики голоса с последнего сброса. Пишет только
 // рендер, читает диагностика того же ядра.

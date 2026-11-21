@@ -86,6 +86,22 @@ bool pack_file_pcm(memory::TrackMemory& mem, formats::BinaryReader& r, const Sam
     }
     if (sd.unsupported_codec) return fail("ModPlug-ADPCM is not supported");
     if (sd.source_length_samples == 0) return fail("zero length");
+    // Знаковый 8-битный PCM в Raw8 - байт в байт как в файле. Если источник
+    // держит эти байты страницами с начала страницы (приём GS), цепочка
+    // сэмпла - его страницы, копии нет.
+    if (e == SampleEncoding::Pcm8 && sd.signed_pcm && sd.resident_encoding == ResidentEncoding::Raw8 && !sd.decimated && sd.loop_unroll == LoopUnroll::None &&
+        r.source().pages_at != nullptr) {
+        const uint16_t first = r.source().pages_at(r.source().self, sd.file_offset, sd.source_length_samples);
+        if (first != memory::kPsramNoPage) {
+            const uint32_t pages = (sd.source_length_samples + memory::kPsramPageBytes - 1u) / memory::kPsramPageBytes;
+            for (uint32_t i = 0; i < pages; ++i) {
+                memory::psram_set_next(mem.psram, static_cast<uint16_t>(first + i),
+                                       i + 1u < pages ? static_cast<uint16_t>(first + i + 1u) : memory::kPageChainEnd);
+            }
+            if (memory::sample_cache_alloc_slot(mem.sample_cache, sample_index, first) != nullptr) return true;
+            return fail(memory::kSampleCatalogFull);
+        }
+    }
     if (!resident_pages_fit(mem, sd)) return fail(kPsramFull);
     if (!r.seek(sd.file_offset)) return fail("cannot seek to sample data");
 

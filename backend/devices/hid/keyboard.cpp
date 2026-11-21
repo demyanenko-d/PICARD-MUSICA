@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: MIT
 #include "devices/hid/keyboard.h"
 
-#include "devices/hal/z80_ports.h"
 #include "platform/compiler.h"
+
+#include "devices/hal/z80_ports.h"
 
 namespace devices::hid {
 namespace {

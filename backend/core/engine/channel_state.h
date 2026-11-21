@@ -249,7 +249,8 @@ struct ChannelState {
     // filter_cutoff/filter_resonance - текущие значения канала (0..127), а не
     // поля инструмента: на триггере берутся из инструмента (или 127/0, если
     // тот их не задаёт; у .mid - с поправкой на velocity и высоту ноты),
-    // эффекты их не меняют: Zxx и MIDI-макросы не исполняются. 127 + 0 -
+    // Zxx меняет их: параметрический - по классу Song::sfx_macro, фиксированный
+    // загрузчик IT разобрал в SetFilterCutoff/SetFilterResonance. 127 + 0 -
     // фильтра нет, коэффициенты не считаются.
     //
     // filter_env_modifier - вклад огибающей, -256..+256, +256 - нейтраль. Из
@@ -261,6 +262,13 @@ struct ChannelState {
     uint8_t filter_cutoff                              = kFilterCutoffOpen;
     uint8_t filter_resonance                           = 0;
     int16_t filter_env_modifier                        = kFilterEnvNeutral;
+    // Выбранный параметрический макрос для Zxx < 0x80 (S3M/IT SFx), 0..15.
+    uint8_t active_macro = 0;
+    // Автовибрато сэмпла: фаза (младший байт - позиция волны) и накопленная
+    // развёрткой глубина (1/256 шага). Сбрасываются на Note-Trigger, с
+    // копией ChannelState уезжают в фон NNA.
+    uint16_t auto_vib_pos   = 0;
+    uint16_t auto_vib_depth = 0;
 
     // NoteDelay (MOD/XM EDx, S3M/IT SDx): вся ячейка (нота, инструмент,
     // громкость, эффект) откладывается до заданного тика строки, на тике 0
@@ -270,9 +278,11 @@ struct ChannelState {
     uint16_t delayed_cell_tick = 0;
 };
 // 96 слотов (SOUNDSINTH_MAX_SLOTS) в SRAM: рост ловит компилятор, а не
-// замер. Поля внутри групп стоят так, чтобы дырок выравнивания было меньше
-// (сейчас 2 байта). Только при 4-байтовом указателе - на ПК x64 размер свой.
-static_assert(sizeof(void*) != 4 || sizeof(ChannelState) == 156, "ChannelState has grown: 96 slots in SRAM");
+// замер. Поля внутри групп стоят так, чтобы дырок выравнивания было меньше.
+// 156 -> 160 с active_macro, -> 164 с автовибрато (2026-11-08): структура
+// упакована без дыр, байт стоит 4 на слот. Только при 4-байтовом
+// указателе - на ПК x64 размер свой.
+static_assert(sizeof(void*) != 4 || sizeof(ChannelState) == 164, "ChannelState has grown: 96 slots in SRAM");
 
 // Отпускание ноты: Note-Off, NNA Off, DCA Off. У IT (it_rules) снимает
 // удержание огибающих, а затухание включает сразу только без огибающей

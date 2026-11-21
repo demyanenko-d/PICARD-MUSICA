@@ -15,14 +15,14 @@
 
 namespace devices::zcontroller {
 
-constexpr uint8_t kPortData = 0x57;
-constexpr uint8_t kPortCtrl = 0x77;
+inline constexpr uint8_t kPortData = 0x57;
+inline constexpr uint8_t kPortCtrl = 0x77;
 
 // Чтение порта управления. Значащий разряд - первый: драйвер WC делает
 // IN A,(0x77) : AND 2 : RET NZ. Незанятые разряды читаются единицами, как
 // у рабочего контроллера на этой плате.
-constexpr uint8_t kCtrlCardPresent = 0xfc;
-constexpr uint8_t kCtrlNoCard      = 0xfe;
+inline constexpr uint8_t kCtrlCardPresent = 0xfc;
+inline constexpr uint8_t kCtrlNoCard      = 0xfe;
 
 // Зарегистрировать порты. Звать после того, как шина готова принимать
 // обработчики, и после storage_init(). Эмулятор карты общий: поднимается,
@@ -34,7 +34,7 @@ void zcontroller_init();
 // эмулятора, карту вынимают), а драйвер хоста, увидевший "карты нет",
 // команд больше не шлёт.
 //
-// Стоит два чтения готовых признаков; к носителю не обращается, шину не
+// Читает готовый снимок носителя; к носителю не обращается, шину не
 // задерживает.
 void zcontroller_tick();
 

@@ -31,7 +31,7 @@ Settings preset_tsconfig() {
 Settings preset_trdos() {
     Settings s;
     s.disksys         = static_cast<uint8_t>(soundsinth::config::DiskSys::TrDos);
-    s.zcontroller     = 1;
+    s.zcontroller     = static_cast<uint8_t>(soundsinth::config::Media::Sd);
     s.keyboard_layout = static_cast<uint8_t>(Layout::Picard);
     s.usb_mouse       = 1;
     s.usb_gamepad     = 1;
@@ -43,7 +43,8 @@ Settings preset_trdos() {
 Settings preset_divmmc() {
     Settings s;
     s.disksys         = static_cast<uint8_t>(soundsinth::config::DiskSys::DivMmc);
-    s.zcontroller     = 1;
+    s.divmmc_card1    = static_cast<uint8_t>(soundsinth::config::Media::Sd);
+    s.zcontroller     = static_cast<uint8_t>(soundsinth::config::Media::Sd);
     s.keyboard_layout = static_cast<uint8_t>(Layout::Picard);
     s.usb_mouse       = 1;
     s.usb_gamepad     = 1;

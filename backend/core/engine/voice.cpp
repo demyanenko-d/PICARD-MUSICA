@@ -6,6 +6,7 @@
 
 #include "platform/compiler.h"
 #include "platform/hot_path.h"
+
 #include "core/codec/block_locate.h"
 #include "core/engine/engine_defs.h"
 #include "core/model/amiga_period.h"
@@ -388,6 +389,7 @@ TriggerStart voice_trigger_start(const soundsinth::model::SampleDescriptor& samp
     // длина петли ноль или "отрицательная".
     s.loop_ok = sample.loop_enabled && sample.loop_start < sample.loop_end && sample.loop_end <= sample.length_samples;
     s.sounds  = resolve_start_offset(sample, quirks, s.loop_ok, s.offset);
+    s.steps   = (quirks & soundsinth::model::kQuirkPaulaSteps) != 0 && sample.resident_encoding == ResidentEncoding::Raw8;
     return s;
 }
 
@@ -399,6 +401,7 @@ void voice_trigger_prepared(Voice& voice, memory::PsramStore& psram, const sound
 
     voice.resident_encoding = sample.resident_encoding;
     voice.hermite           = hermite;
+    voice.steps             = start.steps;
     voice.first_page        = first_page;
     voice.page              = first_page;
 
@@ -412,6 +415,26 @@ void voice_trigger_prepared(Voice& voice, memory::PsramStore& psram, const sound
     prime_interpolation(voice, psram, sample.length_samples);
 
     voice.active = true;
+}
+
+void voice_release_sustain(Voice& voice, memory::PsramStore& psram, uint32_t loop_start, uint32_t loop_end, bool loop_enabled, uint16_t checkpoint_first_page) {
+    if (!voice.active) return;
+    voice.loop_enabled             = loop_enabled;
+    voice.loop_start               = loop_start;
+    voice.loop_end                 = loop_end; // у незацикленного - конец данных
+    voice.loop_checkpoint_captured = false;
+    // Точка новой петли: позиция до loop_start - встанет проходом (Dpcm8)
+    // или на завороте (прямые кодеки, direct_loop_checkpoint). Dpcm8 позади
+    // loop_start проходом её уже не встретит - точка ставится сейчас.
+    if (!loop_enabled || voice.decoded_count <= loop_start) return;
+    if (soundsinth::model::resident_is_direct(voice.resident_encoding)) return;
+    if (checkpoint_first_page == memory::kPageChainEnd) {
+        voice.loop_enabled = false; // синтетика без контрольных точек: назад не доехать, доигрывает до конца
+        return;
+    }
+    const SeekPosition p             = seek_dpcm8(psram, voice.first_page, checkpoint_first_page, loop_start);
+    voice.loop_checkpoint_dpcm_state = p.state;
+    mark_loop_checkpoint(voice, p.page, p.byte_offset);
 }
 
 void voice_trigger(Voice& voice, memory::PsramStore& psram, const soundsinth::model::SampleDescriptor& sample, uint16_t first_page, uint8_t note,
@@ -622,11 +645,20 @@ SOUNDSINTH_ALWAYS_INLINE uint32_t render_dpcm8_segment(Voice& voice, memory::Psr
 // выходной отсчёт три сравнения resident_encoding с ветвлениями и чтение
 // поля, хотя кодек голоса не меняется.
 //
-// kHermite - интерполяция по четырём точкам (Voice::hermite). Сколько
-// последних родных отсчётов она берёт (kUsed), столько быстрые пути ниже
-// оставляют обычному проходу, который сдвигает окно.
-template <ResidentEncoding kEnc, bool kHermite>
+enum class Interp : uint8_t { Linear, Hermite, Hold };
+
+#if SOUNDSINTH_INTERP_HOLD
+bool s_hold_render = false;
+#endif
+
+// kMode - вид интерполяции. Эрмитова берёт четыре точки (Voice::hermite);
+// сколько последних родных отсчётов она берёт (kUsed), столько быстрые пути
+// ниже оставляют обычному проходу, который сдвигает окно. Hold - без
+// интерполяции: родной отсчёт держится до следующего, как у Paula Амиги.
+template <ResidentEncoding kEnc, Interp kMode>
 uint32_t SOUNDSINTH_HOT_PATH(voice_render_impl)(Voice& voice, memory::PsramStore& psram, int16_t* out, uint32_t n_frames) {
+    constexpr bool kHermite    = kMode == Interp::Hermite;
+    constexpr bool kLinear     = kMode == Interp::Linear;
     constexpr uint32_t kUsed   = kHermite ? 4u : 2u;
     constexpr bool kDirect     = soundsinth::model::resident_is_direct(kEnc);
     constexpr uint32_t kStride = soundsinth::model::resident_bytes_per_sample(kEnc);
@@ -634,17 +666,19 @@ uint32_t SOUNDSINTH_HOT_PATH(voice_render_impl)(Voice& voice, memory::PsramStore
     constexpr uint32_t kFastPathMinFrac = (kUsed + 1u) << kQ16Bits;
     uint32_t produced                   = 0;
     while (produced < n_frames && voice.active) {
-        if constexpr (kDirect && !kHermite) {
+        if constexpr (kDirect && kLinear) {
             produced += render_direct_segment<kEnc>(voice, psram, out + produced, n_frames - produced);
             if (produced >= n_frames || !voice.active) break;
-        } else if constexpr (kEnc == ResidentEncoding::Dpcm8 && !kHermite) {
+        } else if constexpr (kEnc == ResidentEncoding::Dpcm8 && kLinear) {
             produced += render_dpcm8_segment(voice, psram, out + produced, n_frames - produced);
             if (produced >= n_frames || !voice.active) break;
         }
         if constexpr (kHermite) {
             out[produced++] = interpolate_hermite(voice);
-        } else {
+        } else if constexpr (kLinear) {
             out[produced++] = interpolate_linear(voice);
+        } else {
+            out[produced++] = voice.prev_sample;
         }
 
         voice.frac_pos += voice.step;
@@ -777,23 +811,45 @@ uint32_t SOUNDSINTH_HOT_PATH(voice_render_impl)(Voice& voice, memory::PsramStore
     return produced;
 }
 
+#if SOUNDSINTH_INTERP_HOLD
+void voice_set_hold_render(bool on) {
+    s_hold_render = on;
+}
+#endif
+
 // Диспетчер: один switch на вызов вместо трёх сравнений на отсчёт.
 // Эрмитовы варианты - только Raw8 и Dpcm8 (у банков .mid других кодеков
 // нет); voice_trigger не ставит hermite голосу с Raw16.
 uint32_t SOUNDSINTH_HOT_PATH(voice_render)(Voice& voice, memory::PsramStore& psram, int16_t* out, uint32_t n_frames) {
+#if SOUNDSINTH_INTERP_HOLD
+    if (s_hold_render) {
+        switch (voice.resident_encoding) {
+            case ResidentEncoding::Raw8:
+                return voice_render_impl<ResidentEncoding::Raw8, Interp::Hold>(voice, psram, out, n_frames);
+            case ResidentEncoding::Raw16:
+                return voice_render_impl<ResidentEncoding::Raw16, Interp::Hold>(voice, psram, out, n_frames);
+            case ResidentEncoding::Dpcm8:
+                return voice_render_impl<ResidentEncoding::Dpcm8, Interp::Hold>(voice, psram, out, n_frames);
+        }
+    }
+#endif
+    // Лесенка Paula у MOD: steps ставится только сэмплу Raw8.
+    if (voice.steps) return voice_render_impl<ResidentEncoding::Raw8, Interp::Hold>(voice, psram, out, n_frames);
+#if SOUNDSINTH_INTERP_HERMITE
     if (voice.hermite) {
         if (voice.resident_encoding == ResidentEncoding::Dpcm8) {
-            return voice_render_impl<ResidentEncoding::Dpcm8, true>(voice, psram, out, n_frames);
+            return voice_render_impl<ResidentEncoding::Dpcm8, Interp::Hermite>(voice, psram, out, n_frames);
         }
-        return voice_render_impl<ResidentEncoding::Raw8, true>(voice, psram, out, n_frames);
+        return voice_render_impl<ResidentEncoding::Raw8, Interp::Hermite>(voice, psram, out, n_frames);
     }
+#endif
     switch (voice.resident_encoding) {
         case ResidentEncoding::Raw8:
-            return voice_render_impl<ResidentEncoding::Raw8, false>(voice, psram, out, n_frames);
+            return voice_render_impl<ResidentEncoding::Raw8, Interp::Linear>(voice, psram, out, n_frames);
         case ResidentEncoding::Raw16:
-            return voice_render_impl<ResidentEncoding::Raw16, false>(voice, psram, out, n_frames);
+            return voice_render_impl<ResidentEncoding::Raw16, Interp::Linear>(voice, psram, out, n_frames);
         case ResidentEncoding::Dpcm8:
-            return voice_render_impl<ResidentEncoding::Dpcm8, false>(voice, psram, out, n_frames);
+            return voice_render_impl<ResidentEncoding::Dpcm8, Interp::Linear>(voice, psram, out, n_frames);
     }
     return 0;
 }

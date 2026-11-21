@@ -237,6 +237,31 @@ typedef struct {
 static uint8_t _usbh_controller_id = TUSB_INDEX_INVALID_8;
 static usbh_data_t _usbh_data;
 
+// SoundSinth: a failed enumeration behind a hub is repeated. Stock TinyUSB only
+// re-arms the hub status poll; the port connection change is already cleared,
+// and the device stays unseen until replugged. A USB drive behind the on-board
+// hub misses the first enumeration after power-on.
+enum {
+  ENUM_RETRY_DELAY_MS = 500,
+  ENUM_RETRY_LIMIT    = 3,
+  ENUM_RETRY_PORTS    = 4,
+};
+
+typedef struct {
+  tuh_bus_info_t bus;
+  uint32_t       at_ms;
+  uint8_t        count;
+  bool           used;
+  bool           armed;
+} enum_retry_t;
+
+static enum_retry_t _enum_retry[ENUM_RETRY_PORTS];
+static uint8_t      _enum_stage; // last enumeration step, delay steps with bit 7
+
+uint32_t soundsinth_enum_failed;
+uint32_t soundsinth_enum_retried;
+uint8_t  soundsinth_enum_fail_stage;
+
 typedef struct {
   TUH_EPBUF_TYPE_DEF(tusb_control_request_t, request);
   TUH_EPBUF_DEF(ctrl, CFG_TUH_ENUMERATION_BUFSIZE);
@@ -368,6 +393,11 @@ TU_ATTR_ALWAYS_INLINE static inline usbh_class_driver_t const *get_driver(uint8_
 static void enum_new_device(hcd_event_t* event);
 static void enum_delay_async(uintptr_t state);
 static void process_remove_event(hcd_event_t *event);
+#if CFG_TUH_HUB
+static bool enum_retry_due(void);
+static void enum_retry_run(void);
+static void enum_retry_forget(const hcd_event_t *event);
+#endif
 static void remove_device_tree(uint8_t rhport, uint8_t hub_addr, uint8_t hub_port);
 
 static bool usbh_edpt_control_open(uint8_t dev_addr, uint8_t max_packet_size);
@@ -687,6 +717,12 @@ bool tuh_task_event_ready(void) {
     }
   }
 
+  #if CFG_TUH_HUB
+  if (enum_retry_due()) {
+    return true;
+  }
+  #endif
+
   return false;
 }
 
@@ -753,6 +789,22 @@ void tuh_task_ext(uint32_t timeout_ms, bool in_isr) {
       }
     }
 
+  #if CFG_TUH_HUB
+    if (enum_retry_due()) {
+      enum_retry_run();
+    }
+    for (unsigned i = 0; i < ENUM_RETRY_PORTS; i++) {
+      if (_enum_retry[i].armed) {
+        const int32_t remain_ms = (int32_t)(_enum_retry[i].at_ms - tusb_time_millis_api());
+        if (remain_ms <= 0) {
+          timeout_ms = 0;
+        } else if (timeout_ms > (uint32_t)remain_ms) {
+          timeout_ms = (uint32_t)remain_ms;
+        }
+      }
+    }
+  #endif
+
     // Drain pending async control xfers. Slot transitions and dispatch are
     // decoupled: completion / abort / device_close set stage = IDLE via
     // control_xfer_set_stage() and the actual FIFO drain happens here in the
@@ -805,6 +857,9 @@ void tuh_task_ext(uint32_t timeout_ms, bool in_isr) {
 
       case HCD_EVENT_DEVICE_REMOVE:
         TU_LOG_USBH("[%u:%u:%u] USBH Device Removed\r\n", event.rhport, event.connection.hub_addr, event.connection.hub_port);
+  #if CFG_TUH_HUB
+        enum_retry_forget(&event);
+  #endif
         process_remove_event(&event);
         break;
 
@@ -1695,7 +1750,9 @@ enum {                                      // USB 2.0 specs 7.1.7 for timing
   ENUM_RESET_ROOT_DELAY_MS           = 50,  // T(DRSTr)  minimum 50 ms for reset from root port
   ENUM_RESET_ROOT_POST_DELAY_MS      = 2,   // 2 ms delay after root port reset before getting speed/status
   ENUM_RESET_HUB_DELAY_MS            = 20,  // T(DRST)   10-20 ms for hub reset
-  ENUM_RESET_RECOVERY_DELAY_MS       = 10,  // T(RSTRCY) minimum 10 ms for reset recovery
+  // SoundSinth: 100 ms instead of the 10 ms minimum - devices behind the
+  // on-board hub do not answer the first SETUP after 10 ms (hathach/tinyusb#3876).
+  ENUM_RESET_RECOVERY_DELAY_MS       = 100, // T(RSTRCY) minimum 10 ms for reset recovery
   ENUM_SET_ADDRESS_RECOVERY_DELAY_MS = 2,   // USB 2.0 Spec 9.2.6.3 min is 2 ms
 };
 
@@ -1741,6 +1798,7 @@ enum {
 // process async delay in enumeration
 static void enum_delay_async(uintptr_t state) {
   tuh_bus_info_t *dev0_bus = &_usbh_data.dev0_bus;
+  _enum_stage = (uint8_t) (0x80u | state);
   switch (state) {
     case ENUM_AFTER_DEBOUNCING_DELAY:
   #if CFG_TUH_HUB
@@ -1841,6 +1899,7 @@ static void enum_new_device(hcd_event_t *event) {
 
 // process device enumeration
 static void process_enumeration(tuh_xfer_t *xfer) {
+  _enum_stage = (uint8_t) xfer->user_data;
   if (XFER_RESULT_FAILED == xfer->result) {
     enum_full_complete(false); // failed to enum
     return;
@@ -2240,7 +2299,107 @@ static void enum_full_complete(bool success) {
   if (!success && _usbh_data.dev0_bus.hub_addr != 0) {
     hub_edpt_status_xfer(_usbh_data.dev0_bus.hub_addr);
   }
+
+  const tuh_bus_info_t *bus = &_usbh_data.dev0_bus;
+  if (bus->hub_addr == 0) {
+    return;
+  }
+  enum_retry_t *slot = NULL;
+  enum_retry_t *free_slot = NULL;
+  for (unsigned i = 0; i < ENUM_RETRY_PORTS; i++) {
+    enum_retry_t *r = &_enum_retry[i];
+    if (!r->used) {
+      if (free_slot == NULL) {
+        free_slot = r;
+      }
+    } else if (r->bus.rhport == bus->rhport && r->bus.hub_addr == bus->hub_addr &&
+               r->bus.hub_port == bus->hub_port) {
+      slot = r;
+    }
+  }
+  if (success) {
+    if (slot != NULL) {
+      slot->used  = false;
+      slot->armed = false;
+    }
+    return;
+  }
+  soundsinth_enum_failed++;
+  soundsinth_enum_fail_stage = _enum_stage;
+  if (slot == NULL) {
+    slot = free_slot;
+    if (slot == NULL) {
+      return;
+    }
+    slot->bus   = *bus;
+    slot->count = 0;
+    slot->used  = true;
+  }
+  // After the limit the slot stays used and blocks more retries until the
+  // port reports a removal.
+  if (slot->count < ENUM_RETRY_LIMIT) {
+    slot->count++;
+    slot->armed = true;
+    slot->at_ms = tusb_time_millis_api() + ENUM_RETRY_DELAY_MS;
+  }
   #endif
 }
+
+#if CFG_TUH_HUB
+static enum_retry_t *enum_retry_next(void) {
+  if (_usbh_data.enumerating_daddr != TUSB_INDEX_INVALID_8) {
+    return NULL;
+  }
+  for (unsigned i = 0; i < ENUM_RETRY_PORTS; i++) {
+    enum_retry_t *r = &_enum_retry[i];
+    if (r->armed && (int32_t) (r->at_ms - tusb_time_millis_api()) <= 0) {
+      return r;
+    }
+  }
+  return NULL;
+}
+
+static bool enum_retry_due(void) {
+  return enum_retry_next() != NULL;
+}
+
+// Same event as the hub driver sends on a port connection change; the
+// enumeration reads the port status first and stops if nothing is connected.
+static void enum_retry_run(void) {
+  enum_retry_t *r = enum_retry_next();
+  if (r == NULL) {
+    return;
+  }
+  r->armed = false;
+  const usbh_device_t *hub = get_device(r->bus.hub_addr);
+  if (hub == NULL || !hub->connected) {
+    r->used = false;
+    return;
+  }
+  soundsinth_enum_retried++;
+  const hcd_event_t event = {
+    .rhport     = r->bus.rhport,
+    .event_id   = HCD_EVENT_DEVICE_ATTACH,
+    .connection = {
+      .hub_addr = r->bus.hub_addr,
+      .hub_port = r->bus.hub_port
+    }
+  };
+  hcd_event_handler(&event, false);
+}
+
+// Port 0 or hub address 0 in a removal covers every port below it.
+static void enum_retry_forget(const hcd_event_t *event) {
+  for (unsigned i = 0; i < ENUM_RETRY_PORTS; i++) {
+    enum_retry_t *r = &_enum_retry[i];
+    if (r->used && r->bus.rhport == event->rhport &&
+        (event->connection.hub_addr == 0 || r->bus.hub_addr == event->connection.hub_addr) &&
+        (event->connection.hub_port == 0 || r->bus.hub_port == event->connection.hub_port)) {
+      r->used  = false;
+      r->armed = false;
+    }
+  }
+}
+#endif
 
 #endif

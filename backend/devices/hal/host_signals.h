@@ -33,4 +33,8 @@ void host_hard_reset_request();
 // другое ПЗУ. Играющий трек теряется.
 void host_configurator_request();
 
+// Остановить музыку, которую плата играет без хоста (F10), машину не
+// сбрасывая.
+void host_music_stop_request();
+
 } // namespace devices::hal

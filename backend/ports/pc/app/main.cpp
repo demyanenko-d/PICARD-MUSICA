@@ -4,7 +4,6 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include "core/codec/pattern_reader.h"
 #include <filesystem>
 #include <fstream>
 #include <new>
@@ -24,12 +23,8 @@
 #include "ff.h"
 
 #include "platform/memory.h"
-#include "pc/fatfs_disk.h"
-#include "pc/sdl_sink.h"
-#include "pc/wav_writer.h"
-#include "sine_source.h"
-#include "player/audio/buffer_pool.h"
-#include "player/config.h"
+#include "platform/clock.h"
+
 #include "core/engine/sequencer.h"
 #include "core/engine/song_duration.h"
 #include "core/engine/tracker_engine.h"
@@ -38,24 +33,44 @@
 #include "core/formats/load_stats.h"
 #include "core/formats/it.h"
 #include "core/formats/midi.h"
-#include "platform/clock.h"
-#include "player/load/sample_prefetch.h"
 #include "core/formats/mod.h"
 #include "core/formats/s3m.h"
 #include "core/formats/xm.h"
 #include "core/formats/memory_byte_source.h"
+#include "core/memory/scratch_arena.h" // g_max_scratch_used - замер границы scratch-арены
+#include "core/memory/track_memory.h"
+#include "core/audio/mixbus.h"
+#include "core/codec/pattern_reader.h"
+#include "core/util/inflate.h"
+#include "core/codec/pattern_packer.h" // g_max_dict_bytes - замер границ упаковщика
+
+#include "player/audio/buffer_pool.h"
+#include "player/config.h"
+#include "player/load/sample_prefetch.h"
 #include "player/protocol/host_protocol.h"
 #include "player/load/progressive_loader.h"
 #include "player/load/session_loader.h"
 #include "player/shared_state.h"
-#include "core/memory/scratch_arena.h" // g_max_scratch_used - замер границы scratch-арены
-#include "core/memory/track_memory.h"
-#include "core/audio/mixbus.h"
-#include "core/codec/pattern_packer.h" // g_max_dict_bytes - замер границ упаковщика
 #include "player/audio/render_task.h"
 #include "player/audio/sequencer_task.h"
+#include "player/vgm/vgm_track.h"
+
+#include "pc/fatfs_disk.h"
+#include "pc/sdl_sink.h"
+#include "pc/wav_writer.h"
+#include "sine_source.h"
 
 namespace {
+
+// Глубина разводки каналов MOD в процентах, как MOD_PANNING на плате.
+uint8_t g_mod_pan = 100;
+// Лесенка у MOD через настройку движка, как MOD_INTERPOLATION=0 на плате.
+bool g_mod_steps = false;
+// Срез ФВЧ выхода, Гц; меньше нуля - как задала песня.
+int32_t g_highpass_hz = -1;
+// --auto-volume - авторегулировка громкости шины, как настройка AUTO_VOLUME
+// платы.
+bool g_auto_volume = false;
 
 constexpr uint32_t kSampleRate = 44100;
 
@@ -101,7 +116,8 @@ struct AppArgs {
     // просит эрмитову (kQuirkHermiteInterpolation, .mid): для сравнения на
     // слух и замером.
     bool linear_interp     = false;
-    int32_t comp_threshold = 0; // --comp; 0 - ключа нет, ступень лимитера выключена
+    bool hermite_interp    = false; // эрмитова и там, где формат её не ставит
+    int32_t comp_threshold = 0;     // --comp; 0 - ключа нет, ступень лимитера выключена
     int32_t comp_amount    = 0;
     // --sample-report - построчно: что загрузчик просил у банка, сколько
     // это весит и чем кончилось. По сводке "не загрузилось N" не видно,
@@ -137,6 +153,8 @@ struct AppArgs {
     // обязан совпасть с рендером ФАЙЛА на свежих объектах: разница -
     // состояние, перешедшее от прошлого трека.
     const char* then_path = nullptr;
+    // Образ ПЗУ ритм-сэмплов YM2608 (8192 байта) для журналов VGM.
+    const char* rhythm_rom_path = nullptr;
 };
 
 // Порог мягкого насыщения из --soft-knee поверх умолчания шины; без ключа
@@ -730,6 +748,74 @@ void play_live(soundsinth::mixbus::MixBus& bus, player::audio::BufferPool& pool,
 // Единственная прикладная FreeRTOS-задача. Аргументы разбирает main;
 // задача готовит кольцо/mixbus/тестовый источник и запускает нужный
 // режим.
+// Авторегулировка шины по ключу --auto-volume: пики держит лимитер,
+// компрессор остаётся только там, где его включает формат.
+void bus_auto_volume(soundsinth::mixbus::MixBus& bus, bool format_limiter) {
+    if (!g_auto_volume) return;
+    bus.set_auto_volume(true);
+    bus.set_limiter(true);
+    if (!format_limiter) bus.set_compressor(SOUNDSINTH_MIDI_COMPRESSOR_THRESHOLD, 0);
+}
+
+// Журнал записей в чипы (VGM или VGZ) вместо песни, загрузчиком платы: файл
+// в PSRAM трека, плеер в арене.
+void play_vgm(const AppArgs* args, soundsinth::memory::TrackMemory& mem, soundsinth::mixbus::MixBus& bus, player::audio::BufferPool& pool) {
+    static std::vector<uint8_t> rhythm;
+    if (args->rhythm_rom_path != nullptr) {
+        std::ifstream rom(args->rhythm_rom_path, std::ios::binary);
+        rhythm.assign((std::istreambuf_iterator<char>(rom)), std::istreambuf_iterator<char>());
+        if (rhythm.size() != player::vgm::kRhythmRomBytes) {
+            std::fprintf(stderr, "%s: the YM2608 rhythm ROM is %u bytes\n", args->rhythm_rom_path, static_cast<unsigned>(player::vgm::kRhythmRomBytes));
+            std::exit(1);
+        }
+        player::vgm::set_rhythm_rom(rhythm.data());
+    }
+    std::ifstream in(args->play_file_path, std::ios::binary);
+    static std::vector<uint8_t> file((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    soundsinth::formats::MemoryByteSource src(file.data(), static_cast<uint32_t>(file.size()));
+    const char* error                = nullptr;
+    player::vgm::Player* const track = player::vgm::load_track(src.as_byte_source(), mem, &error);
+    if (track == nullptr) {
+        std::fprintf(stderr, "%s: %s\n", args->play_file_path, error);
+        std::exit(1);
+    }
+    player::vgm::Player& vgm      = *track;
+    const player::vgm::Info& info = vgm.info();
+    std::printf("vgm: version %x.%02x, %u bytes, %.1f s%s, chip memory %u B\n", static_cast<unsigned>(info.version >> 8),
+                static_cast<unsigned>(info.version & 0xffu), static_cast<unsigned>(file.size()), static_cast<double>(info.total_samples) / kSampleRate,
+                info.loop_start != 0 ? " with a loop" : "", static_cast<unsigned>(player::vgm::Player::memory_need(info)));
+    for (uint32_t i = 0; i < info.count; i++) {
+        std::printf("vgm: chip %s%s at %u Hz, volume %u/256, SSG %u/256\n", player::vgm::chip_name(info.chips[i].kind), info.chips[i].second ? " (second)" : "",
+                    static_cast<unsigned>(info.chips[i].clock), static_cast<unsigned>(info.chips[i].volume), static_cast<unsigned>(info.chips[i].ssg_volume));
+    }
+    if (info.unsupported != nullptr) std::printf("vgm: %s is in the file and stays silent\n", info.unsupported);
+    char tag[3][48];
+    const bool named = vgm.tag(0, tag[0], sizeof(tag[0])) | vgm.tag(2, tag[1], sizeof(tag[1])) | vgm.tag(4, tag[2], sizeof(tag[2]));
+    if (named) std::printf("vgm: \"%s\" - %s (%s)\n", tag[0], tag[1], tag[2]);
+    static soundsinth::mixbus::SoundSource source;
+    source.self       = &vgm;
+    source.render_add = +[](void* self, int32_t* l, int32_t* r, uint32_t n) { static_cast<player::vgm::Player*>(self)->render_add(l, r, n); };
+    bus.start_track();
+    bus.add_source(&source);
+    bus.set_highpass_hz(g_highpass_hz >= 0 ? static_cast<uint32_t>(g_highpass_hz) : soundsinth::mixbus::MixBus::kHighpassHz, soundsinth::engine::kSampleRateHz);
+    bus_auto_volume(bus, false);
+    const uint32_t frames = args->seconds_explicit ? static_cast<uint32_t>(args->seconds * kSampleRate) : player::vgm::track_frames(vgm);
+    // Конец трека, как на плате: последние секунды гаснут.
+    if (!args->seconds_explicit) {
+        bus.set_end_frame(frames);
+        bus.set_end_fade(player::vgm::track_fade_frames(vgm));
+    }
+    if (args->wav_path) {
+        render_to_wav(bus, args->wav_path, frames);
+        std::printf("bus: clipped=%u run=%u%s\n", static_cast<unsigned>(bus.clipped_frames()), static_cast<unsigned>(bus.longest_clip_run()),
+                    vgm.broken() ? ", the log stops at an unknown command" : "");
+        std::printf("vgm: FM pieces %.1f per batch of 64\n", vgm.fm_pieces() * 64.0 / frames);
+    } else {
+        play_live(bus, pool, static_cast<double>(frames) / kSampleRate);
+    }
+    std::exit(0);
+}
+
 void app_main_task(void* pv_parameters) {
     auto* args = static_cast<AppArgs*>(pv_parameters);
 
@@ -768,17 +854,22 @@ void app_main_task(void* pv_parameters) {
     // --board-load: большая структура (план на 1024 сэмпла) - не на стеке задачи.
     static BoardLoad board;
 
+    if (args->play_file_path && (ends_with_ci(args->play_file_path, ".vgm") || ends_with_ci(args->play_file_path, ".vgz"))) play_vgm(args, *mem, bus, pool);
+
     if (args->then_path && args->play_file_path) {
         const char* error = nullptr;
         if (!load_song(args->play_file_path, file_bytes, *mem, song, &error)) {
             std::fprintf(stderr, "--then: cannot load %s: %s\n", args->play_file_path, error ? error : "?");
             std::exit(1);
         }
-        auto* first = new soundsinth::engine::TrackerEngine(song, *mem);
+        auto* first = new soundsinth::engine::TrackerEngine(song, *mem, g_mod_pan, g_mod_steps);
         bus.start_track();
         bus.add_source(first->as_sound_source());
         bus.set_limiter(song.limiter_enabled && !args->no_limiter);
         bus.set_soft_clip(song.soft_clip_enabled && !args->no_limiter);
+        bus_auto_volume(bus, song.limiter_enabled && !args->no_limiter);
+        bus.set_highpass_hz(g_highpass_hz >= 0 ? static_cast<uint32_t>(g_highpass_hz) : soundsinth::mixbus::MixBus::kHighpassHz,
+                            soundsinth::engine::kSampleRateHz);
         static int16_t discard[SOUNDSINTH_AUDIO_BUFFER_FRAMES * 2];
         constexpr uint32_t kFirstTrackFrames = 5u * kSampleRate;
         for (uint32_t done = 0; done < kFirstTrackFrames; done += SOUNDSINTH_AUDIO_BUFFER_FRAMES) {
@@ -913,6 +1004,7 @@ void app_main_task(void* pv_parameters) {
                 }
             }
             if (args->linear_interp) song.quirks &= ~soundsinth::model::kQuirkHermiteInterpolation;
+            if (args->hermite_interp) song.quirks |= soundsinth::model::kQuirkHermiteInterpolation;
             if (args->wav_path && !args->seconds_explicit) {
                 song_frames = soundsinth::engine::compute_song_total_frames(
                     song, mem->psram,
@@ -920,7 +1012,7 @@ void app_main_task(void* pv_parameters) {
                     soundsinth::memory::kDurationPassBytes, &dur);
                 soundsinth::memory::scratch_leave(mem->scratch, soundsinth::memory::Scratch::DurationPass);
             }
-            engine = new soundsinth::engine::TrackerEngine(song, *mem);
+            engine = new soundsinth::engine::TrackerEngine(song, *mem, g_mod_pan, g_mod_steps);
             if (args->voice_cull) { // сброс голосов по модели загрузки, как на плате
                 engine->set_voice_cull_enabled(true);
                 engine->set_model_load_enabled(true);
@@ -930,6 +1022,9 @@ void app_main_task(void* pv_parameters) {
             bus.add_source(engine->as_sound_source());
             bus.set_limiter(song.limiter_enabled && !args->no_limiter);
             bus.set_soft_clip(song.soft_clip_enabled && !args->no_limiter);
+            bus_auto_volume(bus, song.limiter_enabled && !args->no_limiter);
+            bus.set_highpass_hz(g_highpass_hz >= 0 ? static_cast<uint32_t>(g_highpass_hz) : soundsinth::mixbus::MixBus::kHighpassHz,
+                                soundsinth::engine::kSampleRateHz);
             apply_soft_curve(bus, *args, true);
             if (args->comp_threshold > 0) {
                 bus.set_limiter(true);
@@ -941,6 +1036,9 @@ void app_main_task(void* pv_parameters) {
             // библиотеке задаёт её размер.
             std::printf("arena: used %u of %u (samples=%u, instruments=%u)\n", (unsigned)soundsinth::memory::arena_used(mem->resident),
                         (unsigned)soundsinth::memory::kResidentMetadataBytes, (unsigned)song.sample_count, (unsigned)song.instrument_count);
+            // Что уходит хосту в метаданных трека.
+            std::printf("meta: title \"%.32s\", program \"%.20s\", orders %u, midi tracks %u, ppqn %u, bpm %u\n", song.title, song.program,
+                        (unsigned)song.order_count, (unsigned)song.midi_header[0], (unsigned)song.midi_header[1], (unsigned)song.midi_header[2]);
             if (!is_midi) {
                 // Потери загрузки трекерного файла: разбор и полная загрузка.
                 const auto& ls    = soundsinth::model::g_tracker_load_stats;
@@ -953,7 +1051,7 @@ void app_main_task(void* pv_parameters) {
                 if (ls.samples_failed != 0) {
                     std::printf(" (first %u: %s)", (unsigned)ls.first_failed_sample, ls.first_failure ? ls.first_failure : "?");
                 }
-                std::printf(", sustain loops %u, autovibrato %u, cells unparsed %lu\n", (unsigned)ls.ignored_sustain_loops, (unsigned)ls.ignored_autovibrato,
+                std::printf(", sustain loops %u, autovibrato %u, cells unparsed %lu\n", (unsigned)ls.sustain_loops, (unsigned)ls.autovibrato,
                             (unsigned long)ls.effect_cells_dropped);
             }
             if (args->unused_samples) {
@@ -1168,7 +1266,7 @@ void app_main_task(void* pv_parameters) {
             for (uint8_t ch = 0; ch < song.channel_count && ch < SOUNDSINTH_MAX_CHANNELS; ++ch) {
                 bus.remove_source(engine->as_sound_source());
                 delete engine;
-                engine = new soundsinth::engine::TrackerEngine(song, *mem);
+                engine = new soundsinth::engine::TrackerEngine(song, *mem, g_mod_pan, g_mod_steps);
                 engine->set_solo_channel(ch, discard, SOUNDSINTH_AUDIO_BUFFER_FRAMES);
                 if (args->voice_cull) { // сброс голосов по модели загрузки, как на плате
                     engine->set_voice_cull_enabled(true);
@@ -1178,6 +1276,9 @@ void app_main_task(void* pv_parameters) {
                 bus.add_source(engine->as_sound_source());
                 bus.set_limiter(song.limiter_enabled && !args->no_limiter);
                 bus.set_soft_clip(song.soft_clip_enabled && !args->no_limiter);
+                bus_auto_volume(bus, song.limiter_enabled && !args->no_limiter);
+                bus.set_highpass_hz(g_highpass_hz >= 0 ? static_cast<uint32_t>(g_highpass_hz) : soundsinth::mixbus::MixBus::kHighpassHz,
+                                    soundsinth::engine::kSampleRateHz);
                 apply_soft_curve(bus, *args, false);
                 if (args->comp_threshold > 0) {
                     bus.set_limiter(true);
@@ -1236,6 +1337,9 @@ int main(int argc, char** argv) {
             args.play_file_path = argv[++i];
         } else if (std::strcmp(argv[i], "--by-channel-dir") == 0 && i + 1 < argc) {
             args.by_channel_dir = argv[++i];
+        } else if (std::strcmp(argv[i], "--mod-panning") == 0 && i + 1 < argc) {
+            const unsigned long pan = std::strtoul(argv[++i], nullptr, 10);
+            g_mod_pan               = static_cast<uint8_t>(pan > 100u ? 100u : pan);
         } else if (std::strcmp(argv[i], "--psram-kb") == 0 && i + 1 < argc) {
             args.psram_kb = static_cast<uint32_t>(std::strtoul(argv[++i], nullptr, 10));
         } else if (std::strcmp(argv[i], "--prefetch-seconds") == 0 && i + 1 < argc) {
@@ -1267,10 +1371,20 @@ int main(int argc, char** argv) {
             const double ratio  = (end && *end == ':') ? std::strtod(end + 1, nullptr) : 2.0;
             args.comp_threshold = static_cast<int32_t>(32768.0 * pct / 100.0);
             args.comp_amount    = static_cast<int32_t>(32768.0 * (1.0 - 1.0 / (ratio > 1.0 ? ratio : 1.0)));
+        } else if (std::strcmp(argv[i], "--auto-volume") == 0) {
+            g_auto_volume = true;
         } else if (std::strcmp(argv[i], "--no-limiter") == 0) {
             args.no_limiter = true;
         } else if (std::strcmp(argv[i], "--linear-interp") == 0) {
             args.linear_interp = true;
+        } else if (std::strcmp(argv[i], "--highpass") == 0 && i + 1 < argc) {
+            g_highpass_hz = static_cast<int32_t>(std::strtol(argv[++i], nullptr, 10));
+        } else if (std::strcmp(argv[i], "--mod-steps") == 0) {
+            g_mod_steps = true;
+        } else if (std::strcmp(argv[i], "--no-interp") == 0) {
+            soundsinth::engine::voice_set_hold_render(true);
+        } else if (std::strcmp(argv[i], "--hermite") == 0) {
+            args.hermite_interp = true;
         } else if (std::strcmp(argv[i], "--voice-cull") == 0) {
             args.voice_cull = true;
         } else if (std::strcmp(argv[i], "--prefetch-positions") == 0 && i + 1 < argc) {
@@ -1288,6 +1402,8 @@ int main(int argc, char** argv) {
             args.soft_knee = std::atof(argv[++i]);
         } else if (std::strcmp(argv[i], "--then") == 0 && i + 1 < argc) {
             args.then_path = argv[++i];
+        } else if (std::strcmp(argv[i], "--ym2608-rom") == 0 && i + 1 < argc) {
+            args.rhythm_rom_path = argv[++i];
         } else if (std::strcmp(argv[i], "--board-load") == 0) {
             args.board_load = true;
         } else if (std::strcmp(argv[i], "--through-pool") == 0) {

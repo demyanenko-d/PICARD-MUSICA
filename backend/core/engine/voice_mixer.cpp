@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 #include "core/engine/voice_mixer.h"
 
+#include <cstring>
+
 #include "platform/hot_path.h"
 
 // __smlawb (ACLE) - заголовок компилятора GCC, есть только в сборке под
@@ -322,7 +324,12 @@ void VoiceMixer::mix(memory::PsramStore& psram, int32_t* mix_l, int32_t* mix_r, 
         while (done < batch && v.active) {
             uint32_t chunk = batch - done;
             if (chunk > kVoiceRenderChunk) chunk = kVoiceRenderChunk;
-            const uint32_t produced = voice_render(v, psram, voice_scratch, chunk);
+            uint32_t produced = chunk;
+            if (v.stream) {
+                std::memcpy(voice_scratch, stream_base + v.first_page * stream_stride + done, chunk * sizeof(int16_t));
+            } else {
+                produced = voice_render(v, psram, voice_scratch, chunk);
+            }
 
             // Фильтр - над готовым буфером голоса, до громкости и панорамы: в IT он
             // часть тракта сэмпла, а не мастер-шины (у OpenMPT тот же порядок:

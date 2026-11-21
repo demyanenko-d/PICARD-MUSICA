@@ -8,6 +8,7 @@
 #include "platform/clock.h"
 #include "platform/log.h"
 #include "platform/hot_path.h"
+
 #include "core/engine/engine_defs.h"
 #include "core/engine/envelope_gain.h"
 #include "core/model/amiga_period.h"
@@ -63,6 +64,104 @@ constexpr uint32_t kFt2PanTable[65] = {
     38424, 39287, 40132, 40960, 41771, 42567, 43348, 44115, 44869, 45611, 46341, 47059, 47767, 48465, 49152, 49830, 50499, 51159, 51811, 52454, 53090, 53719,
     54340, 54954, 55561, 56162, 56756, 57344, 57926, 58503, 59073, 59639, 60199, 60753, 61303, 61848, 62388, 62924, 63455, 63982, 64504, 65022, 65536,
 };
+
+// Тонкий линейный шаг IT: 2^(i/768) в Q14, i = 0..127. 768 шагов на октаву =
+// 1/64 полутона, единица линейной высоты движка. Для автовибрато IT на
+// модели Amiga: период делится или умножается на множитель по знаку.
+constexpr uint16_t kFineSlideQ14[128] = {
+    16384, 16399, 16414, 16428, 16443, 16458, 16473, 16488, 16503, 16518, 16533, 16547, 16562, 16577, 16592, 16607, // 0-15
+    16622, 16637, 16652, 16667, 16682, 16697, 16713, 16728, 16743, 16758, 16773, 16788, 16803, 16818, 16834, 16849, // 16-31
+    16864, 16879, 16895, 16910, 16925, 16940, 16956, 16971, 16986, 17002, 17017, 17032, 17048, 17063, 17079, 17094, // 32-47
+    17109, 17125, 17140, 17156, 17171, 17187, 17202, 17218, 17233, 17249, 17264, 17280, 17296, 17311, 17327, 17343, // 48-63
+    17358, 17374, 17390, 17405, 17421, 17437, 17452, 17468, 17484, 17500, 17516, 17531, 17547, 17563, 17579, 17595, // 64-79
+    17611, 17627, 17643, 17658, 17674, 17690, 17706, 17722, 17738, 17754, 17770, 17786, 17802, 17819, 17835, 17851, // 80-95
+    17867, 17883, 17899, 17915, 17931, 17948, 17964, 17980, 17996, 18013, 18029, 18045, 18061, 18078, 18094, 18110, // 96-111
+    18127, 18143, 18160, 18176, 18192, 18209, 18225, 18242, 18258, 18275, 18291, 18308, 18324, 18341, 18357, 18374, // 112-127
+};
+
+// Период, сдвинутый на units тонких шагов (units > 0 - частота выше, период
+// меньше); |units| не больше 127: глубина автовибрато 0..127.
+int32_t period_fine_slide(int32_t period, int32_t units) {
+    if (units >= 0) return period * 16384 / kFineSlideQ14[units > 127 ? 127 : units];
+    units = -units;
+    return period * kFineSlideQ14[units > 127 ? 127 : units] / 16384;
+}
+
+// Автовибрато сэмпла: продвижение состояния канала и смещение высоты на этот
+// тик в тонких шагах (положительное - выше). IT (it_mode, как Schism/OpenMPT
+// по ITTECH): глубина копится развёрткой по 1/256 шага за тик, нулевой rate -
+// не исполняется. XM - развёртка FT2: глубина растёт на полную/sweep за тик,
+// Note-Off до конца развёртки прижимает её к одному шагу; формы и знаки
+// OpenMPT. Random - детерминированная свёртка фазы вместо ГСЧ OpenMPT: выход
+// обязан повторяться от прогона к прогону.
+int32_t SOUNDSINTH_HOT_PATH(auto_vibrato_units)(ChannelState& cs, const soundsinth::model::SampleDescriptor& sd, bool it_mode) {
+    using VibType = soundsinth::model::SampleDescriptor::VibType;
+    int32_t depth; // 1/256 тонкого шага
+    if (it_mode) {
+        if (sd.vib_rate == 0) return 0;
+        depth = cs.auto_vib_depth + sd.vib_sweep;
+        if (depth > sd.vib_depth * 256) depth = sd.vib_depth * 256;
+        cs.auto_vib_depth = static_cast<uint16_t>(depth);
+    } else {
+        const int32_t full = sd.vib_depth * 256;
+        depth              = cs.auto_vib_depth;
+        if (sd.vib_sweep == 0) {
+            depth = full;
+        } else {
+            if (!cs.key_released && depth <= full) {
+                depth             += full / sd.vib_sweep;
+                cs.auto_vib_depth  = static_cast<uint16_t>(depth > 0xffff ? 0xffffu : static_cast<uint32_t>(depth));
+            }
+            if (depth > full) {
+                depth = full;
+            } else if (cs.key_released) {
+                depth = full / sd.vib_sweep;
+            }
+        }
+    }
+    const uint8_t pos = static_cast<uint8_t>(cs.auto_vib_pos);
+    cs.auto_vib_pos   = static_cast<uint16_t>(cs.auto_vib_pos + sd.vib_rate);
+    int32_t vdelta;
+    if (it_mode) {
+        switch (sd.vib_type) {
+            case VibType::RampDown:
+                vdelta = 64 - (pos + 1) / 2;
+                break;
+            case VibType::RampUp:
+                vdelta = (pos + 1) / 2 - 64;
+                break;
+            case VibType::Square:
+                vdelta = pos < 128 ? 64 : 0;
+                break;
+            case VibType::Random:
+                vdelta = static_cast<int32_t>((static_cast<uint32_t>(pos) * 0x9e37u >> 8) & 0x7fu) - 0x40;
+                break;
+            default:
+                vdelta = it_sine(pos);
+                break;
+        }
+        return vdelta * (depth / 256) / 64;
+    }
+    switch (sd.vib_type) {
+        case VibType::Square:
+            vdelta = (pos & 128u) ? 64 : -64;
+            break;
+        case VibType::RampDown:
+            vdelta = static_cast<int32_t>((0x40u - pos / 2u) & 0x7fu) - 0x40;
+            break;
+        case VibType::RampUp:
+            vdelta = static_cast<int32_t>((0x40u + pos / 2u) & 0x7fu) - 0x40;
+            break;
+        case VibType::Random:
+            vdelta = static_cast<int32_t>((static_cast<uint32_t>(pos) * 0x9e37u >> 8) & 0x7fu) - 0x40;
+            break;
+        default:
+            vdelta = -it_sine(pos);
+            break;
+    }
+    // period += n/64 у OpenMPT; наша высота растёт в обратную сторону.
+    return -((vdelta * depth / 256) / 64);
+}
 
 // Множители L/R одного голоса (единица 1 << kGainQ24Bits) - живого канала или
 // фонового NNA, формула одна. Все входы меняются не чаще раза в тик: считаются
@@ -157,7 +256,7 @@ void update_render_load(uint32_t& load_ewma_q8, uint32_t render_t0_us, uint32_t 
 
 } // namespace
 
-TrackerEngine::TrackerEngine(const soundsinth::model::Song& song, memory::TrackMemory& mem, uint8_t mod_pan_percent)
+TrackerEngine::TrackerEngine(const soundsinth::model::Song& song, memory::TrackMemory& mem, uint8_t mod_pan_percent, bool mod_steps)
     : song_(song)
     , mem_(mem)
     , channel_count_(song.channel_count > SOUNDSINTH_MAX_CHANNELS ? SOUNDSINTH_MAX_CHANNELS : song.channel_count) {
@@ -168,6 +267,12 @@ TrackerEngine::TrackerEngine(const soundsinth::model::Song& song, memory::TrackM
     // эталонными плеерами.
     wave_tail_   = song.volume_ramp_samples != 0;
     envelope_db_ = (song.quirks & soundsinth::model::kQuirkEnvelopeDecibel) != 0;
+    // MOD узнаётся по аппаратной панораме Amiga: её ставит только загрузчик MOD.
+    // Глубина разводки и лесенка Paula - только у него.
+    const bool is_mod     = (song.quirks & soundsinth::model::kQuirkModHardwarePanning) != 0;
+    const bool gs         = (song.quirks & soundsinth::model::kQuirkGsModule) != 0;
+    const uint8_t mod_pan = is_mod && mod_pan_percent < 100 ? mod_pan_percent : 100;
+    voice_quirks_         = song.quirks | ((is_mod && mod_steps) || gs ? soundsinth::model::kQuirkPaulaSteps : soundsinth::model::QuirkFlags{0});
     filter_prepare(song.filter_units_per_octave);
     // Линии ревербератора - в буфере сценариев: от сборки движка до его
     // сноса туда никто не пишет (загрузка ждёт сноса, сэмплы .mid идут из
@@ -207,6 +312,7 @@ TrackerEngine::TrackerEngine(const soundsinth::model::Song& song, memory::TrackM
     dispatch_ctx_.ps                  = &ps_;
     dispatch_ctx_.chorus_send         = chorus_send_;
     dispatch_ctx_.fx_params           = fx_params_;
+    dispatch_ctx_.mod_pan_percent     = mod_pan;
     dispatch_ctx_.nna_user            = this;
     dispatch_ctx_.on_note_trigger_nna = &TrackerEngine::on_note_trigger_nna;
 
@@ -218,7 +324,7 @@ TrackerEngine::TrackerEngine(const soundsinth::model::Song& song, memory::TrackM
     voice_reset_debug_counters();
     // Начальные панорама и громкость каналов (заголовок файла, разводка Paula) -
     // до sequencer_init: он отыгрывает строку 0.
-    channels_init(song_, channels_, mod_pan_percent);
+    channels_init(song_, channels_, mod_pan);
     sequencer_init(song_, mem_.psram, ps_, &TrackerEngine::row_callback, this);
 
     // Сведение ModPlug Tracker (Song::mix_levels): поверх обычной цепочки -
@@ -262,6 +368,26 @@ SOUNDSINTH_ALWAYS_INLINE void TrackerEngine::advance_nna_slot_envelopes(uint32_t
     }
 }
 
+// Note-Off: голоса на петле удержания - на обычную петлю (Song::SusRelease).
+// У песен без петель удержания выход по счётчику, цикла нет.
+SOUNDSINTH_ALWAYS_INLINE void TrackerEngine::release_sustained_voices() {
+    if (song_.sus_release_count == 0) return;
+    for (uint16_t s = 0; s < SOUNDSINTH_MAX_SLOTS; ++s) {
+        if (!link_.sustain(static_cast<uint8_t>(s)) || !channels_[s].key_released) continue;
+        const ChannelState& cs                         = channels_[s];
+        const soundsinth::model::SampleDescriptor& sd  = song_.samples[cs.sample_index];
+        const soundsinth::model::Song::SusRelease* rel = song_.sus_release_find(cs.sample_index);
+        const bool loop                                = rel != nullptr && rel->loop_enabled;
+        uint16_t checkpoint_first_page                 = memory::kPageChainEnd;
+        if (sd.resident_encoding == soundsinth::model::ResidentEncoding::Dpcm8) {
+            if (memory::SampleCacheEntry* entry = memory::sample_cache_find(mem_.sample_cache, cs.sample_index)) {
+                checkpoint_first_page = entry->checkpoint_first_page;
+            }
+        }
+        link_.release_sustain(static_cast<uint8_t>(s), loop ? rel->loop_start : 0, loop ? rel->loop_end : sd.length_samples, loop, checkpoint_first_page);
+    }
+}
+
 // Retrigger и NoteCut взводятся каждый тик. Смещение 0: SampleOffset - только
 // у ноты строки. До переноса высоты: voice_trigger ставит высоту ноты, перенос
 // возвращает высоту канала. У MOD и XM период сохраняется, как у ProTracker и
@@ -287,28 +413,41 @@ SOUNDSINTH_ALWAYS_INLINE void TrackerEngine::sync_voice_pitch() {
     const uint8_t pitch_sync_limit = static_cast<uint8_t>(channel_count_ + kNnaPool);
     const bool glissando_nearest   = (song_.quirks & soundsinth::model::kQuirkGlissandoNearest) != 0;
     const bool amiga_limits        = (song_.quirks & soundsinth::model::kQuirkAmigaLimits) != 0;
+    const bool it_vibrato          = (song_.quirks & soundsinth::model::kQuirkItVibratoTable) != 0;
     if (song_.frequency_model == soundsinth::model::FrequencyModel::Amiga) {
         for (uint8_t ch = 0; ch < pitch_sync_limit; ++ch) {
-            const ChannelState& cs = channels_[ch];
+            ChannelState& cs = channels_[ch];
             if (cs.voice_active && link_.playing(ch)) {
-                uint16_t period = cs.period;
+                const soundsinth::model::SampleDescriptor& sd = song_.samples[cs.sample_index];
+                uint16_t period                               = cs.period;
                 if (glissando_snaps(cs, song_.quirks, ps_.tick_in_row)) {
-                    period = glissando_amiga_period(cs, song_.samples[cs.sample_index].finetune, glissando_nearest);
+                    period = glissando_amiga_period(cs, sd.finetune, glissando_nearest);
                 }
-                const uint16_t effective_period = soundsinth::model::clamp_amiga_period(static_cast<int32_t>(period) + cs.pitch_offset, amiga_limits);
-                link_.set_pitch_amiga(ch, effective_period, song_.samples[cs.sample_index].c5_speed);
+                int32_t p = static_cast<int32_t>(period) + cs.pitch_offset;
+                // Автовибрато: IT множит период тонким шагом, XM прибавляет
+                // к периоду (period += n/64 OpenMPT, units с обратным знаком).
+                if (sd.vib_depth != 0) {
+                    const int32_t av = auto_vibrato_units(cs, sd, it_vibrato);
+                    if (av != 0) p = it_vibrato ? period_fine_slide(p, -av) : p - av;
+                }
+                const uint16_t effective_period = soundsinth::model::clamp_amiga_period(p, amiga_limits);
+                link_.set_pitch_amiga(ch, effective_period, sd.c5_speed);
             }
         }
     } else {
         for (uint8_t ch = 0; ch < pitch_sync_limit; ++ch) {
-            const ChannelState& cs = channels_[ch];
+            ChannelState& cs = channels_[ch];
             if (cs.voice_active && link_.playing(ch)) {
+                const soundsinth::model::SampleDescriptor& sd = song_.samples[cs.sample_index];
                 // Смещения высоты складываются: эффект, огибающая IT, бенд .mid.
                 int32_t pitch = cs.linear_pitch;
                 if (glissando_snaps(cs, song_.quirks, ps_.tick_in_row)) {
-                    pitch = glissando_linear_pitch(cs, song_.samples[cs.sample_index].finetune, glissando_nearest);
+                    pitch = glissando_linear_pitch(cs, sd.finetune, glissando_nearest);
                 }
-                link_.set_pitch_linear(ch, pitch + cs.pitch_offset + cs.pitch_envelope_offset + cs.bend_offset, song_.samples[cs.sample_index].c5_speed);
+                int32_t offset = cs.pitch_offset + cs.pitch_envelope_offset + cs.bend_offset;
+                // Автовибрато - в тонких шагах IT, они же единицы высоты.
+                if (sd.vib_depth != 0) offset += auto_vibrato_units(cs, sd, it_vibrato);
+                link_.set_pitch_linear(ch, pitch + offset, sd.c5_speed);
             }
         }
     }
@@ -396,6 +535,7 @@ void TrackerEngine::advance_tick() {
     advance_nna_slot_envelopes(envelope_time_step_q8);
     apply_retrigger_and_note_cut();
     sync_voice_pitch();
+    release_sustained_voices();
 
     rebuild_active_indices(); // раз за тик, не за отсчёт
     link_.end_tick();
@@ -561,7 +701,7 @@ void TrackerEngine::trigger_voice(uint8_t ch, uint32_t start_offset, bool note) 
     const uint16_t checkpoint_first_page = entry ? entry->checkpoint_first_page : memory::kPageChainEnd;
     // Шаг здесь не считается: высоту голоса выставит sync_voice_pitch этого же
     // тика, до рендера, и с учётом смещений (эффект, огибающая, бенд).
-    link_.trigger(ch, song_.samples[cs.sample_index], first_page, cs.last_note, song_.frequency_model, start_offset, song_.quirks, checkpoint_first_page);
+    link_.trigger(ch, song_.samples[cs.sample_index], first_page, cs.last_note, song_.frequency_model, start_offset, voice_quirks_, checkpoint_first_page);
     ++voice_triggers_this_tick_;
     if (note) {
         // Коэффициенты фильтра считаются заново, даже если входы те же.

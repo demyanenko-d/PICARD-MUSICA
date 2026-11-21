@@ -32,10 +32,6 @@ void BufferPool::end_write(int16_t* buf) {
     platform::os_queue_send(rendered_queue_, buf);
 }
 
-void BufferPool::end_read(const int16_t* buf) {
-    platform::os_queue_send(free_queue_, const_cast<int16_t*>(buf));
-}
-
 void BufferPool::drain_rendered() {
     void* item = nullptr;
     while (platform::os_queue_try_receive(rendered_queue_, &item)) {

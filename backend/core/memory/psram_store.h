@@ -24,14 +24,13 @@
 namespace soundsinth::memory {
 
 // Приёмный буфер модуля от плеера GS: модуль идёт потоком один раз, а
-// разбирается с произвольным доступом. Отрезается сверху от хранилища трека,
-// пока говорит плеер GS. Мегабайта хватает MOD на 4 канала и с 256 паттернами;
+// разбирается с произвольным доступом. Отмеченный блок распределителя, пока
+// говорит плеер GS. Мегабайта хватает MOD на 4 канала и с 256 паттернами;
 // у 99% файлов архива сырого PCM не больше 3.7 МБ.
 inline constexpr uint32_t kGsReceiveBytes = 1024u * 1024u;
 
 // Таблицы банка с карты: нужны с произвольным доступом, PCM читается с карты.
 // В конце чипа; хранилище ужимается на них, только когда банк с карты взят.
-// Буфер GS, если отрезан, лежит под ними.
 inline constexpr uint32_t kBankTableBytes  = SOUNDSINTH_BANK_SD_TABLE_BYTES;
 inline constexpr uint32_t kBankTableOffset = kPsramChipBytes - kBankTableBytes;
 
@@ -94,6 +93,26 @@ uint32_t psram_freeze_pattern_zone(PsramStore& store);
 // чипа и не режет середину. nullptr - места нет или список отметок полон.
 uint8_t* psram_take_permanent(PsramStore& store, uint32_t bytes);
 
+// То же блоком - для владельца, который потом его ужимает или отдаёт
+// (приёмник модуля GS). Пустой блок - места нет или список отметок полон.
+// Пересобирает блок трека, как и psram_take_permanent: данные играющего
+// трека теряются, звать при снятом движке.
+PsramBlock psram_take_kept(PsramStore& store, uint32_t bytes);
+// Отмеченный блок из свободных страниц, блок трека не трогается: можно и под
+// играющим треком. Пустой - столько подряд свободного нет или список
+// отметок полон.
+PsramBlock psram_alloc_kept(PsramStore& store, uint32_t bytes);
+// Оставить отмеченному блоку bytes с начала, хвост - распределителю.
+void psram_shrink_kept(PsramStore& store, PsramBlock& block, uint32_t bytes);
+// Вернуть отмеченный блок распределителю; блок становится пустым.
+void psram_drop_kept(PsramStore& store, PsramBlock& block);
+inline uint8_t* psram_block_ptr(const PsramStore& store, const PsramBlock& block) {
+    return store.base + static_cast<uint32_t>(block.first) * kPsramPageBytes;
+}
+// Сколько байт может достаться неотмеченным: всё распределяемое за вычетом
+// отмеченных блоков.
+uint32_t psram_unkept_bytes(const PsramStore& store);
+
 // Оставить данным трека столько байт, остальное блока отдать сэмплам сразу.
 // Для тех, кто кладёт данные и сэмплы вперемешку и не может дождаться
 // заморозки. Загрузчикам не нужно: у них порядок строгий.
@@ -108,10 +127,15 @@ inline uint32_t psram_free_page_count(const PsramStore& store) {
 // Та же величина проходом по битовой карте. Для сверки счётчика в тестах.
 uint32_t psram_free_list_length(const PsramStore& store);
 
-// Сколько страниц досталось сэмплам - всё, что не занял блок трека. После
-// заморозки постоянно; по нему судят, много ли памяти осталось.
+// Сколько страниц досталось сэмплам - всё, что не заняли блок трека и
+// постоянные блоки. После заморозки постоянно; по нему судят, много ли
+// памяти осталось.
 inline uint32_t psram_sample_page_count(const PsramStore& store) {
-    return static_cast<uint32_t>(store.alloc.page_count) - store.track.pages;
+    uint32_t kept = 0;
+    for (const PsramBlock& b : store.alloc.keep) {
+        kept += b.pages;
+    }
+    return static_cast<uint32_t>(store.alloc.page_count) - store.track.pages - kept;
 }
 
 // --- Данные трека: байтовый bump снизу блока вверх ---

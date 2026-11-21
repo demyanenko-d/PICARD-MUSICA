@@ -6,6 +6,8 @@
 #include <new>
 #include <type_traits>
 
+#include "platform/compiler.h"
+
 #include "core/bank/bank_reader.h"
 #include "core/engine/song_duration.h"
 #include "core/formats/it.h"
@@ -34,7 +36,8 @@ struct Loader {
 // снаружи.
 const soundsinth::bank::Bank* s_bank = nullptr;
 
-// Крюк обслуживания долгих проходов: ставит оркестратор, у ПК пусто.
+// Обслуживание шины и карты во время долгих проходов разбора: ставит
+// оркестратор, у ПК пусто.
 soundsinth::engine::ServiceFn s_service = nullptr;
 void* s_service_user                    = nullptr;
 
@@ -107,6 +110,49 @@ bool take_use_map(soundsinth::memory::PsramStore& psram, const soundsinth::model
     return true;
 }
 
+// Итог отказа: ни один формат не подошёл, в error - последняя непустая
+// причина попыток (самая широкая сигнатура отказала последней).
+bool fail(SessionLoadResult& result) {
+    result.error = "unknown file format (not MIDI/IT/XM/S3M/MOD)";
+    for (const char* e : result.attempt_errors) {
+        if (e != nullptr) result.error = e;
+    }
+    return false;
+}
+
+// Проход длительности со сбором плана: один раз, по уже выбранному
+// загрузчику. Заказ карты позиций, буфер сценариев, решение plan_usable.
+// Встроен: кадр run_session_load - самый глубокий путь стека Core1.
+SOUNDSINTH_ALWAYS_INLINE void measure_and_plan(soundsinth::model::Song& out_song, soundsinth::memory::TrackMemory& mem, SessionLoadResult& result,
+                                               const PlanArrays& plan, UseMap* use_map_out) {
+    uint8_t* walk = soundsinth::memory::scratch_take(mem.scratch, soundsinth::memory::Scratch::DurationPass, soundsinth::memory::kDurationPassBytes);
+    PlanCollector collector;
+    // Сэмплов больше ёмкости массивов - плана нет: массивы last_use и
+    // first_use идут по номеру сэмпла, и запись ушла бы за буфер
+    // загрузчика (за ним PsramStore). Такой трек грузится целиком.
+    const bool collect = plan.indices != nullptr && plan.capacity != 0 && out_song.sample_count <= plan.capacity;
+    if (collect) {
+        plan_collect_begin(collector, out_song, plan.indices, plan.capacity, plan.last_use, plan.first_use);
+        if (use_map_out != nullptr && take_use_map(mem.psram, out_song, *use_map_out)) collector.use_map = use_map_out;
+    }
+    // Не влезло - длительность неизвестна (0): трек играет, конец
+    // определяется по song_ended.
+    result.total_frames =
+        walk != nullptr ? soundsinth::engine::compute_song_total_frames(out_song, mem.psram, walk, soundsinth::memory::kDurationPassBytes, &result.duration,
+                                                                        collect ? &plan_collect_row : nullptr, &collector, s_service, s_service_user)
+                        : 0u;
+    if (walk != nullptr) {
+        soundsinth::memory::scratch_leave(mem.scratch, soundsinth::memory::Scratch::DurationPass);
+    }
+    // Проход неполон - план неполон: сэмплы непройденного хвоста в нём не
+    // отмечены, и вытеснение сочло бы их отыгравшими.
+    result.plan_usable =
+        collect && walk != nullptr &&
+        (result.duration.stop == soundsinth::engine::DurationStop::Repeat || result.duration.stop == soundsinth::engine::DurationStop::SongEnd);
+    result.plan_count = result.plan_usable ? collector.count : 0u;
+    if (!result.plan_usable && use_map_out != nullptr) *use_map_out = UseMap{};
+}
+
 } // namespace
 
 const char* session_loader_name(uint8_t i) {
@@ -126,12 +172,14 @@ bool run_session_load(soundsinth::formats::ByteSource src, soundsinth::memory::T
                       bool metadata_only, const PlanArrays& plan, UseMap* use_map_out) {
     result = SessionLoadResult{};
     if (use_map_out != nullptr) *use_map_out = UseMap{};
-    for (uint8_t i = 0; i < kLoaderCount; ++i) {
+    // Цикл только выбирает формат; проход длительности идёт один раз, после.
+    bool matched = false;
+    for (uint8_t i = 0; i < kLoaderCount && !matched; ++i) {
         const Loader& loader = kLoaders[i];
         soundsinth::memory::track_memory_reset_for_new_track(mem);
         // Song заново: на плате один g_song на все треки, загрузчик пишет
         // только свои поля (иначе XM после IT наследует ChnPan, ChnVol,
-        // сведение ModPlug). На месте: копия Song (248 байт на плате) на стеке Core1 не
+        // сведение ModPlug). На месте: копия Song (256 байт) на стеке Core1 не
         // нужна; прежний объект не разрушается - деструктор тривиален.
         static_assert(std::is_trivially_destructible_v<soundsinth::model::Song>, "Song is constructed over the previous one");
         new (&out_song) soundsinth::model::Song();
@@ -142,42 +190,12 @@ bool run_session_load(soundsinth::formats::ByteSource src, soundsinth::memory::T
         if (loader.load(src, mem, out_song, &result.attempt_errors[i], metadata_only)) {
             result.attempt_errors[i] = nullptr;
             result.format            = loader.format;
-            uint8_t* walk = soundsinth::memory::scratch_take(mem.scratch, soundsinth::memory::Scratch::DurationPass, soundsinth::memory::kDurationPassBytes);
-            PlanCollector collector;
-            // Сэмплов больше ёмкости массивов - плана нет: массивы last_use и
-            // first_use идут по номеру сэмпла, и запись ушла бы за буфер
-            // загрузчика (за ним PsramStore). Такой трек грузится целиком.
-            const bool collect = plan.indices != nullptr && plan.capacity != 0 && out_song.sample_count <= plan.capacity;
-            if (collect) {
-                plan_collect_begin(collector, out_song, plan.indices, plan.capacity, plan.last_use, plan.first_use);
-                if (use_map_out != nullptr && take_use_map(mem.psram, out_song, *use_map_out)) collector.use_map = use_map_out;
-            }
-            // Не влезло - длительность неизвестна (0): трек играет, конец
-            // определяется по song_ended.
-            result.total_frames =
-                walk != nullptr
-                    ? soundsinth::engine::compute_song_total_frames(out_song, mem.psram, walk, soundsinth::memory::kDurationPassBytes, &result.duration,
-                                                                    collect ? &plan_collect_row : nullptr, &collector, s_service, s_service_user)
-                    : 0u;
-            if (walk != nullptr) {
-                soundsinth::memory::scratch_leave(mem.scratch, soundsinth::memory::Scratch::DurationPass);
-            }
-            // Проход неполон - план неполон: сэмплы непройденного хвоста в
-            // нём не отмечены, и вытеснение сочло бы их отыгравшими.
-            result.plan_usable =
-                collect && walk != nullptr &&
-                (result.duration.stop == soundsinth::engine::DurationStop::Repeat || result.duration.stop == soundsinth::engine::DurationStop::SongEnd);
-            result.plan_count = result.plan_usable ? collector.count : 0u;
-            if (!result.plan_usable && use_map_out != nullptr) *use_map_out = UseMap{};
-            return true;
+            matched                  = true;
         }
     }
-
-    result.error = "unknown file format (not MIDI/IT/XM/S3M/MOD)";
-    for (const char* e : result.attempt_errors) {
-        if (e != nullptr) result.error = e;
-    }
-    return false;
+    if (!matched) return fail(result);
+    measure_and_plan(out_song, mem, result, plan, use_map_out);
+    return true;
 }
 
 // Без повтора, намеренно: повтор читает сэмпл заново, а у Wild Commander

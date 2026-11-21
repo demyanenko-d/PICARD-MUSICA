@@ -26,7 +26,7 @@
         .module crt0
         .globl  _main
         .globl  _fw_kbd_scan
-        .globl  _fw_ticks
+        .globl  cfg_frame
         .globl  l__INITIALIZER
         .globl  s__INITIALIZED
         .globl  s__INITIALIZER
@@ -53,12 +53,8 @@ STACK   .equ    0x7FFF
         push    bc
         push    de
         push    hl
-        push    ix
-        ld      hl, (_fw_ticks)
-        inc     hl
-        ld      (_fw_ticks), hl
         call    _fw_kbd_scan
-        pop     ix
+        call    cfg_frame
         pop     hl
         pop     de
         pop     bc
@@ -66,8 +62,8 @@ STACK   .equ    0x7FFF
         ei
         reti
 
-        ;; Обработчик занял 25 байт, считая от 0x0038.
-        .ds     0x0066 - (0x0038 + 25)
+        ;; Обработчик занял 17 байт, считая от 0x0038.
+        .ds     0x0066 - (0x0038 + 17)
 ;; NMI: кнопка на плате ведёт эту линию, и без возврата нажатие уводило бы
 ;; процессор в мусор.
         retn
@@ -80,8 +76,6 @@ STACK   .equ    0x7FFF
         .area   _GSFINAL
 
         .area   _DATA
-_fw_ticks::
-        .ds     2
         .area   _INITIALIZED
         .area   _BSEG
         .area   _BSS

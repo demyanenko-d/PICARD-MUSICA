@@ -4,6 +4,7 @@
 #include <cstring>
 
 #include "platform/memory.h"
+
 #include "core/model/song.h"
 
 namespace soundsinth::memory {
@@ -20,6 +21,7 @@ void track_memory_create(TrackMemory& mem) {
     mem.scratch.arena  = &mem.resident;
     mem.scratch.tenant = Scratch::None;
     psram_create(mem.psram);
+    mem.loader_scratch_buffer = psram_take_permanent(mem.psram, kLoaderScratchBytes);
     sample_cache_reset(mem.sample_cache);
     mem.bank_table = nullptr;
 }
@@ -31,7 +33,7 @@ void track_memory_destroy(TrackMemory& mem) {
 }
 
 void track_memory_poison(TrackMemory& mem) {
-    poison_words(mem.resident.base, arena_used(mem.resident));
+    poison_words(mem.resident.base + mem.resident.keep, arena_used(mem.resident) - mem.resident.keep);
     psram_poison_track(mem.psram);
 }
 

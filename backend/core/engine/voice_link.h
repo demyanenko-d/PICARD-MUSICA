@@ -124,6 +124,7 @@ public:
     // заводит пересборка списка.
     void stop(uint8_t slot) {
         sounding_[slot] = false;
+        sustain_[slot]  = false;
         send(VoiceOp::Stop, slot);
     }
 
@@ -152,6 +153,12 @@ public:
     }
 
     void fade_before_missing(uint8_t slot);
+
+    // Голос запущен на петле удержания и ждёт Note-Off (взводит trigger).
+    bool sustain(uint8_t slot) const { return sustain_[slot]; }
+    // Note-Off: перевод голоса на обычную петлю (Song::SusRelease); у
+    // незацикленного loop_end - конец данных. Повторный вызов пуст.
+    void release_sustain(uint8_t slot, uint32_t loop_start, uint32_t loop_end, bool loop_enabled, uint16_t checkpoint_first_page);
 
     void move(uint8_t from, uint8_t to);
 
@@ -266,6 +273,8 @@ private:
     uint32_t sounding_loop_end_[SOUNDSINTH_MAX_SLOTS]   = {};
     bool sounding_loop_[SOUNDSINTH_MAX_SLOTS]           = {};
     bool sounding_[SOUNDSINTH_MAX_SLOTS]                = {};
+    // Голос на петле удержания: ждёт release_sustain по Note-Off.
+    bool sustain_[SOUNDSINTH_MAX_SLOTS] = {};
 
     // Модель гашения: сколько отсчётов слоту ещё гаснуть и каким хвостом.
     // Замороженный - одно умножение на отсчёт; волновой (.mid) продолжает

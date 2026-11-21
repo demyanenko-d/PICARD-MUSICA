@@ -26,6 +26,7 @@
         .globl  _fw_wait_frames
 
         .globl  _fw_kbd_scan
+        .globl  _fw_irq_hook
 
 IRQ_TABLE .equ  0xB600
 IRQ_FILL  .equ  0xB7
@@ -34,6 +35,7 @@ IRQ_JUMP  .equ  0xB7B7
         .area   _DATA
 
 _fw_ticks::     .ds     2       ; сколько кадров прошло с запуска
+_fw_irq_hook::  .ds     2       ; 0 или подпрограмма приложения раз в кадр
 
         .area   _CODE
 
@@ -76,10 +78,12 @@ _fw_irq_stop::
 ;; -- Обработчик --
 ;;
 ;; Считает кадры и опрашивает клавиатуру, обе вещи короткие и без
-;; ожиданий. Карта, экран и разбор каталога - в основном потоке.
+;; ожиданий. Карта и разбор каталога - в основном потоке.
 ;;
-;; Сохраняем то, что портит опрос: A, BC, DE, HL. Альтернативный набор и
-;; индексные он не трогает.
+;; Затем - _fw_irq_hook, если приложение его поставило: работа, привязанная
+;; к кадру (анимация экрана сразу за обратным ходом луча). Она идёт при
+;; запрещённых прерываниях и обязана уложиться в кадр. Хук - код на Си,
+;; поэтому сохраняются и индексные регистры.
 fw_isr:
         push    af
         push    bc
@@ -92,12 +96,25 @@ fw_isr:
 
         call    _fw_kbd_scan
 
+        ld      hl, (_fw_irq_hook)
+        ld      a, h
+        or      l
+        jr      z, fw_isr_done
+        push    ix
+        push    iy
+        call    fw_isr_hook
+        pop     iy
+        pop     ix
+fw_isr_done:
         pop     hl
         pop     de
         pop     bc
         pop     af
         ei
         reti
+
+fw_isr_hook:
+        jp      (hl)
 
 ;; Подождать A кадров, через HALT.
 _fw_wait_frames::

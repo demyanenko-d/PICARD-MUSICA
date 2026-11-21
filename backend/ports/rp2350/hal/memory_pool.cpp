@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: MIT
-#include "platform/memory.h"
-
 #include <cstdint>
 
 #include "hardware/sync.h" // __dsb, __isb
 #include "pico.h"          // panic()
+
+#include "platform/memory.h"
 
 #include "core/memory/track_memory.h" // kResidentMetadataBytes, kArenaBaseAlign
 
@@ -64,7 +64,9 @@ uint8_t* __not_in_flash_func(psram_write_alias)(uint8_t* p, size_t bytes) {
     const uintptr_t offset                   = reinterpret_cast<uintptr_t>(p) - XIP_BASE;
     constexpr uintptr_t kInvalidateByAddress = 2u;
     constexpr uintptr_t kLineBytes           = 8u;
-    for (uintptr_t o = offset; o < offset + bytes; o += kLineBytes) {
+    // От начала строки: иначе при невыровненном начале последняя задетая
+    // строка остаётся в кэше со старыми байтами.
+    for (uintptr_t o = offset & ~(kLineBytes - 1u); o < offset + bytes; o += kLineBytes) {
         *reinterpret_cast<volatile uint8_t*>(XIP_MAINTENANCE_BASE + o + kInvalidateByAddress) = 0;
     }
     __dsb();

@@ -18,6 +18,15 @@ bool can_unroll(const SampleDescriptor& sd) {
            sd.loop_end <= sd.length_samples;
 }
 
+// Обычная петля сэмпла с петлёй удержания: её координаты двигаются вместе с
+// loop_* при прореживании и развороте.
+Song::SusRelease* sus_release_of(Song& song, uint16_t sample_index) {
+    for (uint16_t k = 0; k < song.sus_release_count; ++k) {
+        if (song.sus_release[k].sample_index == sample_index) return &song.sus_release[k];
+    }
+    return nullptr;
+}
+
 } // namespace
 
 uint32_t resident_pages(ResidentEncoding e, uint32_t length_samples) {
@@ -49,6 +58,12 @@ bool choose_resident_encoding(Song& song, uint32_t free_pages) {
             sd.c5_speed       = sd.c5_speed / 2;
             sd.loop_start     = sd.loop_start / 2;
             sd.loop_end       = sd.loop_end / 2;
+            if (sd.sus_loop) {
+                if (Song::SusRelease* rel = sus_release_of(song, i)) {
+                    rel->loop_start /= 2;
+                    rel->loop_end   /= 2;
+                }
+            }
         }
     }
     return allow_raw16;
@@ -84,8 +99,20 @@ uint16_t unroll_pingpong_loops(Song& song, uint32_t free_pages, LoopUnroll mode)
         const uint32_t extra = loop_unroll_extra(mode, sd.loop_end - sd.loop_start);
         const uint32_t more  = resident_pages(sd.resident_encoding, sd.length_samples + extra) - resident_pages(sd.resident_encoding, sd.length_samples);
         if (more > budget) break; // остальные петли длиннее
-        budget            -= more;
-        sd.loop_unroll     = mode;
+        budget         -= more;
+        sd.loop_unroll  = mode;
+        // Разворот петли удержания вставляет extra отсчётов в середину
+        // сэмпла (хвост упаковщик пишет следом): обычная петля за ней
+        // сдвигается. Петля, начавшаяся раньше конца удержания, не
+        // двигается (пересечение областей - не по формату).
+        if (sd.sus_loop) {
+            if (Song::SusRelease* rel = sus_release_of(song, best)) {
+                if (rel->loop_start >= sd.loop_end) {
+                    rel->loop_start += extra;
+                    rel->loop_end   += extra;
+                }
+            }
+        }
         sd.loop_end       += extra;
         sd.length_samples += extra;
         ++done;

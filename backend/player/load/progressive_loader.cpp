@@ -2,7 +2,6 @@
 #include "player/load/progressive_loader.h"
 
 #include "core/bank/bank_reader.h"
-#include "core/formats/midi_live.h" // потолок сэмплов живого потока
 #include "core/memory/psram_store.h"
 #include "core/memory/sample_cache_catalog.h"
 
@@ -10,61 +9,14 @@
 
 namespace player::load {
 
-// Заказ в кольце не повторяется (сторож plan_first_use), поэтому разных
-// заказов сразу не больше, чем сэмплов у живого потока. Кольцо обязано их
-// вмещать: переполнение - молчаливый отказ заказа и молчащая нота.
-static_assert(soundsinth::formats::midi::kLiveMaxSamples <= kDemandRingCapacity, "the request ring is smaller than the number of samples in the live stream");
-
 namespace {
 
-constexpr uint16_t kRingMask = kDemandRingCapacity - 1u;
-
-// Demand держит своё в массивах плана: plan_indices - кольцо заказов,
-// plan_first_use - признак "сэмпл в кольце", plan_last_use - часы, когда
-// сэмпл звучал или загружен в последний раз. Доступ - только через эти
-// функции, поля Plan читаются по своим именам.
-constexpr uint16_t kDemandInRing = 0;
-
-inline uint16_t& demand_ring_slot(ProgressiveLoader& pl, uint16_t n) {
-    return pl.plan_indices[n & kRingMask];
-}
-inline bool demand_in_ring(const ProgressiveLoader& pl, uint16_t idx) {
-    return pl.plan_first_use[idx] != kSampleNeverUsed;
-}
-inline void demand_mark_in_ring(ProgressiveLoader& pl, uint16_t idx) {
-    pl.plan_first_use[idx] = kDemandInRing;
-}
-inline void demand_mark_out_of_ring(ProgressiveLoader& pl, uint16_t idx) {
-    pl.plan_first_use[idx] = kSampleNeverUsed;
-}
-inline uint16_t& demand_last_heard(ProgressiveLoader& pl, uint16_t idx) {
-    return pl.plan_last_use[idx];
-}
-
-// Demand: дольше всех не звучавший из тех, кого не держит голос.
-bool evict_least_recent(ProgressiveLoader& pl, soundsinth::memory::TrackMemory& mem, const SamplesInUse& in_use) {
-    soundsinth::memory::SampleCacheEntry* victim = nullptr;
-    uint16_t oldest_age                          = 0;
-    const uint16_t end                           = mem.sample_cache.used_end.load(std::memory_order_relaxed);
-    for (uint16_t i = 0; i < end; ++i) {
-        soundsinth::memory::SampleCacheEntry& e = mem.sample_cache.entries[i];
-        const uint16_t idx                      = soundsinth::memory::sample_cache_slot_index(e);
-        if (idx >= kProgressiveMaxSamples) continue;
-        if (in_use.is_busy(idx)) {
-            if (in_use.over_cap(idx)) ++pl.evict_capped;
-            continue;
-        }
-        const uint16_t last = demand_last_heard(pl, idx);
-        // Ни разу не отмечен - старше всех.
-        const uint16_t age = last == kSampleNeverUsed ? 0xffffu : static_cast<uint16_t>(pl.clock - last);
-        if (victim == nullptr || age > oldest_age) {
-            victim     = &e;
-            oldest_age = age;
-        }
-    }
-    if (victim == nullptr) return false;
-    soundsinth::memory::sample_cache_evict(mem.sample_cache, mem.psram, victim);
-    ++pl.evicted;
+// Сэмпл держит голос - жертвой не годится. Отказ потолком карты занятых
+// считается в evict_capped: звать там, где сэмпл подошёл бы по остальным
+// признакам, иначе счёт поедет.
+bool held(ProgressiveLoader& pl, const SamplesInUse& in_use, uint16_t idx) {
+    if (!in_use.is_busy(idx)) return false;
+    if (in_use.over_cap(idx)) ++pl.evict_capped;
     return true;
 }
 
@@ -83,10 +35,7 @@ bool evict_farthest(ProgressiveLoader& pl, soundsinth::memory::TrackMemory& mem,
         if (idx >= kProgressiveMaxSamples || idx == incoming) continue;
         const uint16_t d = use_map_distance(pl.use_map, idx, order_pos);
         if (d <= farthest) continue;
-        if (in_use.is_busy(idx)) {
-            if (in_use.over_cap(idx)) ++pl.evict_capped;
-            continue;
-        }
+        if (held(pl, in_use, idx)) continue;
         victim   = &e;
         farthest = d;
     }
@@ -98,53 +47,20 @@ bool evict_farthest(ProgressiveLoader& pl, soundsinth::memory::TrackMemory& mem,
 
 } // namespace
 
-void progressive_start_demand(ProgressiveLoader& pl) {
-    pl.source     = ProgressiveSource::Demand;
-    pl.use_map    = UseMap{};
-    pl.plan_next  = 0;
-    pl.plan_count = 0;
-    pl.clock      = 0;
-    for (uint16_t i = 0; i < kProgressiveMaxSamples; ++i) {
-        demand_last_heard(pl, i) = kSampleNeverUsed;
-        demand_mark_out_of_ring(pl, i);
-    }
-}
-
-bool progressive_request(ProgressiveLoader& pl, uint16_t sample_index) {
-    if (pl.source != ProgressiveSource::Demand || sample_index >= kProgressiveMaxSamples) return false;
-    if (demand_in_ring(pl, sample_index)) return true;
-    if (static_cast<uint16_t>(pl.plan_count - pl.plan_next) >= kDemandRingCapacity) return false;
-    demand_ring_slot(pl, pl.plan_count) = sample_index;
-    ++pl.plan_count;
-    demand_mark_in_ring(pl, sample_index);
-    return true;
-}
-
-void progressive_note_in_use(ProgressiveLoader& pl, const soundsinth::memory::TrackMemory& mem, const SamplesInUse& in_use, uint16_t now) {
-    pl.clock           = now;
-    const uint16_t end = mem.sample_cache.used_end.load(std::memory_order_relaxed);
-    for (uint16_t i = 0; i < end; ++i) {
-        const uint16_t idx = soundsinth::memory::sample_cache_slot_index(mem.sample_cache.entries[i]);
-        if (idx >= kProgressiveMaxSamples) continue;
-        if (in_use.is_busy(idx)) demand_last_heard(pl, idx) = now;
-    }
-}
-
 // Без карты позиций: вытесняется сэмпл, чья последняя позиция пройдена и
 // которого не держит голос (голос переживает last_use на релизе и хвосте
 // NNA). Цепочку PCM, общую с другой записью (.mid), sample_cache_evict не
 // освобождает.
 bool progressive_evict_one(ProgressiveLoader& pl, soundsinth::memory::TrackMemory& mem, uint16_t order_pos, const SamplesInUse& in_use, uint16_t incoming) {
     if (pl.no_eviction) return false;
-    if (pl.source == ProgressiveSource::Demand) return evict_least_recent(pl, mem, in_use);
     if (pl.plan_count == 0) return false;
     if (pl.use_map.words != nullptr) return evict_farthest(pl, mem, order_pos, in_use, incoming);
     if (order_pos == 0) return false;
     // До отметки занятых, а не по всему массиву: выше неё слотов нет по
     // контракту каталога, а зовут это до kMaxEvictRetries раз на сэмпл.
     //
-    // Начинать с места прошлой остановки (по кругу) пробовали - замером
-    // хуже: жертвой становится сэмпл, который скоро понадобится снова.
+    // Обход с места прошлой остановки по замеру хуже: жертвой становится
+    // сэмпл, который скоро понадобится снова.
     // Самый нижний подходящий слот держит тот, что загружен раньше всех и
     // вероятнее отыграл.
     const uint16_t end = mem.sample_cache.used_end.load(std::memory_order_relaxed);
@@ -155,10 +71,7 @@ bool progressive_evict_one(ProgressiveLoader& pl, soundsinth::memory::TrackMemor
         if (idx >= kProgressiveMaxSamples) continue;
         const uint16_t last = pl.plan_last_use[idx];
         if (last == kSampleNeverUsed || last >= order_pos) continue;
-        if (in_use.is_busy(idx)) {
-            if (in_use.over_cap(idx)) ++pl.evict_capped;
-            continue;
-        }
+        if (held(pl, in_use, idx)) continue;
         soundsinth::memory::sample_cache_evict(mem.sample_cache, mem.psram, &e);
         ++pl.evicted;
         return true;
@@ -257,17 +170,6 @@ bool plan_pick_within_horizon(ProgressiveLoader& pl, uint16_t order_pos) {
     return true;
 }
 
-// Снять с головы очереди (Plan) или кольца (Demand) следующий сэмпл.
-uint16_t take_next_index(ProgressiveLoader& pl) {
-    if (pl.source != ProgressiveSource::Demand) return pl.plan_indices[pl.plan_next++];
-    const uint16_t idx = demand_ring_slot(pl, pl.plan_next);
-    ++pl.plan_next;
-    demand_mark_out_of_ring(pl, idx);
-    // Запрошенный - свежий: вытеснение не выберет его первым.
-    demand_last_heard(pl, idx) = pl.clock;
-    return idx;
-}
-
 // Загрузить сэмпл idx; не влезло - вытеснить один сэмпл и попробовать
 // снова. Банк не читается с карты - вытеснение не поможет.
 // Повтор - только когда вытеснение что-то дало: страниц стало больше или
@@ -298,10 +200,7 @@ ProgressiveStep load_with_eviction(ProgressiveLoader& pl, soundsinth::memory::Tr
 
 ProgressiveStep progressive_load_next(ProgressiveLoader& pl, soundsinth::memory::TrackMemory& mem, uint16_t order_pos, const SamplesInUse& in_use,
                                       ProgressiveLoadFn load, void* user, uint16_t* loaded_index, const char** reason_out) {
-    const bool demand = pl.source == ProgressiveSource::Demand;
-    if (demand) {
-        if (pl.plan_next == pl.plan_count) return ProgressiveStep::Waiting;
-    } else if (pl.plan_next >= pl.plan_count) {
+    if (pl.plan_next >= pl.plan_count) {
         // Очередь пройдена - повторный проход по кругу возвращает
         // вытесненное и не влезшее, если оно ещё прозвучит.
         return plan_rescan_step(pl, mem, order_pos, in_use, load, user, loaded_index, reason_out);
@@ -313,9 +212,9 @@ ProgressiveStep progressive_load_next(ProgressiveLoader& pl, soundsinth::memory:
     // по смещению, а не по первой ноте.
     const uint32_t free_pages  = soundsinth::memory::psram_free_page_count(mem.psram);
     const bool memory_is_ample = free_pages > (soundsinth::memory::psram_sample_page_count(mem.psram) / kAmpleFreeDivisor);
-    if (!demand && pl.lead_positions != 0 && !memory_is_ample && !plan_pick_within_horizon(pl, order_pos)) return ProgressiveStep::Waiting;
+    if (pl.lead_positions != 0 && !memory_is_ample && !plan_pick_within_horizon(pl, order_pos)) return ProgressiveStep::Waiting;
 
-    const uint16_t idx = take_next_index(pl);
+    const uint16_t idx = pl.plan_indices[pl.plan_next++];
     if (loaded_index) *loaded_index = idx;
     if (soundsinth::memory::sample_cache_find(mem.sample_cache, idx) != nullptr) return ProgressiveStep::Loaded;
     return load_with_eviction(pl, mem, order_pos, in_use, load, user, idx, reason_out);

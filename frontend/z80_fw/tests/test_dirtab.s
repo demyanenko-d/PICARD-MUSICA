@@ -16,6 +16,7 @@
         .globl  _fat_mount
         .globl  _fat_dir_open_root
         .globl  _fat_dir_load
+        .globl  _fat_dir_hook
         .globl  _fat_dir_get
         .globl  _fat_dir_count
         .globl  _fat_dir_full
@@ -25,7 +26,6 @@
         .globl  _fat_ent_size
         .globl  _fat_page_check
         .globl  _fat_page_work
-        .globl  _fat_page_pre
         .globl  _fat_page_dir
         .globl  _fat_port_shadow
         .globl  start
@@ -45,8 +45,6 @@ start::
         ld      (_fat_port_shadow), a
         ld      a, #1
         ld      (_fat_page_work), a
-        ld      a, #3
-        ld      (_fat_page_pre), a
         ld      a, #4
         ld      (_fat_page_dir), a
         call    _fat_page_check
@@ -71,6 +69,8 @@ td_mount_ok:
         jp      td_fail
 td_root_ok:
 
+        ld      hl, #0          ; makebin заполняет пустое 0xFF
+        ld      (_fat_dir_hook), hl
         call    _fat_dir_load
         jr      nc, td_load_ok
         ld      a, #4

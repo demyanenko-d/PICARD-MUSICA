@@ -106,8 +106,8 @@ void test_whole_chip_all_pages() {
     memory::psram_destroy(store);
 }
 
-// Двойное освобождение цепочки: счётчик уходит выше числа страниц, флаг
-// взведён и держится, пока список не пересобран.
+// Двойное освобождение цепочки: флаг взведён и держится, пока список не
+// пересобран.
 void test_double_free_is_flagged() {
     std::printf("test_psram_double_free_is_flagged\n");
     static memory::PsramStore store;

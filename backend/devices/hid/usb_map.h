@@ -34,11 +34,14 @@ struct ModifierRoles {
 ModifierRoles usb_map_default_modifiers();
 
 void usb_map_set_modifiers(const ModifierRoles& roles);
+ModifierRoles usb_map_modifiers();
 
 // Клавиши действий джойстика в режиме Win+F2: строка на разряд порта
 // Kempston, коды HID, ноль - клавиши нет.
 inline constexpr uint32_t kJoyKeyActions = 8;
 inline constexpr uint32_t kJoyKeySlots   = 2;
+void usb_map_set_joy_keys(const uint8_t (&keys)[kJoyKeyActions][kJoyKeySlots]);
+
 // Захват клавиши для привязки в конфигураторе: после взвода ждётся отчёт
 // без клавиш, затем берётся первый код следующего. Клавиша, которой
 // взводили (Enter), так в захват не попадает.
@@ -46,9 +49,6 @@ void usb_map_capture_arm();
 void usb_map_capture_cancel();
 // true - клавиша поймана, code - её код HID; захват снят.
 bool usb_map_capture_take(uint8_t& code);
-
-void usb_map_set_joy_keys(const uint8_t (&keys)[kJoyKeyActions][kJoyKeySlots]);
-ModifierRoles usb_map_modifiers();
 
 // Нажатий по кодам, которых нет в раскладке (F1..F10, Pause, PrintScreen,
 // Menu, часть цифровой клавиатуры). Для пользователя это "клавиша не

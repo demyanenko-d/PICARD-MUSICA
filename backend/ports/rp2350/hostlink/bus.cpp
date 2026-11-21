@@ -2,27 +2,44 @@
 // Реализация bus.h. Разделы в том же порядке: пины, плагинная шина,
 // эмуляция ПЗУ.
 
-#include "bus_setup.h"
+#include "bus.h"
 
 #include <atomic>
 #include <cinttypes>
+#include <cstring>
+#include <initializer_list>
 
 #include "hardware/dma.h"
 #include "hardware/gpio.h"
 #include "hardware/pio.h"
+#include "hardware/pwm.h"
+#include "hardware/structs/m33.h"
 #include "hardware/sync.h"
+#include "hardware/timer.h"
 #include "pico.h"
 
-#include "divmmc.h"
 #include "platform/log.h"
-#include "player/live/ay_tap.h"
+
 #include "core/live_midi/ay_midi.h"
+
+#include "player/nav/nav_page.h"
+
+#include "player/live/ay_live.h"
+#include "player/live/ay_port.h"
+#include "player/live/live_tap.h"
+#include "player/live/dac_live.h"
+#include "player/live/saa_live.h"
+#include "player/protocol/host_frame.h"
+
+#include "bus_setup.h"
+#include "divmmc.h"
 #include "memory.pio.h"      // PAGE_TABLE_BASE_SHIFT
 #include "ports.pio.h"       // PORT_TABLE_BASE_SHIFT
 #include "trap_join.pio.h"   // TRAP_LO_BASE_SHIFT, TRAP_SUB_BASE_SHIFT
 #include "reset_watch.pio.h" // IRQ_ROM48, IRQ_PAGING_LOCKED
-#include "trdos.pio.h"       // trdos_detect_offset_asserted
-#include "player/protocol/host_frame.h"
+#include "trdos.pio.h"       // TRDOS_IRQ_NAV, TRDOS_IRQ_FETCH
+#include "pentagon.pio.h"    // IRQ_DOS
+#include "rom_image_nav.h"
 
 namespace bus {
 
@@ -34,11 +51,12 @@ namespace bus {
 // префиксом s_ или k.
 
 // Режим ставится один раз при загрузке, дальше все спрашивают флаг: на
-// ходу он не меняется. Определение - рядом с таблицами ответов (плагинная
-// шина ниже): set_rd_word читает флаг от их общей базы.
+// ходу он не меняется.
 extern bool s_rom_emu;
 extern bool s_trdos;
 extern bool s_config_rom;
+extern bool s_pentagon;
+extern bool s_pentagon_drive_dos;
 
 void rom_emu_set_enabled(bool on) {
     s_rom_emu = on;
@@ -72,6 +90,33 @@ void trdos_set_enabled(bool on) {
     s_trdos = on;
 }
 
+void pentagon_rom_set_enabled(bool on, bool drive_dos) {
+    s_pentagon           = on;
+    s_pentagon_drive_dos = on && drive_dos;
+}
+
+bool pentagon_rom_enabled() {
+    return s_pentagon;
+}
+
+// Страница Пентагона p - по адресу бит 4 << 15 | DOS << 14 от начала блока:
+// так её собирает автомат pentagon_rom.
+bool pentagon_rom_load(const uint8_t* image) {
+    bool erased = true;
+    for (uint32_t i = 0; i < kPentagonRomBytes && erased; ++i) {
+        erased = image[i] == 0xffu;
+    }
+    if (erased) return false;
+    uint8_t* const block     = pentagon_rom_block();
+    constexpr uint32_t kPage = kPentagonRomBytes / 4u;
+    for (uint32_t p = 0; p < 4u; ++p) {
+        const uint32_t rom48 = p & 1u;
+        const uint32_t dos   = p < 2u ? 1u : 0u;
+        std::memcpy(block + (rom48 << kPentagonWordShift) + (dos << (kPentagonWordShift - 1u)), image + p * kPage, kPage);
+    }
+    return true;
+}
+
 bool trdos_enabled() {
     return s_trdos;
 }
@@ -88,7 +133,7 @@ __force_inline void set_rd_word(uint8_t port, uint32_t word);
 
 PioStats s_stats;
 
-// --- Вооружённый кадр ---
+// --- Выставленный кадр ---
 //
 // Протокол отдаёт команду целиком (код и аргументы), слова ответа на все
 // её байты кодируются один раз (host_frame.h). Дальше ISR чтения протокол
@@ -96,7 +141,7 @@ PioStats s_stats;
 uint32_t s_frame_words[player::protocol::host_frame::kWords];
 volatile uint8_t s_frame_pos = 0; // двигает ISR чтения, обнуляет arm_frame
 
-// Приёмник кадра: слово ответа - в таблицу и копию пути эмуляции ПЗУ.
+// Приёмник кадра: слово ответа - в ячейку ответа порта.
 struct FrameSink {
     static constexpr uint8_t kCmd = PORT_CMD;
     static constexpr uint8_t kDat = PORT_DAT;
@@ -116,7 +161,7 @@ void __not_in_flash_func(arm_frame)(void*, uint8_t code, const uint8_t* args, ui
     player::protocol::host_frame::arm(sink, s_frame_words, s_frame_pos, code, args, n);
 }
 
-// Байт команды хоста пришёл во время вооружения: команду протокол вернёт
+// Байт команды хоста пришёл во время выставления: команду протокол вернёт
 // после разбора кадра хоста.
 void __not_in_flash_func(hide_frame)(void*) {
     FrameSink sink;
@@ -135,6 +180,23 @@ PortReadFn s_rd_done_table[256];
 bool s_rom_emu = false;
 // Триггер TR-DOS включён. Вместе с DivMMC не бывает: дисковая система одна.
 bool s_trdos = false;
+// Своё ПЗУ Пентагона: выбрано настройками и ведёт ли DOS_N.
+bool s_pentagon           = false;
+bool s_pentagon_drive_dos = false;
+// Слово базы автомата отдачи без бита 4: блок >> 15. Ноль - автомат не
+// поднят.
+uint32_t s_pentagon_word = 0;
+// Своё ПЗУ при работающей машине (RESET_SIGNAL=0): ROM_BLK_N ставится
+// по первому сбросу машины, а не под исполняемым кодом её ПЗУ.
+bool s_rom_take_on_reset = false;
+// Бит 4 на момент закрытия порта 7FFD.
+bool s_pentagon_locked_rom48 = false;
+// Записи в порт при своём ПЗУ: канал s_dma_wr_ring кладёт снимки bus_wr в
+// кольцо, а копию каждого - фильтру 7FFD в pio2. Ядро читает кольцо, а не
+// очередь автомата. -1 - кольца нет, ядро читает очередь.
+alignas(kWrRingBytes) uint32_t s_wr_ring[kWrRingWords];
+int s_dma_wr_ring     = -1;
+uint32_t s_wr_ring_at = 0; // следующее слово для ядра
 // Режим конфигуратора: вместо образа DivMMC подставляется ПЗУ настроек, и
 // подстановка держится с первой выборки, не дожидаясь трапа.
 bool s_config_rom = false;
@@ -177,8 +239,9 @@ uint32_t host_status_read_us() {
 
 // Чтение порта состоялось - общее тело для обоих путей. Кадр порта данных
 // продвигается здесь: путь портов эмуляции ПЗУ зовёт только эту функцию,
-// мимо s_rd_done_table.
-void __not_in_flash_func(dispatch_port_read_done)(uint8_t addr) {
+// мимо s_rd_done_table. Не встраивается: копия у divmmc всё равно нужна,
+// а SRAM на счету.
+__noinline void __not_in_flash_func(dispatch_port_read_done)(uint8_t addr) {
     // Клиент хоста в своём цикле всё время читает порт состояния: тишина на
     // нём - хост ушёл из плеера.
     if (addr == PORT_CMD) s_host_status_read_us = timer_hw->timerawl;
@@ -224,7 +287,7 @@ static_assert(sizeof(uint32_t) * PAGE_TAB_HALVES * PAGES_PER_TABLE == 1u << PAGE
               "the page table variant is exactly the address window rom_detect assembles");
 // Выравнивание вдвое больше варианта: младший разряд базы в X - номер
 // варианта по чётности, он же ROM_BLK_N (rom_detect, mov pins, x).
-alignas(2u << PAGE_TABLE_BASE_SHIFT) __attribute__((section(".bss.bus_pagetabs"))) uint32_t s_pagetabs[PAGE_TAB_VARIANTS][PAGE_TAB_HALVES][PAGES_PER_TABLE];
+alignas(2u << PAGE_TABLE_BASE_SHIFT) SOUNDSINTH_BUSMEM("pagetabs") uint32_t s_pagetabs[PAGE_TAB_VARIANTS][PAGE_TAB_HALVES][PAGES_PER_TABLE];
 uint32_t s_page_variant = 0;
 
 // Откуда брать байт ответа на порт, ноль - порт не наш. Старший разряд
@@ -234,19 +297,32 @@ uint32_t s_page_variant = 0;
 //
 // Таблица выровнена на 1024: адрес записи собирается склейкой в детекторе
 // (in x,22 / in pins,8 / in null,2).
-alignas(1u << PORT_TABLE_BASE_SHIFT) __attribute__((section(".bss.bus_porttab"))) uint32_t s_porttab[256];
+alignas(1u << PORT_TABLE_BASE_SHIFT) SOUNDSINTH_BUSMEM("porttab") uint32_t s_porttab[256];
+
+// Без DivMMC порты отвечают по паре таблиц (port_detect_dos): при DOS - эта,
+// без DOS - s_porttab, разряд kPortTabDosBit адреса записи - ~DOS. Обычные
+// порты в обеих одинаковы, порты Beta Disk - только здесь.
+//
+// s_dos_mirror[порт] = 1 - ответ порта повторяется в таблице при DOS. Нули -
+// порты Beta Disk; в режиме DivMMC таблица при DOS не читается.
+uint8_t s_dos_mirror[256];
+// Пока Beta Disk не поставил свой хук, чтений его портов при DOS нет:
+// ячеек ещё нет. Пустая функция - на случай порядка подъёма.
+void __not_in_flash_func(dos_rd_none)(uint8_t) {}
+PortReadFn s_dos_rd_done          = dos_rd_none;
+constexpr uint32_t kPortTabDosBit = 1u << PORT_TABLE_BASE_SHIFT;
 
 // Ячейки ответов, отдельно от таблицы: значение пишется сюда, разрешение
 // отвечать - указателем в таблице.
 uint32_t s_portval[256];
 
-int s_dma_port_addr       = -1; // rxf детектора портов -> read_addr следующего
-int s_dma_port_ptr        = -1; // porttab[порт] -> al3_read_addr_trig канала выдачи ответа
-int s_dma_port_join       = -1; // rxf склейщика -> al3_read_addr_trig канала выдачи байта
-int s_sm_port_join        = -1; // склейщик ячейки ответа, в блоке звука
-int s_sm_trdos_drive      = -1; // выдатчик уровня DOS_N, там же
-int s_trdos_detect_offset = -1;
-int s_sm_reset_watch      = -1;
+int s_dma_port_addr  = -1; // rxf детектора портов -> read_addr следующего
+int s_dma_port_ptr   = -1; // porttab[порт] -> al3_read_addr_trig канала выдачи ответа
+int s_dma_port_join  = -1; // rxf склейщика -> al3_read_addr_trig канала выдачи байта
+int s_sm_port_join   = -1; // склейщик ячейки ответа, в блоке звука
+bool s_trdos_up      = false;
+bool s_hold_up       = false;
+int s_sm_reset_watch = -1;
 
 int s_dma_tab_addr  = -1; // rxf детектора -> read_addr следующего
 int s_dma_tab_data  = -1; // pagetab[регион] -> txf rom_join
@@ -281,41 +357,184 @@ uint32_t bus_wr_peak() {
     return s_bus_wr_peak;
 }
 
-// Запись в порты AY (#FFFD выбор регистра, #BFFD данные: A15 = 1, младший
-// байт #FD, A14 различает) - в кольцо живого MIDI, разбор на Core0.
-constexpr uint16_t kAyPortMask   = 0x80ffu;
-constexpr uint16_t kAyPortMatch  = 0x80fdu;
-constexpr uint16_t kAyDataSelect = 0x4000u; // A14: ноль - данные, единица - выбор регистра
-__force_inline void tap_ay_write(uint32_t raw) {
+// Худший проход bus_wr_isr в тактах ядра (DWT CYCCNT, включает setup_bus_wr)
+// и сколько слов он разобрал. Применение записи ВГ93 будет жить в этом
+// обработчике - это базовая строка его бюджета.
+uint32_t s_bus_wr_cyc_max     = 0;
+uint32_t s_bus_wr_cyc_drained = 0;
+
+// Записи в порты звуковых чипов - в кольцо отвода, разбор на Core0. Штамп -
+// часы шины в полумикросекундах, как bus_clock_stamp (та - в банках BDI,
+// без BDI её нет).
+//
+// AY: #FFFD выбор регистра, #BFFD данные - A15 = 1, младший байт #FD, A14
+// различает. Та же запись ведёт тень регистров для ответа на чтение #FFFD.
+//
+// SAA1099 MultiSound, пока включён живой SAA: младший байт #FF, A8 = 1 -
+// номер регистра, 0 - данные. При включённом ПЗУ TR-DOS порт #FF -
+// системный регистр Beta Disk, и запись в него чипу не идёт - в любом
+// режиме с DOS, как у Soundrive: своё ПЗУ без DOS_N не исключение.
+constexpr uint16_t kAyPortMask    = 0x80ffu;
+constexpr uint16_t kAyPortMatch   = 0x80fdu;
+constexpr uint16_t kAyDataSelect  = 0x4000u; // A14: ноль - данные, единица - выбор регистра
+constexpr uint16_t kSaaPortLow    = 0x00ffu;
+constexpr uint16_t kSaaAddrSelect = 0x0100u; // A8: ноль - данные, единица - номер регистра
+
+// Цифровой звук машины (dac_live.h), пока что-то включено - в своё кольцо.
+// ULA - любой чётный порт: бипер кладёт запись, только когда сменились
+// слышные разряды (бордюр пишется в тот же порт). Soundrive - младший байт
+// по маске #AF равен #0F: #0F, #1F, #4F, #5F; при ПЗУ TR-DOS #1F и #5F -
+// порты Beta Disk, звука от них нет.
+constexpr uint8_t kCovoxPort = 0xfbu;
+constexpr uint8_t kSdMask    = 0xafu;
+constexpr uint8_t kSdMatch   = 0x0fu;
+constexpr uint8_t kSdDosBit  = 0x10u; // #1F и #5F
+uint8_t s_fe_heard           = 0;
+__force_inline void tap_dac_write(uint16_t addr, uint8_t data) {
+    using namespace player::live;
+    const uint8_t on = g_dac_on;
+    if (on == 0u) return;
+    const auto lo = static_cast<uint8_t>(addr);
+    if ((lo & 1u) == 0u) {
+        const uint8_t heard = data & on & (kDacBeeperEar | kDacBeeperMic);
+        if (heard == s_fe_heard) return;
+        s_fe_heard = heard;
+        g_dac_ring.push(timer_hw->timerawl * 2u, static_cast<uint8_t>(DacPort::Beeper), heard);
+        return;
+    }
+    if (lo == kCovoxPort) {
+        if ((on & kDacCovox) != 0u) g_dac_ring.push(timer_hw->timerawl * 2u, static_cast<uint8_t>(DacPort::Covox), data);
+        return;
+    }
+    if ((on & kDacSoundrive) == 0u || (lo & kSdMask) != kSdMatch) return;
+    if ((lo & kSdDosBit) != 0u && (PIO_DETECT->irq & (1u << IRQ_DOS)) != 0u) return;
+    // #0F - A, #1F - B, #4F - C, #5F - D: разряды 4 и 6 номера.
+    const uint8_t dac = static_cast<uint8_t>(DacPort::SdA) + ((lo >> 4) & 1u) + ((lo >> 5) & 2u);
+    g_dac_ring.push(timer_hw->timerawl * 2u, dac, data);
+}
+
+__force_inline void tap_chip_write(uint32_t raw) {
     if (is_memory_write(raw)) return;
     const uint16_t addr = addr_of(raw);
-    if ((addr & kAyPortMask) != kAyPortMatch) return;
-    const uint16_t sel = (addr & kAyDataSelect) ? soundsinth::midi_in::kAyWriteSelect : 0u;
-    player::live::ay_tap_push(static_cast<uint16_t>(sel | data_of(raw)));
+    if ((addr & kAyPortMask) == kAyPortMatch) {
+        const bool select = (addr & kAyDataSelect) != 0;
+        player::live::tap_push(timer_hw->timerawl * 2u, select ? player::live::TapPort::AySelect : player::live::TapPort::AyData, data_of(raw));
+        player::live::ay_port_write(select, data_of(raw));
+        return;
+    }
+    tap_dac_write(addr, data_of(raw));
+    if ((addr & 0xffu) != kSaaPortLow || !player::live::g_saa_live_on) return;
+    if ((PIO_DETECT->irq & (1u << IRQ_DOS)) != 0u) return;
+    const auto port = (addr & kSaaAddrSelect) ? player::live::TapPort::SaaAddr : player::live::TapPort::SaaData;
+    player::live::tap_push(timer_hw->timerawl * 2u, port, data_of(raw));
 }
 
 // Запись в порт 0x7FFD (A15 = 0, A1 = 0) - для триггера TR-DOS: бит 4
 // выбирает ПЗУ 48, бит 5 закрывает порт до сброса машины. Оба держат флаги
-// IRQ блока триггера, гасит их сторож сброса.
+// IRQ блока триггера, гасит их сброс машины. Байт целиком - навигатору
+// образов: по биту 3 он знает, какой экран виден.
 constexpr uint16_t kPagingPortMask = 0x8002u;
 constexpr uint8_t kPagingRom48     = 0x10u;
 constexpr uint8_t kPagingLock      = 0x20u;
+volatile uint8_t s_port_7ffd       = 0;
+// Своё ПЗУ Пентагона: бит 4 ставит paging_filter в pio2 к следующей выборке.
+// Закрытия порта фильтр не знает: после него здесь флаг и слово базы
+// возвращаются к значению на момент закрытия.
 __force_inline void tap_paging_write(uint32_t raw) {
-    if (s_trdos_detect_offset < 0 || is_memory_write(raw)) return;
+    if ((!s_trdos_up && s_pentagon_word == 0u) || is_memory_write(raw)) return;
     if ((addr_of(raw) & kPagingPortMask) != 0u) return;
-    if ((PIO_DETECT->irq & (1u << IRQ_PAGING_LOCKED)) != 0u) return;
     const uint8_t data = data_of(raw);
-    if ((data & kPagingRom48) != 0u) {
+    bool rom48         = (data & kPagingRom48) != 0u;
+    const bool locked  = (PIO_DETECT->irq & (1u << IRQ_PAGING_LOCKED)) != 0u;
+    if (!locked) s_port_7ffd = data;
+    if (s_pentagon_word != 0u) {
+        // Открытый порт - забота фильтра: повтор отсюда опоздал бы и при
+        // двух записях подряд вернул бы старую страницу.
+        if (!locked) {
+            s_pentagon_locked_rom48 = rom48;
+            if ((data & kPagingLock) != 0u) PIO_DETECT->irq_force = 1u << IRQ_PAGING_LOCKED;
+            return;
+        }
+        rom48                            = s_pentagon_locked_rom48;
+        PIO_DETECT->txf[SM_PENTAGON_ROM] = s_pentagon_word | (rom48 ? 1u : 0u);
+    } else {
+        if (locked) return;
+        if ((data & kPagingLock) != 0u) PIO_DETECT->irq_force = 1u << IRQ_PAGING_LOCKED;
+    }
+    if (rom48) {
         PIO_DETECT->irq_force = 1u << IRQ_ROM48;
     } else {
         PIO_DETECT->irq = 1u << IRQ_ROM48;
     }
-    if ((data & kPagingLock) != 0u) PIO_DETECT->irq_force = 1u << IRQ_PAGING_LOCKED;
+}
+
+// --- Навигатор образов (TR-DOS с ПЗУ машины) ---
+//
+// Таблицы страниц DivMMC в этом режиме не нужны, их 32 КБ - память
+// навигатора: ПЗУ, N0, копия ПЗУ, N1 по 8 КБ. trdos_nav собирает адрес
+// байта как слово << 14 | A0..A13, слово = база >> 14 | банк окна.
+constexpr uint32_t kNavWordShift = 14;
+static_assert(sizeof(s_pagetabs) == 4u * kZ80BankBytes, "the image navigator takes the whole page tables");
+static_assert(sizeof(kNavRom) == kZ80BankBytes, "the image navigator ROM is one bank");
+bool s_nav_enabled          = false;
+uint32_t s_nav_word         = 0; // база >> 14, ноль - навигатора нет
+volatile uint8_t s_nav_bank = 0; // банк окна 0x2000: N0 или N1
+
+__force_inline uint8_t* nav_bank(uint32_t b) {
+    return reinterpret_cast<uint8_t*>(s_pagetabs) + (2u * b + 1u) * kZ80BankBytes;
+}
+
+// Запись в окно 0x2000-0x3FFF - в банк окна, пока стоит флаг навигатора.
+// Ниже окна - его ПЗУ; без флага всё это ПЗУ машины.
+__force_inline void nav_memory_write(uint32_t raw) {
+    const uint16_t a = addr_of(raw);
+    if (a < kZ80BankBytes || (PIO_DETECT->irq & (1u << TRDOS_IRQ_NAV)) == 0u) return;
+    nav_bank(s_nav_bank)[a - kZ80BankBytes] = data_of(raw);
+}
+
+// Банк окна - запись в порт банка, пока стоит флаг. Слово - в очередь
+// trdos_nav, он берёт его на следующем чтении памяти; записи в окно с этого
+// места идут в новый банк.
+void __not_in_flash_func(nav_bank_write)(uint8_t /*port*/, uint8_t data) {
+    if ((PIO_DETECT->irq & (1u << TRDOS_IRQ_NAV)) == 0u) return;
+    s_nav_bank                    = data & 1u;
+    PIO_DETECT->txf[SM_TRDOS_NAV] = s_nav_word | s_nav_bank;
+}
+
+void nav_set_enabled(bool on) {
+    s_nav_enabled = on;
+}
+
+// ПЗУ - в обе половины, номер банка - в байт kBank банка N1: в N0 его пишет
+// плата вместе со страницей обмена.
+uint32_t nav_prepare() {
+    if (!s_nav_enabled) return 0;
+    uint8_t* const block = reinterpret_cast<uint8_t*>(s_pagetabs);
+    std::memcpy(block, kNavRom, kZ80BankBytes);
+    std::memcpy(block + 2u * kZ80BankBytes, kNavRom, kZ80BankBytes);
+    nav_bank(1)[player::nav_page::kBank] = 1;
+    port_on_write(player::nav_page::kBankPort, nav_bank_write);
+    s_nav_word = addr32(block) >> kNavWordShift;
+    return s_nav_word;
+}
+
+uint8_t* nav_page() {
+    return s_nav_word != 0u ? nav_bank(0) : nullptr;
+}
+
+bool __not_in_flash_func(nav_open)() {
+    return s_nav_word != 0u && (PIO_DETECT->irq & (1u << TRDOS_IRQ_NAV)) != 0u;
+}
+
+uint8_t port_7ffd() {
+    return s_port_7ffd;
 }
 
 void __not_in_flash_func(bus_wr_isr)() {
-    // Флаг снимается до разбора, иначе запись, пришедшая между чтением
-    // очереди и снятием флага, потеряла бы пробуждение.
+    const uint32_t cyc0 = m33_hw->dwt_cyccnt;
+    // Флаг bus_wr_ports снимается до разбора, иначе запись, пришедшая между
+    // чтением очереди и снятием флага, потеряла бы пробуждение. bus_wr флага
+    // не ставит: его пробуждение - непустая очередь, оно гаснет само.
     pio_interrupt_clear(PIO_WATCH, 0);
 
     // Без DivMMC автомат ловит только записи в порт: разбор - сразу по
@@ -324,12 +543,35 @@ void __not_in_flash_func(bus_wr_isr)() {
     // Цикл, а не по слову: между двумя записями Z80 бывает меньше времени,
     // чем вход в прерывание.
     uint32_t drained = 0;
-    while (!pio_sm_is_rx_fifo_empty(PIO_WATCH, SM_BUS_WRITE)) {
+    if (s_dma_wr_ring >= 0) {
+        // Своё ПЗУ: очередь забирает канал. Слово, снятое из очереди, ложится
+        // в кольцо через несколько тактов - выдержка после опустевшей очереди
+        // его дожидается, иначе последняя запись ждала бы следующей.
+        for (;;) {
+            while (!pio_sm_is_rx_fifo_empty(PIO_WATCH, SM_BUS_WRITE)) {
+                tight_loop_contents();
+            }
+            busy_wait_at_least_cycles(32);
+            const uint32_t head = (dma_hw->ch[s_dma_wr_ring].write_addr - reinterpret_cast<uintptr_t>(s_wr_ring)) / sizeof(uint32_t) % kWrRingWords;
+            if (s_wr_ring_at == head) break;
+            while (s_wr_ring_at != head) {
+                const uint32_t raw = s_wr_ring[s_wr_ring_at];
+                s_wr_ring_at       = (s_wr_ring_at + 1u) % kWrRingWords;
+                tap_chip_write(raw);
+                tap_paging_write(raw);
+                dispatch_port_write(port_of(raw), data_of(raw));
+                ++drained;
+            }
+        }
+    }
+    while (!pio_sm_is_rx_fifo_empty(PIO_WATCH, SM_BUS_WRITE) && s_dma_wr_ring < 0) {
         const uint32_t raw = pio_sm_get(PIO_WATCH, SM_BUS_WRITE);
-        tap_ay_write(raw);
+        tap_chip_write(raw);
         tap_paging_write(raw);
         if (s_rom_emu) {
             divmmc_on_bus_write(raw);
+        } else if (is_memory_write(raw)) {
+            nav_memory_write(raw);
         } else {
             dispatch_port_write(port_of(raw), data_of(raw));
         }
@@ -350,21 +592,23 @@ void __not_in_flash_func(bus_wr_isr)() {
         if (s_rom_emu) divmmc_note_lost(drained);
 #endif
     }
+
+    const uint32_t cyc = m33_hw->dwt_cyccnt - cyc0;
+    if (cyc > s_bus_wr_cyc_max) {
+        s_bus_wr_cyc_max     = cyc;
+        s_bus_wr_cyc_drained = drained;
+    }
 }
 
-// --- Замеры шины ---
-//
-// Случай, которого по остальным счётчикам не видно.
-
-// --- Порты на чтение в режиме эмуляции ПЗУ ---
+// --- Порты на чтение ---
 //
 // Детектор портов рядом с детектором памяти отдаёт байт тому же rom_serve;
 // циклы MREQ и IORQ у Z80 взаимно исключены, цепочки в одной его очереди
 // не сталкиваются. Цепочка: детектор -> указатель из s_porttab -> триггер
 // канала выдачи ответа -> байт в rom_serve.
 //
-// Прерывание включает setup_ports, после divmmc_reset: состояние карты к
-// первому чтению готово.
+// Прерывание включает setup_ports; с DivMMC - после divmmc_reset, состояние
+// карты к первому чтению готово.
 void __not_in_flash_func(port_rd_isr)() {
     dma_irqn_acknowledge_channel(DMA_IRQ_INDEX_PORT_RD, s_dma_port_join);
     // Порт восстанавливается из канала указателей: там адрес записи таблицы,
@@ -374,9 +618,10 @@ void __not_in_flash_func(port_rd_isr)() {
     // Спешить некуда: байт ушёл на шину переносом DMA задолго до входа сюда.
     // Обработчик подставляет следующий байт (у эмулятора карты - очередной
     // байт SPI).
-    const uint8_t port = table_index(dma_hw->ch[s_dma_port_ptr].read_addr);
-    if (s_rom_emu) {
-        divmmc_on_port_read(port);
+    const uint32_t at  = dma_hw->ch[s_dma_port_ptr].read_addr;
+    const uint8_t port = table_index(at);
+    if (!s_rom_emu && (at & kPortTabDosBit) == 0u && s_dos_mirror[port] == 0u) {
+        s_dos_rd_done(port);
     } else {
         dispatch_port_read_done(port);
     }
@@ -425,24 +670,43 @@ void rom_emu_set_fetch_page(uint32_t variant, uint32_t page, const void* mem) {
 // в эту минуту может держать в OSR снимок шины.
 //
 // Очередь разбирается на каждом чтении памяти, у Z80 оно есть в каждой
-// команде. Полная очередь - процессор стоит; слово сверху отбросилось бы
-// молча, и после пуска остался бы не последний вариант.
+// команде. В очередь пишут двое: этот путь (ядро, порт 0xE3 из bus_wr_isr)
+// и канал слова цепочки трапов - без темпа, слово в полную очередь
+// отбрасывается молча (TXOVER, счётчик detect). Поэтому ядро ждёт запаса в
+// две ячейки: одну слову цепочки в полёте, одну второму заходу ядра.
+//
+// Нет места дольше kVariantWaitUs - машина не читает память (сброс,
+// остановка, /WAIT): самое редкое чтение у Z80 - выборка раз в ~7 мкс
+// (23 такта на 3.5 МГц), четыре слова уходят за ~28 мкс. Без чтений циклов
+// нет и RX пуст, чистка обоих FIFO безопасна; прежний безусловный
+// pio_sm_clear_fifos при работающей машине сносил из RX адрес записи
+// таблицы живого цикла - байт не выдавался, машина читала мусор.
 namespace {
+std::atomic<uint32_t> s_variant_waits{0};  // ожидания места в очереди детектора
+std::atomic<uint32_t> s_variant_clears{0}; // чистки очереди: машина не читала дольше срока
+constexpr uint32_t kVariantWaitUs = 40;
+
 void __not_in_flash_func(queue_page_base)(uint32_t variant) {
-    if (pio_sm_is_tx_fifo_full(PIO_DETECT, SM_ROM_DETECT)) {
-        pio_sm_clear_fifos(PIO_DETECT, SM_ROM_DETECT);
+    if (pio_sm_get_tx_fifo_level(PIO_DETECT, SM_ROM_DETECT) > 2u) {
+        s_variant_waits.store(s_variant_waits.load(std::memory_order_relaxed) + 1u, std::memory_order_relaxed);
+        const uint32_t t0 = time_us_32();
+        while (pio_sm_get_tx_fifo_level(PIO_DETECT, SM_ROM_DETECT) > 2u) {
+            if (time_us_32() - t0 > kVariantWaitUs) {
+                pio_sm_clear_fifos(PIO_DETECT, SM_ROM_DETECT);
+                s_variant_clears.store(s_variant_clears.load(std::memory_order_relaxed) + 1u, std::memory_order_relaxed);
+                break;
+            }
+        }
     }
     pio_sm_put(PIO_DETECT, SM_ROM_DETECT, addr32(&s_pagetabs[variant][0][0]) >> PAGE_TABLE_BASE_SHIFT);
 }
 } // namespace
 
+// Слово кладётся всегда, без сверки с прошлым вариантом: трапы меняют
+// вариант цепочкой DMA мимо ядра, и запомненный здесь мог уже не стоять
+// (CONMEM с тем же банком после трапа выхода - запись в банк, чтение -
+// машины). Лишнее слово детектор снимает на ближайшем чтении памяти.
 void __not_in_flash_func(rom_emu_select_pages)(uint32_t variant) {
-    if (variant >= PAGE_TAB_VARIANTS || variant == s_page_variant) return;
-    s_page_variant = variant;
-    queue_page_base(variant);
-}
-
-void __not_in_flash_func(rom_emu_force_pages)(uint32_t variant) {
     if (variant >= PAGE_TAB_VARIANTS) return;
     s_page_variant = variant;
     queue_page_base(variant);
@@ -517,7 +781,7 @@ void rom_emu_trap_set(uint16_t addr, TrapKind kind) {
         sub[hi] = ptr;
     } else if (addr < 0x4000u) {
         // Путь страницы проходит ту же ступень "адрес ячейки -> указатель",
-        // поэтому в карте лежит адрес ЯЧЕЙКИ, сдвинутый влево: младший бит
+        // поэтому в карте лежит адрес ячейки, сдвинутый влево: младший бит
         // ноль - маршрут "насквозь".
         trap_page_map()[(addr >> 8) & (kTrapPageMapEntries - 1u)] = trap_page_entry(addr32(&s_trap_word_ptr[k]));
     }
@@ -553,13 +817,144 @@ void rom_emu_trap_reset_state() {
     s_trap_last = addr32(&s_trap_word[static_cast<uint32_t>(TrapKind::Exit)]);
 }
 
+// Запись таблицы портов; при DOS тот же ответ, если порт не отдан Beta Disk.
+__force_inline void tab_set(uint8_t port, uint32_t e) {
+    s_porttab[port] = e;
+    if (s_dos_mirror[port] != 0u) bus_porttab_dos[port] = e;
+}
+
 void __not_in_flash_func(port_answer)(uint8_t port, uint8_t value) {
     // Сначала значение, потом разрешение отвечать: наоборот между двумя
     // записями поместилось бы чтение с шины и ушло бы прежнее содержимое
     // ячейки. Ноль-ответ живёт в ячейке, ноль-отказ - в таблице.
     s_portval[port] = value;
     std::atomic_signal_fence(std::memory_order_release);
-    s_porttab[port] = addr32(&s_portval[port]);
+    tab_set(port, addr32(&s_portval[port]));
+}
+
+// Таблица при DOS - копия обычной; дальше обе ведёт tab_set. Зовётся до
+// запуска детектора.
+//
+// При DOS (TRDOS, своё ПЗУ с DOS_N) порты Beta Disk - его, машины или
+// платы: прочий ответ платы (Kempston на #1F) столкнулся бы с ним на шине.
+void dos_ports_enable() {
+    std::memcpy(bus_porttab_dos, s_porttab, sizeof(s_porttab));
+    std::memset(s_dos_mirror, 1, sizeof(s_dos_mirror));
+    if (!s_trdos && !s_pentagon_drive_dos) return;
+    for (const uint8_t p : {0x1f, 0x3f, 0x5f, 0x7f, 0xff}) {
+        s_dos_mirror[p]    = 0;
+        bus_porttab_dos[p] = 0;
+    }
+}
+
+// Без таблицы при DOS (режим DivMMC) - ничего: детектор DivMMC её не читает.
+bool port_dos_cell(uint8_t port, const uint8_t* cell) {
+    if (rom_emu_enabled()) return false;
+    s_dos_mirror[port]    = cell == nullptr ? 1u : 0u;
+    bus_porttab_dos[port] = cell != nullptr ? addr32(cell) : s_porttab[port];
+    return true;
+}
+
+void port_dos_on_read_done(PortReadFn fn) {
+    s_dos_rd_done = fn;
+}
+
+namespace {
+
+// Хуки удержания: порт Beta Disk при DOS - один на все, обычной таблицы -
+// тоже один (порт он получает аргументом): пользователя у него сейчас нет,
+// таблица на 256 портов стоила 1 КБ .bss.
+// Удержаний с запуска: сторож сброса не верит отметкам периода, в котором
+// Z80 стоял по воле платы.
+volatile uint32_t s_holds = 0;
+PortReadFn s_hold_dos_fn  = nullptr;
+PortReadFn s_hold_fn      = nullptr;
+
+// Склейщик держит /WAIT. Источник флага - выключить до ответа: линия
+// прерывания уровнем, а ответ может дать и поток позже.
+void __not_in_flash_func(port_hold_isr)() {
+    hw_clear_bits(&PIO_AUDIO->inte0, 1u << (PIO_INTR_SM0_LSB + PORT_HOLD_IRQ));
+    s_holds         = s_holds + 1u;
+    const auto port = static_cast<uint8_t>(sio_hw->gpio_in >> PIN_A0); // адрес стоит всё удержание
+    const bool dos  = (PIO_DETECT->irq & (1u << IRQ_DOS)) != 0u && s_dos_mirror[port] == 0u;
+    (dos ? s_hold_dos_fn : s_hold_fn)(port);
+}
+
+// Удержание есть только у склейщика с ним (s_hold_up). Вывод - склейщику:
+// уровень 0 и вход он получил при подъёме, линию тянет вниз только
+// направлением.
+bool hold_ready() {
+    if (!s_hold_up) return false;
+    static bool s_up = false;
+    if (!s_up) {
+        s_up = true;
+        pio_gpio_init(PIO_AUDIO, PIN_WAIT_N);
+        const uint irq = pio_get_irq_num(PIO_AUDIO, 0);
+        irq_set_exclusive_handler(irq, port_hold_isr);
+        irq_set_priority(irq, IRQ_PRIO_PORT_RD);
+        hw_set_bits(&PIO_AUDIO->inte0, 1u << (PIO_INTR_SM0_LSB + PORT_HOLD_IRQ));
+        irq_set_enabled(irq, true);
+    }
+    return true;
+}
+
+// Удержание закодировано страницей с базой 0: склейщик с удержанием
+// узнаёт её по нулевой базе.
+constexpr uint32_t kHoldRoute = port_page_entry(0);
+
+} // namespace
+
+bool port_dos_hold(uint8_t port, PortReadFn fn) {
+    if (!hold_ready()) return false;
+    s_hold_dos_fn         = fn;
+    s_dos_mirror[port]    = 0;
+    bus_porttab_dos[port] = kHoldRoute;
+    return true;
+}
+
+bool port_hold(uint8_t port, PortReadFn fn) {
+    if (!hold_ready()) return false;
+    s_hold_fn = fn;
+    tab_set(port, kHoldRoute);
+    return true;
+}
+
+void __not_in_flash_func(port_hold_answer)(uint8_t v) {
+    // Цикл ввода оборвал сброс машины (IORQ поднят): Z80 стоит уже на
+    // выборке команды, байт ушёл бы туда - только отпустить /WAIT.
+    if ((sio_hw->gpio_in & (1u << PIN_IORQ_N)) == 0u) {
+        PIO_SERVE->txf[SM_SERVE] = v;
+        // /WAIT отпускается, когда байт на шине: rom_serve взял его (очередь
+        // пуста) и через две команды выставил.
+        while (!pio_sm_is_tx_fifo_empty(PIO_SERVE, SM_SERVE)) {
+            tight_loop_contents();
+        }
+        busy_wait_at_least_cycles(8);
+    }
+    PIO_AUDIO->irq = 1u << PORT_HOLD_IRQ;
+    hw_set_bits(&PIO_AUDIO->inte0, 1u << (PIO_INTR_SM0_LSB + PORT_HOLD_IRQ));
+}
+
+namespace {
+volatile bool s_wait_late = false;
+} // namespace
+
+bool wait_late_ready() {
+    return !s_hold_up && gpio_get_function(PIN_WAIT_N) == GPIO_FUNC_SIO;
+}
+
+void __not_in_flash_func(wait_late)(bool on) {
+    if (on) {
+        s_holds = s_holds + 1u;
+        assert_wait();
+    } else {
+        release_wait();
+    }
+    s_wait_late = on;
+}
+
+bool port_hold_active() {
+    return s_wait_late || (PIO_AUDIO->irq & (1u << PORT_HOLD_IRQ)) != 0u;
 }
 
 // Страница ответов: байт выбирает старшая половина адреса. Нужна портам, у
@@ -573,20 +968,20 @@ void port_answer_page(uint8_t port, const uint8_t* page) {
     if ((base & 0xffu) != 0u) {
         panic("port page 0x%02x not aligned: 0x%08x", port, static_cast<unsigned>(base));
     }
-    s_porttab[port] = (base >> 8) | (1u << 31);
+    tab_set(port, port_page_entry(base));
 }
 
 // Снимается запись: обнуление ячейки порт не отключило бы, склейщик отдал
 // бы адрес, а канал выдачи - ноль.
 void port_release(uint8_t port) {
-    s_porttab[port] = 0u;
+    tab_set(port, 0u);
 }
 
 // Что порт отвечает сейчас - для журнала: снят, страница или байт ячейки.
 int32_t port_answer_state(uint8_t port) {
     const uint32_t e = s_porttab[port];
     if (e == 0u) return kPortReleased;
-    if ((e & (1u << 31)) != 0u) return kPortPaged;
+    if (port_entry_is_page(e)) return kPortPaged;
     return static_cast<int32_t>(s_portval[port] & 0xffu);
 }
 
@@ -610,10 +1005,13 @@ std::atomic<uint32_t> s_route_lost{0};
 std::atomic<uint32_t> s_detect_lost{0};
 std::atomic<uint32_t> s_join_stall{0};
 std::atomic<uint32_t> s_route_stall{0};
-std::atomic<uint32_t> s_trdos_lost{0};
-std::atomic<uint32_t> s_trdos_desync{0};
 std::atomic<uint8_t> s_trdos_level{0};
 std::atomic<uint8_t> s_trdos_state{0};
+// Фронты линий хоста: пары спад/подъём для DOS_N, NMI_N, ROM_BLK_N,
+// RESET_N. Липкие защёлки EDGE_LOW/EDGE_HIGH в IO_BANK0 ловят импульс
+// любой длины без включения прерываний; числа - опросов, заставших
+// фронт, как у очередей трапов.
+std::atomic<uint32_t> s_sig_edges[8]{};
 uint32_t s_serve_late_full = 0; // пишет и читает Core0
 
 // Единственный писатель - Core0: relaxed, без чтения-изменения-записи.
@@ -630,27 +1028,27 @@ void take_flag(pio_hw_t* pio, uint32_t bit, std::atomic<uint32_t>& c) {
     count_lost(c);
 }
 
-// TR-DOS: потерянная отметка детектора и расхождение вывода DOS_N с его
-// состоянием. Состояние автомат помнит адресом программы: released - от
-// своей метки до asserted, asserted - до конца. Расхождение засчитывается,
-// если держится два опроса подряд: между push и переходом в другую ветку
-// автомат миг стоит в старой.
-void trdos_poll() {
-    if (s_trdos_detect_offset < 0) return;
-    take_flag(PIO_DETECT, 1u << (PIO_FDEBUG_RXSTALL_LSB + SM_TRDOS_DETECT), s_trdos_lost);
-    const uint32_t pc     = pio_sm_get_pc(PIO_DETECT, SM_TRDOS_DETECT) - static_cast<uint32_t>(s_trdos_detect_offset);
-    const bool asserted   = pc >= trdos_detect_offset_asserted;
-    const bool level_high = gpio_get(PIN_DOS_N);
-    s_trdos_level.store(level_high ? 1u : 0u, std::memory_order_relaxed);
-    s_trdos_state.store(asserted ? 1u : 0u, std::memory_order_relaxed);
-    // asserted - DOS_N низкий, released - высокий.
-    static uint8_t s_apart_polls = 0;
-    if (asserted != level_high) {
-        s_apart_polls = 0;
-    } else if (s_apart_polls < 2u) {
-        ++s_apart_polls;
-        if (s_apart_polls == 2u) count_lost(s_trdos_desync);
+// Защёлки фронтов: прочитать и погасить. Запись единиц гасит только биты
+// фронтов, биты уровней от записи не меняются.
+void signal_edges_poll() {
+    static constexpr uint8_t kPins[] = {PIN_DOS_N, PIN_NMI_N, PIN_ROM_BLK_N, PIN_RESET_N};
+    for (uint32_t i = 0; i < count_of(kPins); i++) {
+        io_rw_32& intr      = io_bank0_hw->intr[kPins[i] / 8u];
+        const uint32_t lsb  = (kPins[i] % 8u) * 4u;
+        const uint32_t fall = intr & (1u << (lsb + 2u));
+        const uint32_t rise = intr & (1u << (lsb + 3u));
+        if ((fall | rise) == 0u) continue;
+        intr = fall | rise;
+        if (fall != 0u) count_lost(s_sig_edges[i * 2u]);
+        if (rise != 0u) count_lost(s_sig_edges[i * 2u + 1u]);
     }
+}
+
+// TR-DOS: вывод DOS_N и флаг DOS - для журнала.
+void trdos_poll() {
+    if (!s_trdos_up) return;
+    s_trdos_level.store(gpio_get(PIN_DOS_N) ? 1u : 0u, std::memory_order_relaxed);
+    s_trdos_state.store((PIO_DETECT->irq & (1u << IRQ_DOS)) != 0u ? 1u : 0u, std::memory_order_relaxed);
 }
 
 // Очереди трапов, тем же проходом, что отметки опоздания: на пути шины ни
@@ -692,6 +1090,12 @@ void reset_watch_poll() {
         (void)pio_sm_get(PIO_DETECT, sm);
         marks = true;
     }
+    // Отметки периода с удержанием /WAIT - не сброс: M1 нет по воле платы.
+    static uint32_t s_holds_seen = 0;
+    if (s_holds != s_holds_seen || port_hold_active()) {
+        s_holds_seen = s_holds;
+        marks        = false;
+    }
     if (marks && !s_in_reset) {
         // ПЗУ TR-DOS - сразу, пока машина в сбросе: стартовать она должна с
         // обычного ПЗУ.
@@ -705,22 +1109,77 @@ void reset_watch_poll() {
     s_in_reset = marks;
 }
 
-void trdos_release() {
-    if (s_trdos_detect_offset < 0 || s_sm_trdos_drive < 0) {
-        release_host_trdos();
-        return;
-    }
-    pio_sm_exec(PIO_DETECT, SM_TRDOS_DETECT, pio_encode_jmp(static_cast<uint>(s_trdos_detect_offset) + trdos_detect_offset_released));
-    pio_sm_put(PIO_AUDIO, static_cast<uint>(s_sm_trdos_drive), 1u);
+// Своё ПЗУ и TR-DOS: pio0 занят, сторожа сброса там нет. Спады M1 считает
+// блок PWM (вход B), опрос - отсюда: счётчик стоит дольше kM1ResetUs -
+// машина в сбросе.
+constexpr uint32_t kM1ResetUs = 50;
+
+// Начальное состояние Пентагона - DOS включён, бит 4 ноль, порт открыт:
+// страница 0.
+void pentagon_state_after_reset() {
+    PIO_DETECT->irq                  = (1u << IRQ_ROM48) | (1u << IRQ_PAGING_LOCKED);
+    PIO_DETECT->irq_force            = 1u << IRQ_DOS;
+    PIO_DETECT->txf[SM_PENTAGON_ROM] = s_pentagon_word;
+    s_pentagon_locked_rom48          = false;
 }
 
-uint32_t machine_resets_seen() {
+void trdos_state_after_reset() {
+    PIO_DETECT->irq = (1u << IRQ_ROM48) | (1u << IRQ_PAGING_LOCKED) | (1u << IRQ_DOS) | (1u << TRDOS_IRQ_NAV);
+    s_port_7ffd     = 0;
+    s_nav_bank      = 0;
+    if (s_nav_word != 0u) pio_sm_put(PIO_DETECT, SM_TRDOS_NAV, s_nav_word);
+}
+
+void m1_reset_poll() {
+    if (s_pentagon_word == 0u && !s_trdos_up) return;
+    static uint16_t s_last       = 0;
+    static uint32_t s_changed_us = 0;
+    static bool s_in_reset       = false;
+    const uint16_t now_count     = static_cast<uint16_t>(pwm_get_counter(pwm_gpio_to_slice_num(PIN_M1_N)));
+    const uint32_t now           = time_us_32();
+    // Под своим /WAIT M1 нет по вине платы: это не сброс.
+    if (now_count != s_last || port_hold_active()) {
+        s_last       = now_count;
+        s_changed_us = now;
+        s_in_reset   = false;
+        return;
+    }
+    if (s_in_reset || now - s_changed_us < kM1ResetUs) return;
+    s_in_reset = true;
+    if (s_rom_take_on_reset) {
+        s_rom_take_on_reset = false;
+        gpio_put(PIN_ROM_BLK_N, 0);
+    }
+    trdos_release();
+    count_lost(s_machine_resets);
+    const bool own = gpio_get_out_level(PIN_RESET_N);
+    debug_logf("signal: machine reset seen (no M1 for %" PRIu32 " us), %s, count %" PRIu32 "\n", kM1ResetUs, own ? "held by the board" : "from the machine",
+               s_machine_resets.load(std::memory_order_relaxed));
+}
+
+void trdos_release() {
+    // Своё ПЗУ: после сброса Пентагон стоит в DOS, страница 0.
+    if (s_pentagon_word != 0u) {
+        pentagon_state_after_reset();
+        return;
+    }
+    if (s_trdos_up) {
+        trdos_state_after_reset();
+    } else {
+        release_host_trdos();
+    }
+}
+
+// Зовётся на каждом обороте витка Core1: в SRAM, без выборки из флеша.
+uint32_t __not_in_flash_func(machine_resets_seen)() {
     return s_machine_resets.load(std::memory_order_relaxed);
 }
 
 void bus_queues_poll() {
     trap_stall_poll();
+    signal_edges_poll();
     reset_watch_poll();
+    m1_reset_poll();
     uint32_t n = 0;
     while (!pio_sm_is_rx_fifo_empty(PIO_SERVE, SM_SERVE)) {
         (void)pio_sm_get(PIO_SERVE, SM_SERVE);
@@ -741,11 +1200,16 @@ BusMeasurements bus_measurements() {
     m.detect_lost     = s_detect_lost.load(std::memory_order_relaxed);
     m.join_stall      = s_join_stall.load(std::memory_order_relaxed);
     m.route_stall     = s_route_stall.load(std::memory_order_relaxed);
-    m.trdos           = s_trdos_detect_offset >= 0;
-    m.trdos_lost      = s_trdos_lost.load(std::memory_order_relaxed);
-    m.trdos_desync    = s_trdos_desync.load(std::memory_order_relaxed);
+    m.trdos           = s_trdos_up;
     m.trdos_level     = s_trdos_level.load(std::memory_order_relaxed);
     m.trdos_asserted  = s_trdos_state.load(std::memory_order_relaxed) != 0u;
+    for (uint32_t i = 0; i < count_of(m.sig_edges); i++) {
+        m.sig_edges[i] = s_sig_edges[i].load(std::memory_order_relaxed);
+    }
+    m.variant_waits      = s_variant_waits.load(std::memory_order_relaxed);
+    m.variant_clears     = s_variant_clears.load(std::memory_order_relaxed);
+    m.wr_isr_cyc_max     = s_bus_wr_cyc_max;
+    m.wr_isr_cyc_drained = s_bus_wr_cyc_drained;
     return m;
 }
 

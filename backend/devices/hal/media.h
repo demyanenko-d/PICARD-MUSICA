@@ -5,8 +5,8 @@
 //
 // Единица - сектор в 512 байт. Не из ISR: обмен блокирующий, сектор с
 // карты около 1 мс вместе с командой и ожиданием токена. Пересечений
-// границы одно на сектор, поэтому
-// это объявления, а не шаблон: вызов теряется на фоне самого обмена.
+// границы одно на сектор, поэтому это
+// объявления, а не шаблон: вызов теряется на фоне самого обмена.
 
 #include <cstdint>
 
@@ -16,6 +16,15 @@ inline constexpr uint32_t kSectorBytes = 512;
 
 // Обслужить шину, пока ждём носитель. user - контекст того, кто ставит.
 using WaitServiceFn = void (*)(void* user);
+
+// Сектор kSectorBytes по LBA через контекст user: карта, флешка, образ на ПК.
+using SectorReadFn  = bool (*)(void* user, uint32_t lba, uint8_t* dst);
+using SectorWriteFn = bool (*)(void* user, uint32_t lba, const uint8_t* src);
+struct SectorIo {
+    SectorReadFn read;
+    SectorWriteFn write;
+    void* user;
+};
 
 // Носителей два, и они не взаимозаменяемы: карта на своей шине есть
 // всегда, флешка появляется и исчезает вместе с разъёмом.
@@ -38,6 +47,8 @@ bool media_init();
 struct MediaState {
     bool present     = false;
     uint32_t sectors = 0;
+    // Какой именно носитель: другая карта той же ёмкости - другой номер.
+    uint32_t serial = 0;
 };
 
 const MediaState& media_state(Medium m);
@@ -65,6 +76,11 @@ bool media_read_run(Medium m, uint32_t lba, uint32_t count, uint8_t* dst);
 // пачкой не дешевле, читать по одному. Число из замера, не из расчёта:
 // дальше восьми у флешки выигрыш уже почти не растёт.
 uint32_t media_run_sectors(Medium m);
+
+// С носителем m сейчас нельзя начать обмен: идёт обмен (его ожидание
+// обслуживает шину и зовёт цикл карты) или брошенный по сроку ещё держит
+// буфер. Заказы к такому носителю ждут, а не получают отказ. Звать из цикла.
+bool media_busy(Medium m);
 
 // Строка здоровья носителя в журнал. Звать по расписанию, не из ISR.
 void media_log_health();

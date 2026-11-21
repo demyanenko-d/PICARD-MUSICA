@@ -1,0 +1,23 @@
+/* Код BDI: адрес выполнения - банки 8-15 ОЗУ DivMMC (0x20070000), образ во
+   флеше за .text; копирует его запуск BDI (DivMMC и BDI вместе не
+   работают). Объекты BDI исключены из .text и .rodata, а .data забрала бы
+   их раньше, поэтому секция стоит здесь, до неё.
+
+   Статические конструкторы этих объектов (.text.startup) остаются во
+   флеше: crt0 зовёт их до копирования. */
+SECTIONS
+{
+    .bdi_startup : {
+        *libsoundsinth_bdi.a:*(.text.startup*)
+    } > FLASH
+
+    .bdi_code bus_divmmc_ram + 0x10000 : {
+        __bdi_code_start__ = .;
+        *(.bdi_code*)
+        *libsoundsinth_bdi.a:*(.text* .rodata*)
+        . = ALIGN(4);
+        __bdi_code_end__ = .;
+    } AT> FLASH
+    __bdi_code_source__ = LOADADDR(.bdi_code);
+    ASSERT(__bdi_code_end__ <= bus_divmmc_ram + 0x20000, "BDI code does not fit into DivMMC banks 8-15")
+}

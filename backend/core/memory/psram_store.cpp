@@ -4,6 +4,7 @@
 #include <cstring>
 
 #include "platform/memory.h"
+
 #include "core/memory/arena.h"
 
 namespace soundsinth::memory {
@@ -87,24 +88,50 @@ uint32_t psram_freeze_pattern_zone(PsramStore& store) {
     return psram_alloc_free_pages(store.alloc);
 }
 
-uint8_t* psram_take_permanent(PsramStore& store, uint32_t bytes) {
-    if (bytes == 0) return nullptr;
+PsramBlock psram_take_kept(PsramStore& store, uint32_t bytes) {
+    if (bytes == 0) return PsramBlock{};
     const uint16_t pages = static_cast<uint16_t>(align_up(bytes, kPsramPageBytes) / kPsramPageBytes);
     // Блок трека отпускается на время просьбы: иначе он занимает всё, и
     // постоянному места нет. Взятое ляжет с краю - распределитель отдаёт
     // первый подходящий прогон, - и середину чипа не разрежет.
     psram_alloc_free(store.alloc, store.track);
     PsramBlock b = psram_alloc(store.alloc, pages);
-    uint8_t* p   = nullptr;
-    if (b.valid()) {
-        if (psram_alloc_keep(store.alloc, b)) {
-            p = store.base + static_cast<uint32_t>(b.first) * kPsramPageBytes;
-        } else {
-            psram_alloc_free(store.alloc, b); // список отметок полон - не держать втихую
-        }
+    if (b.valid() && !psram_alloc_keep(store.alloc, b)) {
+        psram_alloc_free(store.alloc, b); // список отметок полон - не держать втихую
     }
     take_track_block(store);
-    return p;
+    return b;
+}
+
+uint8_t* psram_take_permanent(PsramStore& store, uint32_t bytes) {
+    const PsramBlock b = psram_take_kept(store, bytes);
+    return b.valid() ? psram_block_ptr(store, b) : nullptr;
+}
+
+PsramBlock psram_alloc_kept(PsramStore& store, uint32_t bytes) {
+    if (bytes == 0) return PsramBlock{};
+    PsramBlock b = psram_alloc(store.alloc, static_cast<uint16_t>(align_up(bytes, kPsramPageBytes) / kPsramPageBytes));
+    if (b.valid() && !psram_alloc_keep(store.alloc, b)) psram_alloc_free(store.alloc, b);
+    return b;
+}
+
+void psram_shrink_kept(PsramStore& store, PsramBlock& block, uint32_t bytes) {
+    // Ноль - снять и отметку: psram_alloc_shrink освободил бы страницы, а
+    // отметка осталась бы на них.
+    if (bytes == 0) return psram_drop_kept(store, block);
+    psram_alloc_shrink(store.alloc, block, static_cast<uint16_t>(align_up(bytes, kPsramPageBytes) / kPsramPageBytes));
+}
+
+void psram_drop_kept(PsramStore& store, PsramBlock& block) {
+    psram_alloc_drop_kept(store.alloc, block);
+}
+
+uint32_t psram_unkept_bytes(const PsramStore& store) {
+    uint32_t pages = store.alloc.page_count;
+    for (const PsramBlock& b : store.alloc.keep) {
+        pages -= b.pages;
+    }
+    return pages * kPsramPageBytes;
 }
 
 void psram_reserve_track_bytes(PsramStore& store, uint32_t bytes) {

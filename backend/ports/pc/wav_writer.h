@@ -7,7 +7,8 @@
 namespace platform_pc {
 
 // Потоковая запись WAV: PCM 16 бит стерео; размеры чанков RIFF и data
-// дописываются в close().
+// дописываются в close(). Путь "hash:" - файла нет, close() печатает
+// FNV-1a 64 байтов data: сверка с готовым WAV без места на диске.
 class WavWriter {
 public:
     bool open(const char* path, uint32_t sample_rate_hz);
@@ -17,6 +18,8 @@ public:
 private:
     std::FILE* file_     = nullptr;
     uint32_t data_bytes_ = 0;
+    bool hash_only_      = false;
+    uint64_t fnv_        = 0;
 };
 
 } // namespace platform_pc

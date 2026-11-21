@@ -218,6 +218,100 @@ void test_voice_loop_repeats_via_checkpoint() {
     memory::psram_destroy(psram);
 }
 
+// Петля удержания (IT): до Note-Off голос крутит loop_* (петлю удержания),
+// voice_release_sustain переводит его на обычную петлю. Без неё сэмпл
+// доигрывает до конца и голос гаснет.
+void test_voice_sustain_release_plays_tail() {
+    std::printf("test_voice_sustain_release_plays_tail\n");
+
+    constexpr uint32_t kN         = 12;
+    const int16_t native[kN]      = {100, 200, 300, 400, 500, 600, 700, 800, 900, 1000, 1100, 1200};
+    constexpr uint32_t kLoopStart = 4; // петля удержания
+    constexpr uint32_t kLoopEnd   = 10;
+    constexpr uint32_t kLoopLen   = kLoopEnd - kLoopStart;
+
+    int8_t dpcm_bytes[kN];
+    dpcm8::Dpcm8Checkpoint cps[4];
+    dpcm8::Dpcm8State encode_state;
+    dpcm8::encode_block(native, kN, 0, encode_state, dpcm_bytes, cps, 4);
+    int16_t expected[kN];
+    dpcm8::decode_block(dpcm_bytes, kN, dpcm8::Dpcm8State{}, expected);
+
+    memory::PsramStore psram{};
+    memory::psram_create(psram);
+    const sample_pack::PackResult pack = repack_into_psram_dpcm8_with_checkpoints(psram, native, kN);
+
+    soundsinth::model::SampleDescriptor sample;
+    sample.resident_encoding = ResidentEncoding::Dpcm8;
+    sample.length_samples    = kN;
+    sample.loop_enabled      = true; // петля удержания лежит в loop_*
+    sample.sus_loop          = true;
+    sample.loop_start        = kLoopStart;
+    sample.loop_end          = kLoopEnd;
+    sample.c5_speed          = engine::kSampleRateHz; // step 1:1
+
+    engine::Voice voice;
+    engine::voice_trigger(voice, psram, sample, pack.first_page, /*note=*/48, FrequencyModel::Amiga);
+    CHECK(voice.active);
+
+    // Два витка петли удержания.
+    int16_t out[kLoopEnd + 2 * kLoopLen] = {};
+    CHECK_EQ(engine::voice_render(voice, psram, out, kLoopEnd + 2 * kLoopLen), kLoopEnd + 2 * kLoopLen);
+    CHECK(voice.active);
+
+    // Note-Off без обычной петли: хвост доигрывает, голос гаснет на конце.
+    engine::voice_release_sustain(voice, psram, 0, kN, false, memory::kPageChainEnd);
+    int16_t tail[3 * kN]       = {};
+    const uint32_t tail_frames = engine::voice_render(voice, psram, tail, 3 * kN);
+    CHECK(tail_frames > 0);
+    CHECK(tail_frames < 3 * kN);
+    CHECK(!voice.active);
+    // Последний исходный отсчёт не успевает стать prev_sample - как у
+    // прочих тестов конца сэмпла, хвост кончается на kN-2.
+    CHECK_EQ(tail[tail_frames - 1], expected[kN - 2]);
+
+    memory::psram_destroy(psram);
+}
+
+// Note-Off с обычной петлёй ПОЗАДИ позиции (Dpcm8): точка новой петли
+// ставится по цепочке контрольных точек, голос крутит её дальше.
+void test_voice_sustain_release_to_loop_behind() {
+    std::printf("test_voice_sustain_release_to_loop_behind\n");
+
+    constexpr uint32_t kN    = 12;
+    const int16_t native[kN] = {100, 200, 300, 400, 500, 600, 700, 800, 900, 1000, 1100, 1200};
+
+    memory::PsramStore psram{};
+    memory::psram_create(psram);
+    const sample_pack::PackResult pack = repack_into_psram_dpcm8_with_checkpoints(psram, native, kN);
+
+    soundsinth::model::SampleDescriptor sample;
+    sample.resident_encoding = ResidentEncoding::Dpcm8;
+    sample.length_samples    = kN;
+    sample.loop_enabled      = true; // петля удержания 6..10
+    sample.sus_loop          = true;
+    sample.loop_start        = 6;
+    sample.loop_end          = 10;
+    sample.c5_speed          = engine::kSampleRateHz;
+
+    engine::Voice voice;
+    engine::voice_trigger(voice, psram, sample, pack.first_page, /*note=*/48, FrequencyModel::Amiga);
+    int16_t out[16] = {};
+    CHECK_EQ(engine::voice_render(voice, psram, out, 16), 16u); // позиция внутри петли удержания
+
+    // Обычная петля 2..6 целиком позади позиции.
+    engine::voice_release_sustain(voice, psram, 2, 6, true, pack.checkpoint_first_page);
+    int16_t looped[32]    = {};
+    const uint32_t frames = engine::voice_render(voice, psram, looped, 32);
+    CHECK_EQ(frames, 32u);
+    CHECK(voice.active);
+    // После первого заворота выход периодичен с длиной петли 4.
+    for (uint32_t i = 20; i < 32; ++i)
+        CHECK_EQ(looped[i], looped[i - 4]);
+
+    memory::psram_destroy(psram);
+}
+
 // Ping-pong (loop_bidirectional) - не настоящий реверс (Dpcm8-декодер
 // однонаправленный, см. voice.h/.cpp), но голос больше не должен
 // замолкать на границе петли, как раньше, когда loop_bidirectional
@@ -709,6 +803,55 @@ void test_voice_render_raw8_high_step_multi_wrap_loop_matches_sequential_oracle(
         CHECK_EQ(actual_out[i], oracle_out[i]);
     }
 
+    memory::psram_destroy(psram);
+}
+
+// Лесенка Paula (kQuirkPaulaSteps, Raw8): родной отсчёт держится до
+// следующего, out[i] = native[floor(pos_i)] - тот же обход, что у
+// linear_oracle, без доли. Шаг 7.3 идёт прыжком пачки, 0.37 - повторами.
+void test_voice_paula_steps_match_hold_oracle() {
+    std::printf("test_voice_paula_steps_match_hold_oracle\n");
+    constexpr uint32_t kN = 32, kLs = 8, kLe = 24, kFrames = 300;
+    int16_t native[kN];
+    std::vector<int16_t> wide(kN);
+    for (uint32_t i = 0; i < kN; ++i) {
+        native[i] = static_cast<int16_t>(static_cast<int32_t>(i * 37 % 211) - 105);
+        wide[i]   = static_cast<int16_t>(native[i] * 256);
+    }
+    memory::PsramStore psram{};
+    memory::psram_create(psram);
+    sample_pack::SamplePacker packer(psram, sample_pack::ResidentEncoding::Raw8);
+    CHECK(packer.add_samples(native, kN));
+    const sample_pack::PackResult packed = packer.finish();
+    CHECK(packed.ok);
+    soundsinth::model::SampleDescriptor sample;
+    sample.resident_encoding = ResidentEncoding::Raw8;
+    sample.length_samples    = kN;
+    sample.c5_speed          = engine::kSampleRateHz;
+    sample.loop_enabled      = true;
+    sample.loop_start        = kLs;
+    sample.loop_end          = kLe;
+    for (const uint32_t step : {24248u, 0x10000u, 170394u, 478413u}) {
+        engine::Voice voice;
+        engine::voice_trigger(voice, psram, sample, packed.first_page, 48, FrequencyModel::Amiga, 0, soundsinth::model::kQuirkPaulaSteps);
+        CHECK(voice.steps);
+        voice.step = step;
+        std::vector<int16_t> out(kFrames);
+        CHECK_EQ(engine::voice_render(voice, psram, out.data(), kFrames), kFrames);
+        // Оракул: обход linear_oracle, на выходе prev.
+        uint32_t decoded = 2, frac = 0;
+        int16_t prev = wide[0], next = wide[1];
+        uint32_t bad = 0;
+        for (uint32_t f = 0; f < kFrames; ++f) {
+            if (out[f] != prev) ++bad;
+            for (frac += step; frac >= 0x10000u; frac -= 0x10000u) {
+                prev = next;
+                if (decoded >= kLe) decoded = kLs;
+                next = wide[decoded++];
+            }
+        }
+        CHECK_EQ(bad, 0u);
+    }
     memory::psram_destroy(psram);
 }
 
@@ -1384,6 +1527,8 @@ void run_voice_tests() {
     test_voice_render_matches_independent_dpcm8_decode_1to1();
     test_voice_trigger_empty_sample_stays_inactive();
     test_voice_loop_repeats_via_checkpoint();
+    test_voice_sustain_release_plays_tail();
+    test_voice_sustain_release_to_loop_behind();
     test_voice_bidirectional_loop_plays_forward_instead_of_stopping();
     test_voice_linear_frequency_model_octaves_and_relative_note();
     test_voice_linear_frequency_model_it_c5_reference_is_note_60();
@@ -1395,6 +1540,7 @@ void run_voice_tests() {
     test_voice_trigger_decimated_sample_offset_is_halved();
     test_voice_render_raw8_expands_to_full_scale_and_seeks_without_checkpoints();
     test_voice_render_raw8_high_step_multi_wrap_loop_matches_sequential_oracle();
+    test_voice_paula_steps_match_hold_oracle();
     test_voice_render_raw8_jump_skips_loop_start_then_sequential_wrap_matches_oracle();
     test_voice_render_direct_far_loop_matches_oracle();
     test_voice_dpcm8_loop_high_step_matches_oracle();

@@ -323,6 +323,9 @@ struct RawSampleHdr {
     uint8_t pan;
     int8_t relnote;
     uint8_t reserved;
+    // Автовибрато инструмента, одно на все его сэмплы (vibType XM совпадает
+    // с SampleDescriptor::VibType 0..3).
+    uint8_t vib_type = 0, vib_sweep = 0, vib_depth = 0, vib_rate = 0;
 };
 
 // Сжатие ModPlug-ADPCM: признак - байт reserved заголовка сэмпла 0xAD, и
@@ -385,6 +388,11 @@ void fill_sample_descriptor(const RawSampleHdr& rs, bool ft2_finetune_precision,
     uint32_t loop_end = (loop_start + loop_len) / channel_div;
     if (loop_end > length_samples) loop_end = length_samples;
     sd.loop_end = loop_end;
+    // Автовибрато - шкалы XM как есть (vibType 0..3 совпадает с VibType).
+    sd.vib_rate  = rs.vib_rate;
+    sd.vib_depth = rs.vib_depth;
+    sd.vib_sweep = rs.vib_sweep;
+    sd.vib_type  = static_cast<SampleDescriptor::VibType>(rs.vib_type & 0x03u);
     // Петлю включает любой из битов 0x01 и 0x02: 0x02 (ping-pong) бывает без
     // 0x01.
     sd.loop_enabled       = (rs.flags & (kSampleLoop | kSampleBidiLoop)) != 0 && loop_end > sd.loop_start;
@@ -522,9 +530,11 @@ bool load(formats::ByteSource src, memory::TrackMemory& mem, Song& out, const ch
     std::memcpy(out.title, hdr + 17, 20);
     char tracker_name[kTrackerNameBytes];
     std::memcpy(tracker_name, hdr + 38, kTrackerNameBytes);
+    soundsinth::model::set_program(out, tracker_name, kTrackerNameBytes);
 
     const uint16_t xm_version = get_u16(hdr + 58);
     if (xm_version < 0x0104) return fail("old XM 1.02/1.03 (8-byte pattern header) are not supported");
+    out.format_version               = xm_version;
     const uint32_t header_size       = get_u32(hdr + 60);
     const uint16_t order_count       = get_u16(hdr + 64);
     const uint16_t restart_raw       = get_u16(hdr + 66); // restartPos: с какой позиции order играть после конца
@@ -686,6 +696,9 @@ bool load(formats::ByteSource src, memory::TrackMemory& mem, Song& out, const ch
 
         const uint32_t instrument_struct_start   = inst_start + kInstrumentHeaderMinBytes + kSampleHeaderSizeFieldBytes;
         uint8_t local_sample_map[kSampleMapKeys] = {};
+        // Автовибрато инструмента: байты расширенного заголовка, одно на все
+        // его сэмплы. Нули, когда заголовок короткий.
+        uint8_t vib_type = 0, vib_sweep = 0, vib_depth = 0, vib_rate = 0;
         if (instrument_struct_start + kInstrumentStructBytes <= sample_headers_pos) {
             r.seek(instrument_struct_start);
             r.bytes(local_sample_map, kSampleMapKeys);
@@ -708,9 +721,11 @@ bool load(formats::ByteSource src, memory::TrackMemory& mem, Song& out, const ch
             const uint8_t pan_loop_end   = r.u8();
             const uint8_t vol_flags      = r.u8();
             const uint8_t pan_flags      = r.u8();
-            r.skip(2); // автовибрато инструмента не воспроизводится: vibType, vibSweep
-            if (r.u8() != 0) ++soundsinth::model::g_tracker_load_stats.ignored_autovibrato; // vibDepth
-            r.skip(1);                                                                      // vibRate
+            vib_type                     = r.u8();
+            vib_sweep                    = r.u8();
+            vib_depth                    = r.u8();
+            vib_rate                     = r.u8();
+            if (vib_depth != 0 && vib_rate != 0) ++soundsinth::model::g_tracker_load_stats.autovibrato;
             const uint16_t vol_fade = r.u16();
             if (!r.ok()) return fail("file truncated inside the extended instrument header");
 
@@ -766,6 +781,10 @@ bool load(formats::ByteSource src, memory::TrackMemory& mem, Song& out, const ch
             RawSampleHdr& rs  = raw[s];
             rs                = parse_sample_header(h);
             rs.file_offset    = pcm_pos;
+            rs.vib_type       = vib_type;
+            rs.vib_sweep      = vib_sweep;
+            rs.vib_depth      = vib_depth;
+            rs.vib_rate       = vib_rate;
             pcm_pos          += sample_data_bytes(rs.length_bytes, sample_is_adpcm(rs.flags, rs.reserved));
         }
         if (!r.ok()) return fail("file truncated inside the sample headers");

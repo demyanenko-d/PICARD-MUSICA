@@ -2,6 +2,7 @@
 #include "core/engine/sequencer.h"
 
 #include "platform/hot_path.h"
+
 #include "core/codec/pattern_reader.h"
 
 namespace soundsinth::engine {
@@ -158,7 +159,8 @@ bool SOUNDSINTH_HOT_PATH(advance_row_or_pattern)(const Song& song, PlayState& ps
     } else {
         const uint16_t row_count       = song.patterns[ps.pattern_idx].row_count;
         const bool natural_pattern_end = static_cast<uint32_t>(ps.row) + 1 >= row_count;
-        if (ps.pending_pattern_break || natural_pattern_end) {
+        // Position Jump уходит в конце своей строки и без Pattern Break.
+        if (ps.pending_pattern_break || ps.pending_position_jump || natural_pattern_end) {
             const uint16_t target_start  = ps.pending_position_jump ? ps.position_jump_target : static_cast<uint16_t>(ps.order_pos + 1);
             const ResolveResult resolved = resolve_next_order_pos(song, target_start);
             if (!resolved.found) {

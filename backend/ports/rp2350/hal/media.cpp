@@ -1,12 +1,10 @@
 // SPDX-License-Identifier: MIT
-// Носители под арбитром: карта на SPI1 и флешка на
-// USB. Прослойка, а не прямые вызовы протоколов: выбор носителя делает
-// арбитр, а какой драйвер за ним стоит - знают только эти строки.
+// Носители под арбитром: карта на SPI1 и флешка на USB. Прослойка, а не
+// прямые вызовы протоколов: выбор носителя делает арбитр, а какой драйвер
+// за ним стоит - знают только эти строки.
 //
 // Оба обслуживаются циклом Core1 и только им: у карты обмен по SPI
 // блокирующий, у флешки виток стека крутится там же.
-
-#include "devices/hal/media.h"
 
 #include <atomic>
 #include <cinttypes>
@@ -14,6 +12,7 @@
 #include "platform/hot_path.h"
 #include "platform/log.h"
 
+#include "devices/hal/media.h"
 #include "devices/sd/card_protocol.h"
 
 #include "usb/usb_msc.h"
@@ -30,6 +29,10 @@ std::atomic<uint32_t> s_generation{0};
 // Опрос драйвера, код во флеше: зовёт только media_state_publish.
 bool driver_present(devices::hal::Medium m) {
     return m == devices::hal::Medium::Usb ? rp2350::usb::msc_present() : devices::sd::sd_card_info().present;
+}
+
+uint32_t driver_serial(devices::hal::Medium m) {
+    return m == devices::hal::Medium::Usb ? 0u : devices::sd::sd_card_info().serial;
 }
 
 uint32_t driver_sector_count(devices::hal::Medium m) {
@@ -60,9 +63,11 @@ void devices::hal::media_state_publish(Medium m) {
     MediaState& st         = s_state[m == Medium::Usb ? 1u : 0u];
     const bool present     = driver_present(m);
     const uint32_t sectors = driver_sector_count(m);
-    if (st.present == present && st.sectors == sectors) return;
+    const uint32_t serial  = driver_serial(m);
+    if (st.present == present && st.sectors == sectors && st.serial == serial) return;
     st.present = present;
     st.sectors = sectors;
+    st.serial  = serial;
     s_generation.fetch_add(1, std::memory_order_release);
 }
 
@@ -101,6 +106,10 @@ bool devices::hal::media_write(Medium m, uint32_t lba, const uint8_t* src) {
     return m == Medium::Usb ? rp2350::usb::msc_write(lba, src) : devices::sd::sd_card_write_sector(lba, src);
 }
 
+bool devices::hal::media_busy(Medium m) {
+    return m == Medium::Usb && rp2350::usb::msc_busy();
+}
+
 void devices::hal::media_log_health() {
     devices::sd::sd_card_log_health();
     // Флешка: печатается, только когда диск подключали, иначе строка идёт
@@ -120,7 +129,7 @@ void devices::hal::media_log_health() {
     // Причины отказов - своей строкой и только когда они есть: в одну строку
     // буфера debug_logf всё это не умещается.
     if (m.failed != 0) {
-        debug_logf("usb: disk failures %" PRIu32 " (not started %" PRIu32 ", status %" PRIu32 ", timeout %" PRIu32 ", reentry %" PRIu32 ")\n", m.failed,
-                   m.not_started, m.csw_bad, m.timeouts, m.reentry);
+        debug_logf("usb: disk failures %" PRIu32 " (not started %" PRIu32 ", status %" PRIu32 ", timeout %" PRIu32 ", reentry %" PRIu32 "), late %" PRIu32 "\n",
+                   m.failed, m.not_started, m.csw_bad, m.timeouts, m.reentry, m.late);
     }
 }

@@ -39,19 +39,20 @@
 #endif
 #include "ff.h"
 
-#include "pc/fatfs_disk.h"
 #include "core/formats/it.h"
 #include "core/formats/midi.h"
 #include "core/formats/mod.h"
 #include "core/formats/s3m.h"
 #include "core/formats/xm.h"
-#include "pc/fatfs_byte_source.h"
 #include "core/formats/memory_byte_source.h"
 #include "core/bank/bank_reader.h"
 #include "core/engine/song_duration.h"
 #include "core/memory/track_memory.h"
 #include "core/memory/scratch_arena.h"
 #include "core/codec/pattern_packer.h"
+
+#include "pc/fatfs_disk.h"
+#include "pc/fatfs_byte_source.h"
 
 namespace fs = std::filesystem;
 using namespace soundsinth;

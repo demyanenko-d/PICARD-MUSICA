@@ -12,6 +12,8 @@
 #include <cstring>
 
 #include "platform/compiler.h"
+
+#include "core/config.h"
 #include "core/bank/bank_reader.h"
 #include "core/model/song.h"
 #include "core/formats/midi.h"
@@ -34,7 +36,7 @@ using soundsinth::model::SlideRate;
 using soundsinth::model::Song;
 using soundsinth::model::VolumeColumnType;
 
-constexpr uint8_t kMaxChannels = 64; // столько же голосов у движка
+constexpr uint8_t kMaxChannels = SOUNDSINTH_MAX_CHANNELS; // каналов у движка
 static_assert(kMaxChannels <= soundsinth::model::kMaxPatternChannels, "the packer row mask is 64 channels");
 // Потолок слоёв на ноту - общий с выбором слоёв банка.
 constexpr uint8_t kMaxLayers = bank::kMaxNoteLayers;

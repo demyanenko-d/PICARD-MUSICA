@@ -7,10 +7,10 @@
 // Буфер той же длины, что на плате: строка, которая там не влезет,
 // обязана не влезть и здесь.
 
-#include "platform/log.h"
-
 #include <cstdarg>
 #include <cstdio>
+
+#include "platform/log.h"
 
 namespace platform {
 

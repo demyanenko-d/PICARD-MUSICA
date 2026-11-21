@@ -17,64 +17,65 @@
         .module page
         .globl  _fat_page_set
         .globl  _fat_page_work
-        .globl  _fat_page_pre
         .globl  _fat_page_dir
         .globl  _fat_port_shadow
         .globl  _fat_page_check
+        .globl  fat_page_enter
+        .globl  fat_page_leave
 
         .area   _DATA
 
-_fat_page_work::   .ds  1       ; отрезки рабочего файла
-_fat_page_pre::    .ds  1       ; отрезки префетча
+_fat_page_work::   .ds  1       ; отрезки файла
 _fat_page_dir::    .ds  1       ; таблица каталога
 _fat_port_shadow:: .ds  1       ; теневая копия 0x7FFD
+fat_page_saved:    .ds  1       ; что было в окне до fat_page_enter
 
         .area   _CODE
 
-;; Включить страницу A в окно 0xC000. Портит только флаги и C.
+;; Включить страницу A, запомнив, что было в 0x7FFD; fat_page_leave
+;; вернёт это. Вызывающий про наши переключения знать не обязан. Ячейка
+;; одна: вложенных включений в библиотеке нет. HL и DE не портятся.
+fat_page_enter::
+        ld      c, a
+        ld      a, (_fat_port_shadow)
+        ld      (fat_page_saved), a
+        ld      a, c
+
+;; Включить страницу A в окно 0xC000. Портит A, BC и флаги.
 _fat_page_set::
         and     #0x07
         ld      c, a
         ld      a, (_fat_port_shadow)
         and     #0xF8
         or      c
+fat_page_out:
         ld      (_fat_port_shadow), a
         ld      bc, #0x7FFD
         out     (c), a
         ret
 
+fat_page_leave::
+        ld      a, (fat_page_saved)
+        jr      fat_page_out
+
 ;; Проверить, что названные страницы годятся. CY=1 - не годятся.
 ;;
 ;; Страницы 2 и 5 отвергаем: на 128K они уже видны в окнах 0x8000 и
-;; 0x4000. Включив такую в 0xC000, мы получили бы ту же память дважды, и
-;; запись отрезков поехала бы поверх собственного кода или экрана. Ловить
-;; это потом по симптомам долго, а проверка стоит ничего.
+;; 0x4000. Включённая в 0xC000, она дала бы ту же память дважды, и
+;; запись отрезков легла бы поверх кода или экрана.
 _fat_page_check::
-        ld      a, (_fat_page_work)
-        call    fat_page_bad
-        ret     c
-        ld      a, (_fat_page_pre)
-        call    fat_page_bad
-        ret     c
         ld      a, (_fat_page_dir)
         call    fat_page_bad
         ret     c
 
-        ;; И между собой они обязаны различаться, иначе рабочий файл и
-        ;; префетч затрут друг друга.
-        ld      a, (_fat_page_work)
-        ld      hl, #_fat_page_pre
+        ;; И различаться они обязаны, иначе отрезки файла лягут поверх
+        ;; таблицы каталога.
+        ld      hl, #_fat_page_work
         cp      (hl)
         jr      z, fat_page_fail
-        ld      hl, #_fat_page_dir
-        cp      (hl)
-        jr      z, fat_page_fail
-        ld      a, (_fat_page_pre)
-        cp      (hl)
-        jr      z, fat_page_fail
-        or      a
-        ret
+        ld      a, (hl)
 
+;; A не портит.
 fat_page_bad:
         cp      #8
         jr      nc, fat_page_fail

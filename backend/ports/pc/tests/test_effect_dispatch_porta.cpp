@@ -275,6 +275,55 @@ void test_porta_down_per_tick_under_linear_frequency_model() {
 // test_voice.cpp), а плавно сводит period к цели со скоростью
 // porta_memory, не перескакивая её (в отличие от PortaUp/PortaDown,
 // которые прибавляют без учёта цели).
+// Нота без номера инструмента - инструмент канала, как NoteChange у OpenMPT
+// и set_patch у libxmp: сэмпл с начала, и доигравший тоже; громкость
+// прежняя (её возвращает только номер инструмента); без инструмента в
+// истории канала - ничего; при портаменто - без перезапуска. У XM
+// огибающие и затухание прежние, у остальных огибающая с нуля.
+void test_bare_note_retriggers_channel_instrument() {
+    std::printf("test_bare_note_retriggers_channel_instrument\n");
+    Fixture f(FrequencyModel::Amiga);
+    engine::ChannelState& cs = f.channels[0];
+    PatternCell bare;
+    bare.note = 50;
+
+    // Без инструмента в истории канала голая нота ничего не запускает.
+    f.dispatch_row(bare);
+    CHECK(!cs.voice_active);
+
+    f.dispatch_row(f.note_on(48));
+    cs.volume       = 20;    // громкость канала после Cxx и слайдов
+    cs.voice_active = false; // сэмпл без петли доиграл
+    f.dispatch_row(bare);
+    CHECK(cs.voice_active);
+    CHECK(cs.triggered_this_row);
+    CHECK_EQ(cs.last_note, 50);
+    CHECK_EQ(cs.volume, 20);
+
+    // Портаменто к ноте при живом голосе - цель, не перезапуск.
+    cs.triggered_this_row = false;
+    PatternCell porta     = bare;
+    porta.note            = 52;
+    porta.effect.type     = Effect::TonePorta;
+    porta.effect.param    = 4;
+    f.dispatch_row(porta);
+    CHECK(!cs.triggered_this_row);
+    CHECK_EQ(cs.last_note, 50);
+
+    // Огибающая: у MOD/S3M/IT - с нуля, у XM - прежняя позиция.
+    for (const bool xm : {false, true}) {
+        Fixture g(FrequencyModel::Amiga);
+        if (xm) g.song.quirks = soundsinth::model::kQuirkXmVolColumnBeforeEffect;
+        g.instrument.volume_envelope = &g.envelope;
+        engine::ChannelState& c      = g.channels[0];
+        g.dispatch_row(g.note_on(48));
+        c.envelope_tick = 37;
+        g.dispatch_row(bare);
+        CHECK(c.voice_active);
+        CHECK_EQ(c.envelope_tick, xm ? 37u : 0u);
+    }
+}
+
 void test_tone_porta_does_not_retrigger_and_converges_to_target_without_overshoot() {
     std::printf("test_tone_porta_does_not_retrigger_and_converges_to_target_without_overshoot\n");
 
@@ -429,6 +478,27 @@ void test_mod_panning_quirks() {
     CHECK_EQ(f.channels[0].pan, static_cast<uint8_t>(63)); // 255 / 4
     f.dispatch_row(f.empty_with_effect(Effect::SetPanning, 0xA4));
     CHECK(f.channels[0].surround);
+}
+
+// MOD_PANNING 20%: 8xx и E8x сужаются к центру с округлением к ближнему.
+// 0x10 и 0xF0 отличают ближнее от отбрасывания (5.6 -> 6, а не 5) в обе
+// стороны от центра.
+void test_mod_pan_narrowed() {
+    std::printf("test_mod_pan_narrowed\n");
+    Fixture f(FrequencyModel::Amiga);
+    f.ctx.mod_pan_percent = 20;
+    const struct {
+        Effect fx;
+        uint8_t param, pan;
+    } cases[] = {
+        {Effect::SetPanning, 0x00, 26}, {Effect::SetPanning, 0x10, 26},   {Effect::SetPanning, 0xF0, 38},
+        {Effect::SetPanning, 0xFF, 38}, {Effect::SetPanning4Bit, 15, 38}, {Effect::SetPanning4Bit, 8, 32},
+    };
+    f.dispatch_row(f.note_on(48));
+    for (const auto& c : cases) {
+        f.dispatch_row(f.empty_with_effect(c.fx, c.param));
+        CHECK_EQ(f.channels[0].pan, c.pan);
+    }
 }
 
 // Arpeggio в колонке эффекта и вибрато из колонки громкости на одном тике
@@ -2589,6 +2659,7 @@ void run_effect_dispatch_porta_tests() {
     test_glissando_control_snaps_tone_porta_to_nearest_note();
     test_arpeggio_with_volume_column_vibrato();
     test_mod_panning_quirks();
+    test_mod_pan_narrowed();
     test_note_delay_defers_trigger_to_specified_tick();
     test_note_delay_with_zero_param_triggers_immediately();
     test_note_delay_pending_cell_cancelled_by_next_row();
@@ -2615,6 +2686,7 @@ void run_effect_dispatch_porta_tests() {
     test_set_global_volume_and_slide();
     test_channel_and_global_volume_apply_without_active_voice();
     test_volume_column_set_volume_and_slide_up();
+    test_bare_note_retriggers_channel_instrument();
     test_volume_column_set_panning_is_already_0_64_scale();
     test_surround_then_volume_column_panning();
     test_volume_column_portamento_up_amiga_and_linear_signs();

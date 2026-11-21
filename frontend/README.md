@@ -19,7 +19,7 @@
 | Скрипт | Результат |
 |---|---|
 | `scripts\build_plugin.bat` | `release\UMPLAYER.WMF` |
-| `scripts\build_trdos.bat` | `release\UNIMOD.$C`, `release\UNIMOD.sna` |
+| `scripts\build_trdos.bat` | `release\ugly.$c`, `release\ugly.sna` |
 | `scripts\build_z80fw.bat` | `z80_fw\obj\*.bin` - тесты для эмулятора |
 
 `scripts\build.bat` вызывает первые два вместе с прошивкой.

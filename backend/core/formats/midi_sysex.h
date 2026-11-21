@@ -6,6 +6,8 @@
 
 #include <cstdint>
 
+#include "core/model/effect.h"
+
 namespace soundsinth::formats::midi {
 
 // Объявление канала ударным - три сообщения по спецификациям Roland GS и
@@ -82,7 +84,9 @@ inline bool sysex_master_volume(const uint8_t* s, uint32_t len, uint8_t& vol) {
 // Время по макросу и типу - приближение по названию зала: у GS и XG своя
 // модель ревербератора, здесь меняется только длина хвоста.
 inline bool sysex_effect_param(const uint8_t* s, uint32_t len, uint8_t& param, uint8_t& value) {
-    constexpr uint8_t kLevel = 0, kTime = 1, kChorus = 2; // как model::FxParam
+    constexpr uint8_t kLevel  = static_cast<uint8_t>(model::FxParam::ReverbLevel);
+    constexpr uint8_t kTime   = static_cast<uint8_t>(model::FxParam::ReverbTime);
+    constexpr uint8_t kChorus = static_cast<uint8_t>(model::FxParam::ChorusLevel);
     if (len >= 8 && s[0] == 0x41 && s[2] == 0x42 && s[3] == 0x12 && s[4] == 0x40 && s[5] == 0x01) {
         const uint8_t v = static_cast<uint8_t>(s[7] & 0x7fu);
         switch (s[6]) {
@@ -101,7 +105,7 @@ inline bool sysex_effect_param(const uint8_t* s, uint32_t len, uint8_t& param, u
                 param = kTime;
                 value = v;
                 return true;
-            case 0x3A:
+            case 0x3a:
                 param = kChorus;
                 value = v;
                 return true;
@@ -125,8 +129,6 @@ inline bool sysex_effect_param(const uint8_t* s, uint32_t len, uint8_t& param, u
                         value = 40;
                         break;
                     case 0x03:
-                        value = 56;
-                        break;
                     case 0x04:
                         value = 56;
                         break;
@@ -147,7 +149,7 @@ inline bool sysex_effect_param(const uint8_t* s, uint32_t len, uint8_t& param, u
                         break;
                 }
                 return true;
-            case 0x0C:
+            case 0x0c:
                 param = kLevel;
                 value = v;
                 return true;
@@ -156,7 +158,7 @@ inline bool sysex_effect_param(const uint8_t* s, uint32_t len, uint8_t& param, u
                 param = kChorus;
                 value = 0;
                 return true;
-            case 0x2C:
+            case 0x2c:
                 param = kChorus;
                 value = v;
                 return true;

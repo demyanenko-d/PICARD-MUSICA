@@ -36,8 +36,8 @@
         .globl  _fat_ext_overflow
 
         .globl  _sd_read_sector
-        .globl  _fat_page_set
-        .globl  _fat_port_shadow
+        .globl  fat_page_enter
+        .globl  fat_page_leave
 
 ;; Сколько отрезков держит страница: (16384 - 2 на заголовок) / 6.
 FAT_EXT_MAX .equ 2730
@@ -83,24 +83,24 @@ fat_io_err:      .ds  1         ; 1 - оборвались из-за карты,
 ;; Имя всегда в CP866 и с нулём в конце: длинное, если собралось и
 ;; переводится, иначе 8.3. Так же поступает WC.
 ;;
+;; Порядок полей тот же, что у записи таблицы каталога (dir.s): запись
+;; переносится одним ldir.
+;;
 ;; 20 записей длинного имени по 13 символов - предел формата; плюс ноль.
-_fat_ent_name::  .ds  261
 _fat_ent_attr::  .ds  1
 _fat_ent_clus::  .ds  4
 _fat_ent_size::  .ds  4
+_fat_ent_name::  .ds  261
 
 fat_lfn_sum:     .ds  1         ; контрольная сумма из записей имени
 fat_lfn_seq:     .ds  1         ; какую по счёту запись ждём (считаем вниз)
 fat_lfn_ok:      .ds  1         ; имя пока собирается без ошибок
 
 ;; -- Построение отрезков --
-fat_ext_page:    .ds  1         ; в какую страницу складываем
-fat_ext_saved:   .ds  1         ; какая страница была включена до нас
 fat_ext_ptr:     .ds  2         ; куда писать следующий отрезок
 fat_ext_first:   .ds  4         ; первый кластер текущего отрезка
 fat_ext_run:     .ds  2         ; сколько кластеров в нём уже набралось
 fat_ext_expect:  .ds  4         ; при каком следующем отрезок продолжается
-fat_ext_next:    .ds  4         ; что на самом деле сказала FAT
 
 _fat_ext_count::    .ds  2      ; сколько отрезков вышло
 _fat_ext_overflow:: .ds  1      ; 1 - файл раздроблен сильнее, чем влезает
@@ -109,20 +109,20 @@ _fat_ext_overflow:: .ds  1      ; 1 - файл раздроблен сильне
 
 ;; -- 32-битная арифметика над памятью --
 ;;
-;; Все три работают с 4-байтными числами по указателям, младший байт
-;; первым: короче, чем таскать значения по регистрам.
+;; 4-байтные числа по указателям, младший байт первым: короче, чем таскать
+;; значения по регистрам. С двумя двоеточиями - общие с file.s и dir.s.
 
 ;; (HL) += (DE)
-add32:
+fat_add32::
         ld      b, #4
         or      a               ; сбросить перенос
-add32_l:
+fat_add32_l:
         ld      a, (de)
         adc     a, (hl)
         ld      (hl), a
         inc     hl
         inc     de
-        djnz    add32_l
+        djnz    fat_add32_l
         ret
 
 ;; (HL) -= 2 - единственное вычитание, которое требуется: номер кластера
@@ -154,14 +154,52 @@ shl32_l:
         ret
 
 ;; Скопировать 4 байта из (DE) в (HL)
-copy32:
+fat_copy4::
         ld      b, #4
-copy32_l:
+fat_copy4_l:
         ld      a, (de)
         ld      (hl), a
         inc     hl
         inc     de
-        djnz    copy32_l
+        djnz    fat_copy4_l
+        ret
+
+;; Обнулить 4 байта по (HL).
+fat_zero4::
+        xor     a
+        ld      b, #4
+fat_zero4_l:
+        ld      (hl), a
+        inc     hl
+        djnz    fat_zero4_l
+        ret
+
+;; Вход: HL -> 32-битное число в памяти. Выход: DEHL = оно же - в том виде,
+;; в каком его ждёт _sd_read_sector.
+fat_load_dehl::
+        inc     hl
+        inc     hl
+        inc     hl
+        ld      d, (hl)
+        dec     hl
+        ld      e, (hl)
+        dec     hl
+        ld      a, (hl)
+        dec     hl
+        ld      l, (hl)
+        ld      h, a
+        ret
+
+;; (HL) <<= A, HL сохраняется. A = _fat_spc_shift - кластеры в секторы.
+fat_shl_n::
+        or      a
+        ret     z
+fat_shl_n_l:
+        push    hl
+        call    shl32
+        pop     hl
+        dec     a
+        jr      nz, fat_shl_n_l
         ret
 
 ;; -- Монтирование --
@@ -175,6 +213,9 @@ copy32_l:
 ;; есть, иначе ищем разделы. Тип раздела смотрим только чтобы не лезть в
 ;; пустые записи; решает BPB, потому что тип пишут кто во что горазд.
 _fat_mount::
+        ;; Сектор FAT в кэше принадлежит прежнему тому.
+        xor     a
+        ld      (fat_fat_valid), a
         ld      hl, #fat_part_base
         call    fat_zero4
 
@@ -215,7 +256,7 @@ fat_part_try:
         add     hl, bc
         ex      de, hl
         ld      hl, #fat_part_base
-        call    copy32
+        call    fat_copy4
 
         ld      a, (fat_part_base+0)
         ld      hl, #fat_part_base+1
@@ -227,7 +268,7 @@ fat_part_try:
         jr      z, fat_part_next        ; раздел с нулевого сектора не бывает
 
         ld      hl, #fat_part_base
-        call    load32_dehl
+        call    fat_load_dehl
         ld      ix, #_fat_sec_buf
         call    _sd_read_sector
         jr      c, fat_part_next
@@ -286,12 +327,12 @@ fat_spc_done:
         ;; считается от fat_start.
         ld      hl, #_fat_start
         ld      de, #fat_part_base
-        call    add32
+        call    fat_add32
 
         ;; data_start = fat_start + num_fats * fat_size32
         ld      hl, #_fat_data_start
         ld      de, #_fat_start
-        call    copy32
+        call    fat_copy4
 
         ld      a, (_fat_sec_buf + 16)  ; сколько копий FAT
         or      a
@@ -300,14 +341,14 @@ fat_spc_done:
 fat_add_fat:
         ld      hl, #_fat_data_start
         ld      de, #_fat_sec_buf + 36  ; FATsz32 лежит младшим байтом вперёд
-        call    add32
+        call    fat_add32
         dec     c
         jr      nz, fat_add_fat
 
         ;; Корневой кластер.
         ld      hl, #_fat_root_clus
         ld      de, #_fat_sec_buf + 44
-        call    copy32
+        call    fat_copy4
 
         or      a                       ; CY=0
         ret
@@ -363,64 +404,31 @@ fat_bpb_no:
         scf
         ret
 
-;; Обнулить 4 байта по (HL).
-fat_zero4:
-        xor     a
-        ld      b, #4
-fat_zero4_l:
-        ld      (hl), a
-        inc     hl
-        djnz    fat_zero4_l
-        ret
-
 ;; -- Кластер -> первый его сектор --
 ;;
 ;; lba = data_start + (clus - 2) * spc
 ;;
 ;; Вход: _fat_clus. Выход: _fat_lba.
 _fat_clus_to_lba::
-        ld      hl, #fat_tmp
-        ld      de, #_fat_clus
-        call    copy32
-
-        ld      hl, #fat_tmp
-        call    sub32_2
-
         ld      a, (_fat_spc_shift)
-        or      a
-        jr      z, fat_c2l_add
-fat_c2l_shift:
-        ld      hl, #fat_tmp
+        ld      bc, #_fat_data_start
+
+;; То же с параметрами тома в регистрах: A - log2 секторов в кластере, BC -
+;; где лежит номер первого сектора данных. Открытый файл помнит свои
+;; (file.s): его том может быть не тем, чей каталог открыт.
+fat_clus_to_lba_with::
+        push    bc
         push    af
-        call    shl32
+        ld      hl, #_fat_lba
+        ld      de, #_fat_clus
+        call    fat_copy4
+        ld      hl, #_fat_lba
+        call    sub32_2
         pop     af
-        dec     a
-        jr      nz, fat_c2l_shift
-
-fat_c2l_add:
         ld      hl, #_fat_lba
-        ld      de, #_fat_data_start
-        call    copy32
-        ld      hl, #_fat_lba
-        ld      de, #fat_tmp
-        call    add32
-        ret
-
-;; Вход: HL -> 32-битное число в памяти. Выход: DEHL = оно же - в том виде,
-;; в каком его ждёт _sd_read_sector.
-load32_dehl:
-        inc     hl
-        inc     hl
-        inc     hl
-        ld      d, (hl)
-        dec     hl
-        ld      e, (hl)
-        dec     hl
-        ld      a, (hl)
-        dec     hl
-        ld      l, (hl)
-        ld      h, a
-        ret
+        call    fat_shl_n
+        pop     de
+        jp      fat_add32
 
 ;; -- Следующий кластер цепочки --
 ;;
@@ -428,110 +436,52 @@ load32_dehl:
 ;; CY=1 - цепочка кончилась или карта не ответила (что именно, говорит
 ;; fat_io_err).
 _fat_next_clus::
-        ;; Сектор FAT = fat_start + clus/128. Делить семью сдвигами вправо
-        ;; дорого, а clus>>7 - это (clus>>8)<<1 плюс седьмой бит младшего
-        ;; байта: сдвиг всего один.
-        ld      hl, #fat_tmp
-        ld      de, #_fat_clus+1
-        ld      b, #3
-fnc_copy:
-        ld      a, (de)
-        ld      (hl), a
-        inc     hl
-        inc     de
-        djnz    fnc_copy
-        xor     a
-        ld      (fat_tmp+3), a
-
-        ld      hl, #fat_tmp
-        call    shl32
-        ld      a, (_fat_clus)
-        rlca                    ; седьмой бит уехал в перенос
-        jr      nc, fnc_no_bit
-        ld      hl, #fat_tmp
-        inc     (hl)            ; после сдвига младший байт чётный, не переполнится
-fnc_no_bit:
-        ld      hl, #fat_tmp
-        ld      de, #_fat_start
-        call    add32
-
-        ;; Этот сектор FAT уже в буфере?
-        ld      a, (fat_fat_valid)
-        or      a
-        jr      z, fnc_read
-        ld      hl, #fat_tmp
-        ld      de, #fat_fat_lba
-        ld      b, #4
-fnc_same:
-        ld      a, (de)
-        cp      (hl)
-        jr      nz, fnc_read
-        inc     hl
-        inc     de
-        djnz    fnc_same
-        jr      fnc_have
-
-fnc_read:
-        ld      hl, #fat_fat_lba
-        ld      de, #fat_tmp
-        call    copy32
-        xor     a
-        ld      (fat_fat_valid), a      ; пока не прочитали - не верить
-        ld      hl, #fat_tmp
-        call    load32_dehl
-        ld      ix, #fat_fat_buf
-        call    _sd_read_sector
-        jr      nc, fnc_read_ok
-        ld      a, #1
-        ld      (fat_io_err), a
-        scf
-        ret
-fnc_read_ok:
-        ld      a, #1
-        ld      (fat_fat_valid), a
-
-fnc_have:
-        ;; Смещение внутри сектора = (clus & 127) * 4.
-        ld      a, (_fat_clus)
-        and     #0x7F
-        ld      l, a
-        ld      h, #0
-        add     hl, hl
-        add     hl, hl
-        ld      de, #fat_fat_buf
-        add     hl, de
-
-        ;; Старшие четыре бита в FAT32 зарезервированы - гасим их сразу,
-        ;; иначе сравнение с меткой конца цепочки не сойдётся.
+        call    fbe_load_fat
+        jr      c, fnc_io_err
         ld      de, #_fat_clus
-        ld      b, #3
-fnc_get:
+
+;; Запись FAT из (HL) в (DE). Старшие четыре бита в FAT32 зарезервированы
+;; и гасятся, иначе сравнение с меткой конца не сойдётся.
+;; CY=1 - конец цепочки: всё, что не меньше 0x0FFFFFF8.
+fat_take_entry:
         ld      a, (hl)
         ld      (de), a
         inc     hl
         inc     de
-        djnz    fnc_get
+        ld      a, (hl)
+        ld      (de), a
+        inc     hl
+        inc     de
+        ld      a, (hl)
+        ld      (de), a
+        inc     hl
+        inc     de
         ld      a, (hl)
         and     #0x0F
         ld      (de), a
-
-        ;; Конец цепочки - всё, что не меньше 0x0FFFFFF8.
         cp      #0x0F
-        jr      nz, fnc_ok
-        ld      a, (_fat_clus+2)
+        jr      nz, fte_more
+        dec     de
+        ld      a, (de)
         cp      #0xFF
-        jr      nz, fnc_ok
-        ld      a, (_fat_clus+1)
+        jr      nz, fte_more
+        dec     de
+        ld      a, (de)
         cp      #0xFF
-        jr      nz, fnc_ok
-        ld      a, (_fat_clus)
+        jr      nz, fte_more
+        dec     de
+        ld      a, (de)
         cp      #0xF8
-        jr      c, fnc_ok
-        scf                     ; цепочка кончилась, fat_io_err не трогаем
+        ccf
         ret
-fnc_ok:
+fte_more:
         or      a
         ret
+
+fnc_io_err:
+        ld      a, #1
+        ld      (fat_io_err), a
+        ret                     ; CY=1 от fbe_load_fat
 
 ;; -- Открыть каталог --
 ;;
@@ -539,7 +489,7 @@ fnc_ok:
 _fat_dir_open::
         ld      hl, #fat_dir_clus
         ld      de, #_fat_clus
-        call    copy32
+        call    fat_copy4
         xor     a
         ld      (fat_dir_sec), a
         ld      (fat_lfn_ok), a
@@ -550,14 +500,14 @@ _fat_dir_open::
 _fat_dir_open_root::
         ld      hl, #_fat_clus
         ld      de, #_fat_root_clus
-        call    copy32
+        call    fat_copy4
         jp      _fat_dir_open
 
 ;; Прочитать текущий сектор каталога в _fat_sec_buf.
 fat_dir_load:
         ld      hl, #_fat_clus
         ld      de, #fat_dir_clus
-        call    copy32
+        call    fat_copy4
         call    _fat_clus_to_lba
 
         ld      a, (fat_dir_sec)
@@ -572,10 +522,10 @@ fat_dir_load:
         ld      (hl), a
         ld      hl, #_fat_lba
         ld      de, #fat_tmp
-        call    add32
+        call    fat_add32
 
         ld      hl, #_fat_lba
-        call    load32_dehl
+        call    fat_load_dehl
         ld      ix, #_fat_sec_buf
         call    _sd_read_sector
         jr      nc, fdl_ok
@@ -605,12 +555,12 @@ fat_dir_advance:
 fda_next_clus:
         ld      hl, #_fat_clus
         ld      de, #fat_dir_clus
-        call    copy32
+        call    fat_copy4
         call    _fat_next_clus
         ret     c               ; цепочка каталога кончилась
         ld      hl, #fat_dir_clus
         ld      de, #_fat_clus
-        call    copy32
+        call    fat_copy4
         xor     a
         ld      (fat_dir_sec), a
         jp      fat_dir_load
@@ -858,8 +808,8 @@ flr_bad:
 fdn_short:
         ;; Длинное имя годится, только если оно собралось целиком (дошли до
         ;; первой части) и его контрольная сумма сходится с именем 8.3.
-        ;; Сумма тут не формальность: она единственное, что связывает
-        ;; записи длинного имени с короткой.
+        ;; Сумма - единственное, что связывает записи длинного имени с
+        ;; короткой.
         ld      a, (fat_lfn_ok)
         or      a
         jr      z, fs_short_name
@@ -906,7 +856,7 @@ fs_fields:
         add     hl, bc
         ex      de, hl
         ld      hl, #_fat_ent_size
-        call    copy32
+        call    fat_copy4
 
         call    fdn_step
         ld      a, #1
@@ -994,18 +944,11 @@ fsn_keep:
 ;;        CY=1 - карта не ответила либо отрезков больше, чем влезает
 ;;        (что именно, говорит _fat_ext_overflow).
 _fat_build_extents::
-        ld      (fat_ext_page), a
+        call    fat_page_enter
         xor     a
         ld      (_fat_ext_overflow), a
         ld      hl, #0
         ld      (_fat_ext_count), hl
-
-        ;; Запомнить, какая страница была включена, и вернуть её на место
-        ;; при выходе: вызывающий про наши переключения знать не обязан.
-        ld      a, (_fat_port_shadow)
-        ld      (fat_ext_saved), a
-        ld      a, (fat_ext_page)
-        call    _fat_page_set
 
         ld      hl, #0xC002
         ld      (fat_ext_ptr), hl
@@ -1025,10 +968,10 @@ _fat_build_extents::
         jp      c, fbe_done
 
 fbe_have:
-        ;; Начали первый отрезок.
+        ;; Начать отрезок с _fat_clus.
         ld      hl, #fat_ext_first
         ld      de, #_fat_clus
-        call    copy32
+        call    fat_copy4
         ld      hl, #1
         ld      (fat_ext_run), hl
         call    fbe_set_expect
@@ -1102,58 +1045,22 @@ fbe_mis2:
         dec     hl
 fbe_mis1:
         dec     hl
-        call    fbe_spill
+        ld      (fat_ext_run), ix
 
         ;; Прочитать запись целиком: в горячем цикле мы бросили сравнение
-        ;; на первом несовпавшем байте и всех четырёх не видели.
-        ld      de, #fat_ext_next
-        ld      a, (hl)
-        ld      (de), a
-        inc     hl
-        inc     de
-        ld      a, (hl)
-        ld      (de), a
-        inc     hl
-        inc     de
-        ld      a, (hl)
-        ld      (de), a
-        inc     hl
-        inc     de
-        ld      a, (hl)
-        and     #0x0F
-        ld      (de), a
-
-        ;; Конец цепочки?
-        cp      #0x0F
-        jr      nz, fbe_break
-        ld      a, (fat_ext_next+2)
-        cp      #0xFF
-        jr      nz, fbe_break
-        ld      a, (fat_ext_next+1)
-        cp      #0xFF
-        jr      nz, fbe_break
-        ld      a, (fat_ext_next)
-        cp      #0xF8
-        jr      c, fbe_break
+        ;; на первом несовпавшем байте и всех четырёх не видели. Куда увела
+        ;; цепочка, кладётся сразу в _fat_clus: с него начнётся следующий
+        ;; отрезок.
+        ld      de, #_fat_clus
+        call    fat_take_entry
+        jr      c, fbe_last
+        call    fbe_close
+        jr      nc, fbe_have
+        jr      fbe_overflow
+fbe_last:
         call    fbe_close
         jr      c, fbe_overflow
-        jp      fbe_done
-
-fbe_break:
-        ;; Отрезок кончился: закрыть и начать новый с того кластера, куда
-        ;; цепочка увела.
-        call    fbe_close
-        jr      c, fbe_overflow
-        ld      hl, #fat_ext_first
-        ld      de, #fat_ext_next
-        call    copy32
-        ld      hl, #_fat_clus
-        ld      de, #fat_ext_next
-        call    copy32
-        ld      hl, #1
-        ld      (fat_ext_run), hl
-        call    fbe_set_expect
-        jp      fbe_sector
+        jr      fbe_done
 
 ;; Сложить регистры горячего цикла обратно в память. HL не трогаем: он
 ;; ещё нужен вызывающему.
@@ -1167,7 +1074,7 @@ fbe_spill:
         push    hl
         ld      hl, #_fat_clus
         ld      de, #fat_ext_expect
-        call    copy32
+        call    fat_copy4
         ld      hl, #_fat_clus
         call    fbe_dec32
         pop     hl
@@ -1190,9 +1097,7 @@ fbe_dec32_l:
         ret
 
 fbe_done:
-        call    fbe_write_count
-        ld      a, (fat_ext_saved)
-        call    _fat_page_set
+        call    fbe_finish
         or      a
         ret
 
@@ -1200,17 +1105,16 @@ fbe_overflow:
         ld      a, #1
         ld      (_fat_ext_overflow), a
 fbe_io_err:
-        call    fbe_write_count
-        ld      a, (fat_ext_saved)
-        call    _fat_page_set
+        call    fbe_finish
         scf
         ret
 
-;; Записать в заголовок страницы, сколько отрезков вышло.
-fbe_write_count:
+;; Записать в заголовок страницы, сколько отрезков вышло, и вернуть
+;; прежнюю страницу.
+fbe_finish:
         ld      hl, (_fat_ext_count)
         ld      (0xC000), hl
-        ret
+        jp      fat_page_leave
 
 ;; Закрыть текущий отрезок: дописать его в страницу. CY=1 - не влезло.
 fbe_close:
@@ -1224,7 +1128,7 @@ fbe_close:
 fbe_close_ok:
         ld      hl, (fat_ext_ptr)
         ld      de, #fat_ext_first
-        call    copy32
+        call    fat_copy4
         ld      de, (fat_ext_run)
         ld      (hl), e
         inc     hl
@@ -1242,7 +1146,7 @@ fbe_close_ok:
 fbe_set_expect:
         ld      hl, #fat_ext_expect
         ld      de, #_fat_clus
-        call    copy32
+        call    fat_copy4
         ld      hl, #fat_ext_expect
         ;; переходим к inc32 ниже
 
@@ -1263,9 +1167,12 @@ fbe_inc32:
 ;; Прочитать сектор FAT, где лежит запись для _fat_clus, и вернуть в HL
 ;; адрес самой записи. CY=1 - карта не ответила.
 ;;
-;; Кэш тот же, что у _fat_next_clus: в секторе 128 записей, так что на
-;; сплошном файле сюда заходят раз на 64 КБ данных.
+;; Общая у _fat_next_clus и построения отрезков. Сектор кэшируется: в нём
+;; 128 записей, так что на сплошном файле сюда заходят раз на 64 КБ данных.
 fbe_load_fat:
+        ;; Сектор FAT = fat_start + clus/128. Делить семью сдвигами вправо
+        ;; дорого, а clus>>7 - это (clus>>8)<<1 плюс седьмой бит младшего
+        ;; байта: сдвиг всего один.
         ld      hl, #fat_tmp
         ld      de, #_fat_clus+1
         ld      b, #3
@@ -1287,7 +1194,7 @@ fbe_cp3:
 fbe_no_bit:
         ld      hl, #fat_tmp
         ld      de, #_fat_start
-        call    add32
+        call    fat_add32
 
         ld      a, (fat_fat_valid)
         or      a
@@ -1306,11 +1213,11 @@ fbe_same:
 fbe_read:
         ld      hl, #fat_fat_lba
         ld      de, #fat_tmp
-        call    copy32
+        call    fat_copy4
         xor     a
         ld      (fat_fat_valid), a
         ld      hl, #fat_tmp
-        call    load32_dehl
+        call    fat_load_dehl
         ld      ix, #fat_fat_buf
         call    _sd_read_sector
         ret     c

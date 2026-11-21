@@ -129,6 +129,15 @@ struct Song {
     // вместо фильтра IT. Ставит только загрузчик MIDI.
     bool filter_sf2_response = false;
 
+    // Классы параметрических MIDI-макросов SF0..SFF (IT): Zxx с параметром
+    // < 0x80 ставит срез (текст F0F000z) или резонанс (F0F001z) канала,
+    // прочие макросы не исполняются. Заполняет только загрузчик IT;
+    // умолчание Impulse Tracker - SF0 срез, остальные пусто. Фиксированные
+    // макросы (Zxx >= 0x80) сюда не попадают: их загрузчик разбирает прямо
+    // в SetFilterCutoff/SetFilterResonance.
+    enum class FilterMacro : uint8_t { None = 0, Cutoff = 1, Resonance = 2 };
+    FilterMacro sfx_macro[16] = {};
+
     // Конструктор только ради channel_pan и channel_volume: у массива нет
     // инициализатора, заполняющего все элементы одним ненулевым значением.
     Song() {
@@ -141,10 +150,15 @@ struct Song {
     }
 
     // --- Общее ---
-    char title[32]         = {}; // с запасом под самый длинный заголовок (S3M: 28 символов + '\0')
-    uint8_t channel_count  = 4;
-    uint16_t default_speed = kDefaultSpeed; // тиков на строку
-    uint16_t default_tempo = kDefaultTempo; // BPM
+    char title[32] = {}; // с запасом под самый длинный заголовок (S3M: 28 символов + '\0')
+    // Для хоста (метаданные трека): чем сделан файл, без '\0' на полной
+    // длине; у MOD - метка на 1080, у .mid пусто.
+    char program[20] = {};
+    // Заголовок .mid для хоста: дорожек, PPQN (0 у SMPTE), начальный темп BPM.
+    uint16_t midi_header[3] = {};
+    uint8_t channel_count   = 4;
+    uint16_t default_speed  = kDefaultSpeed; // тиков на строку
+    uint16_t default_tempo  = kDefaultTempo; // BPM
     // 0..128 (шкала IT). MOD - всегда 128; S3M - GlobalVolume заголовка (0..64)
     // * 2; XM/IT - свои поля, приведённые загрузчиком.
     uint8_t default_global_volume = kGlobalVolumeMax;
@@ -234,9 +248,35 @@ struct Song {
     SampleDescriptor* samples = nullptr; // в арене, ровно sample_count элементов
     uint16_t sample_count     = 0;
 
+    // Обычные петли сэмплов с петлёй удержания (IT, SampleDescriptor::sus_loop):
+    // в loop_* дескриптора лежит петля удержания, сюда загрузчик кладёт то,
+    // на что голос переводится после Note-Off. Координаты той же шкалы, что
+    // loop_* (после прореживания и разворота). loop_enabled == false -
+    // обычной петли нет, после отпускания сэмпл играет до конца.
+    struct SusRelease {
+        uint16_t sample_index = 0;
+        bool loop_enabled     = false;
+        uint32_t loop_start   = 0;
+        uint32_t loop_end     = 0;
+    };
+    SusRelease* sus_release    = nullptr; // в арене, ровно sus_release_count элементов
+    uint16_t sus_release_count = 0;
+    // Запись сэмпла sample_index; nullptr - записи нет. Записей единицы на
+    // песню, поиск линейный.
+    const SusRelease* sus_release_find(uint16_t sample_index) const {
+        for (uint16_t k = 0; k < sus_release_count; ++k) {
+            if (sus_release[k].sample_index == sample_index) return &sus_release[k];
+        }
+        return nullptr;
+    }
+
     // --- Инструменты ---
     Instrument* instruments   = nullptr; // в арене, ровно instrument_count элементов
     uint16_t instrument_count = 0;
+    // Версия формата из файла, цифрами BCD: XM - версия заголовка (0x0104),
+    // IT - cmwt, .mid - формат SMF; у MOD и S3M версии нет - 0. Место - дыра
+    // выравнивания перед quirks.
+    uint16_t format_version = 0;
 
     // --- Квирки воспроизведения (quirks.h): выставляет загрузчик один раз по
     // сигнатуре и версии трекера, движок версию не определяет ---
@@ -245,7 +285,38 @@ struct Song {
 };
 // Размеры считаны под 32-битный указатель платы; 32-битная сборка для ПК
 // обязана давать те же числа, иначе её замеры арены врут.
-static_assert(sizeof(void*) != 4 || sizeof(Song) == 256, "Song: 256 bytes with a 32-bit pointer");
+// 256 -> 272 с sfx_macro[16], -> 280 с sus_release (2026-11-08), -> 312 с
+// program и midi_header (2026-11-17).
+static_assert(sizeof(void*) != 4 || sizeof(Song) == 312, "Song: 312 bytes with a 32-bit pointer");
+
+// Song::program: name и версия нибблами через точку (0x214 -> "2.14"), 0 -
+// без версии. Хвост name после len и пробелы в конце отбрасываются.
+inline void set_program(Song& song, const char* name, uint32_t len, uint16_t version = 0) {
+    constexpr uint32_t kMax = sizeof(song.program);
+    uint32_t n              = 0;
+    for (; n < len && n < kMax && name[n] != '\0'; ++n) {
+        song.program[n] = name[n];
+    }
+    while (n > 0 && song.program[n - 1] == ' ') {
+        --n;
+    }
+    if (version != 0) {
+        const char* hex = "0123456789ABCDEF";
+        char v[6]       = {' '};
+        uint32_t k      = 1;
+        if (version >> 12) v[k++] = hex[version >> 12];
+        v[k++] = hex[(version >> 8) & 0xfu];
+        v[k++] = '.';
+        v[k++] = hex[(version >> 4) & 0xfu];
+        v[k++] = hex[version & 0xfu];
+        for (uint32_t i = 0; i < k && n < kMax; ++i) {
+            song.program[n++] = v[i];
+        }
+    }
+    for (; n < kMax; ++n) {
+        song.program[n] = '\0';
+    }
+}
 
 // Канал выключен в заголовке файла (Song::channel_muted).
 inline bool channel_is_muted(const Song& song, uint8_t ch) {

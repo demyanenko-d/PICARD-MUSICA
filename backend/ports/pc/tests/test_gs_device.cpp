@@ -1686,9 +1686,11 @@ void test_midi_blob_serves() {
     CHECK(after_pos > before_pos);
     CHECK(st[player::gs::kMidiStateConst] == 0x78);
 
-    // Расписание кончилось - признак гаснет, и плеер уходит сам.
+    // Расписание кончилось - признак гаснет кадром позже последних событий,
+    // и плеер уходит сам.
     while (!sched.finished())
         sched.next_frame();
+    sched.next_frame();
     CHECK(sched.state()[player::gs::kMidiStatePlaying] == 0);
 
     // Чужой код кончает блоб: дальше команды разбирает прошивка.
@@ -2000,9 +2002,14 @@ void test_peek_equals_read_fuzz() {
 // прогоном. Пробы опознания карты (тип, процессор, частота) получают ответы
 // подмен, неопознанных команд нет; по нулю от пробы клона плеер проверяет
 // шлейф командой #10.
-void test_zplayer_session_replay() {
-    std::printf("test_gs_zplayer_session_replay\n");
-    std::ifstream in("backend/ports/pc/tests/data/zplayer41_gs.bin", std::ios::binary);
+//
+// Тем же стендом снят Z-Player 5.1 (распакованный образ по #6D00,
+// ZPlayer/v51/19_unpacked_6D00.bin): та же проверка шумом, опознание карты,
+// главный цикл. 3.4 стенд пока не снимает: после проверки шумом плеер
+// уходит в TR-DOS за диском, а TR-DOS у стенда нет.
+void replay_zplayer_session(const char* name, const char* path, size_t bytes) {
+    std::printf("test_gs_zplayer_session_replay %s\n", name);
+    std::ifstream in(path, std::ios::binary);
     if (!in) {
         std::printf("  no log - SKIP\n");
         return;
@@ -2035,10 +2042,15 @@ void test_zplayer_session_replay() {
     }
     std::printf("  accesses %u, reads %u, differences %u\n", static_cast<unsigned>(log.size() / 2), reads, bad);
     if (bad) std::printf("  first difference at access %u\n", first_bad);
-    CHECK_EQ(log.size(), 44212u);
+    CHECK_EQ(log.size(), bytes);
     CHECK_EQ(bad, 0u);
     CHECK_EQ(d.unknown_command(), 0x00u);
     CHECK_EQ(d.unknown_count(), 0u);
+}
+
+void test_zplayer_session_replay() {
+    replay_zplayer_session("4.1", "backend/ports/pc/tests/data/zplayer41_gs.bin", 44212u);
+    replay_zplayer_session("5.1", "backend/ports/pc/tests/data/zplayer51_gs.bin", 44012u);
 }
 
 // --- Детект целевого плеера, снятый с живой шины ---
@@ -2198,6 +2210,299 @@ void test_position_feedback() {
     CHECK(d.unknown_count() == 0);
 }
 
+// --- Сверка поведения автомата суммой ---
+//
+// Каждая команда во всех трёх режимах (прошивка, резидент, блоб MIDI) с
+// разными аргументами и хвостом, затем всё, что видно снаружи: биты
+// состояния, байты ответа, события, заявки эффектов, счётчики. Сумма
+// снята на коде до перестройки автомата; расхождение значит, что
+// перестройка изменила поведение.
+struct Fnv {
+    uint32_t h = 2166136261u;
+    void add(uint32_t v) {
+        for (int i = 0; i < 4; ++i) {
+            h ^= (v >> (8 * i)) & 0xffu;
+            h *= 16777619u;
+        }
+    }
+};
+
+// Всё наблюдаемое после шага. Ответ вычитывается не дальше восьми байт:
+// блоки #15 и паттерны длиной в килобайт. counters - и счётчики, которые
+// сброс не трогает.
+void observe(GsDevice& d, Fnv& h, bool counters = true) {
+    h.add(static_cast<uint32_t>(d.take_event()));
+    h.add(d.read_status());
+    h.add(d.peek_data());
+    h.add(static_cast<uint32_t>(d.stream()));
+    h.add(d.last_command());
+    h.add(d.stream_bytes());
+    h.add(d.module_volume());
+    h.add(d.fx_master_volume());
+    h.add(d.fx_volume());
+    h.add(d.fx_volume_effective());
+    h.add(d.fx_count());
+    h.add(d.current_fx());
+    h.add(d.fx_loading());
+    h.add(d.fx_stop_mask());
+    const gs::FxStart& st = d.fx_start();
+    h.add(st.channel | (st.handle << 8) | (st.note << 16) | (static_cast<uint32_t>(st.volume) << 24));
+    h.add(st.seq | (st.loop ? 0x10000u : 0u) | (st.signed_pcm ? 0x20000u : 0u) | (static_cast<uint32_t>(st.finetune) << 24));
+    h.add(st.offset);
+    h.add(st.length);
+    h.add(st.end);
+    h.add(st.loop_begin);
+    const gs::FxSample& s = d.fx_sample(d.current_fx());
+    h.add(s.offset);
+    h.add(s.length);
+    h.add(s.loop_begin);
+    h.add(s.loop_end);
+    h.add(s.note | (s.volume << 8) | (s.finetune << 16) | (static_cast<uint32_t>(s.priority) << 24));
+    h.add(s.seek_first | (s.seek_last << 8) | (s.loop ? 0x10000u : 0u) | (s.signed_pcm ? 0x20000u : 0u));
+    h.add((d.midi_active() ? 1u : 0u) | (d.midi_frame_pending() ? 2u : 0u) | (d.midi_frame_wanted() ? 4u : 0u) | (d.resident_active() ? 8u : 0u));
+    h.add(d.module_len());
+    if (counters) {
+        h.add(d.unknown_command());
+        h.add(d.unknown_count());
+        h.add(d.fx_refused());
+        h.add(d.midi_frames_served());
+        h.add(d.midi_frames_empty());
+        h.add(d.last_blob_len());
+        h.add(d.last_blob_crc());
+        h.add(d.pattern_asks());
+        h.add(d.pattern_served());
+        h.add(d.last_pattern_pos() | (d.last_pattern_num() << 8));
+        for (uint8_t i = 0; i < gs::kTelemetryBytes; ++i)
+            h.add(d.telemetry_byte(i));
+    }
+    const gs::MidiFileFacts& f = d.midi_facts();
+    h.add(f.division | (f.first_track << 16) | (static_cast<uint32_t>(f.track_count) << 24));
+    h.add(f.file_length);
+    for (int i = 0; i < 8 && (d.read_status() & gs::kDataBit) != 0; ++i) {
+        h.add(d.read_data());
+        h.add(d.read_status());
+    }
+}
+
+// Режимы, в которых команда разбирается по-разному.
+enum class World { Firmware, Resident, MidiBlob };
+
+// Синтетический MOD для паттернов резидента: таблица порядка ведёт на
+// паттерны 1 и 0, байты паттернов - их смещение.
+std::vector<uint8_t> sweep_module() {
+    std::vector<uint8_t> m(gs::kModPatternsAt + 2u * gs::kPatternBytes);
+    for (size_t i = 0; i < m.size(); ++i)
+        m[i] = static_cast<uint8_t>(i * 7u);
+    m[gs::kModOrderTable]      = 1;
+    m[gs::kModOrderTable + 1u] = 0;
+    m[gs::kModOrderTable + 2u] = 9; // паттерна 9 в модуле нет
+    return m;
+}
+
+std::vector<uint8_t> read_bin(const char* path) {
+    std::ifstream in(path, std::ios::binary);
+    return std::vector<uint8_t>((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+}
+
+// Заливка как upload_blob, без проверок на каждом байте: сверка зовёт её
+// тысячи раз.
+void sweep_upload(Bus& b, uint16_t addr, const std::vector<uint8_t>& body) {
+    b.sd(static_cast<uint8_t>(addr & 0xFF));
+    b.sc(0x18);
+    b.sd(static_cast<uint8_t>(addr >> 8));
+    for (uint8_t byte : body) {
+        b.sd(byte);
+        b.sc(0x19);
+        b.sc(0x1B);
+    }
+    b.sd(static_cast<uint8_t>(addr & 0xFF));
+    b.sc(0x13);
+    b.sd(static_cast<uint8_t>(addr >> 8));
+}
+
+// Привести автомат в режим: два сэмпла эффектов, позиция и телеметрия, а
+// дальше залитая программа.
+void sweep_prepare(GsDevice& d, World w, const std::vector<uint8_t>& resident, const std::vector<uint8_t>& midi_blob, const std::vector<uint8_t>& module,
+                   const uint8_t* midi_tables) {
+    Bus b{d};
+    d.reset();
+    b.sc(0x38);
+    b.sd(0x11);
+    b.sd(0x22);
+    b.sc(0xD2);
+    d.set_fx_length(1, 0, 100);
+    b.sd(0x01);
+    b.sc(0x3E);
+    b.sd(0x33);
+    b.sc(0xD2);
+    d.set_fx_length(2, 100, 50);
+    d.set_position(0x25, 0x13);
+    const uint8_t notes[4]  = {0x24, 0x30, 0xFF, 0x47};
+    const uint8_t levels[4] = {0, 64, 32, 70};
+    d.set_telemetry(0x05, 0x11, notes, levels, 6, true);
+    if (w == World::Resident) {
+        sweep_upload(b, 0x5B00, resident);
+        d.set_module_image(module.data(), static_cast<uint32_t>(module.size()));
+    } else if (w == World::MidiBlob) {
+        sweep_upload(b, 0x5000, midi_blob);
+        for (int i = 0; i < 40; ++i)
+            b.sd(static_cast<uint8_t>(i));
+        b.sc(0xD2);
+        d.hold_parse_done();
+        d.set_midi_tables(midi_tables, midi_tables + gs::kMidiNamesBytes);
+        d.set_midi_tracks(midi_tables + 100, 20);
+        d.set_midi_frame(midi_tables + 200, 30);
+        d.set_midi_ready(true);
+    }
+}
+
+// Шаг сверки: аргумент или его отсутствие, команда, три байта хвоста,
+// затем запуск текущего эффекта и вопрос об объёме памяти.
+void sweep_step(GsDevice& d, Fnv& h, int arg, uint8_t command, bool counters = true) {
+    if (arg >= 0) {
+        h.add(d.write_data(static_cast<uint8_t>(arg)) ? 1u : 0u);
+        observe(d, h, counters);
+    }
+    h.add(static_cast<uint32_t>(d.write_command(command)));
+    observe(d, h, counters);
+    for (uint8_t t : {0x12, 0x34, 0x56}) {
+        h.add(d.write_data(t) ? 1u : 0u);
+        observe(d, h, counters);
+    }
+}
+
+// Сброс машины без остановки музыки обрывает открытый поток: проба #36
+// после него отвечает, как у чистой карты, а не глотается потоком.
+void test_abort_exchange_ends_the_stream() {
+    std::printf("test_gs_abort_exchange\n");
+    GsDevice d, ref;
+    d.write_command(0x30);
+    for (uint8_t i = 0; i < 5; ++i)
+        d.write_data(i);
+    d.abort_exchange();
+    d.write_command(0x36);
+    ref.write_command(0x36);
+    std::printf("  #36 after a reset mid-stream: %02X, clean card %02X\n", d.peek_data(), ref.peek_data());
+    CHECK(d.stream() == gs::Stream::None);
+    CHECK_EQ(d.peek_data(), ref.peek_data());
+}
+
+void test_command_sweep_golden() {
+    std::printf("test_gs_command_sweep_golden\n");
+    const std::vector<uint8_t> resident = read_bin("ZPlayer/v41/gs_interp_5B00.bin");
+    std::vector<uint8_t> midi_blob      = read_bin("ZPlayer/v51/27_gs_midi.bin");
+    CHECK_EQ(resident.size(), 428u);
+    CHECK_EQ(midi_blob.size(), 2356u);
+    if (resident.size() != 428u || midi_blob.size() != 2356u) return;
+    midi_blob[0x62d]                  = 96; // разрешение
+    midi_blob[0x76b]                  = 14; // первая дорожка
+    midi_blob[0x7bc]                  = 3;  // дорожек
+    midi_blob[0x853]                  = 40; // длина файла
+    const std::vector<uint8_t> module = sweep_module();
+    std::vector<uint8_t> tables(gs::kMidiNamesBytes + gs::kMidiInfoBytes);
+    for (size_t i = 0; i < tables.size(); ++i)
+        tables[i] = static_cast<uint8_t>(i * 13u + 1u);
+
+    const int kArgs[] = {-1, 0x00, 0x01, 0x03, 0x0F, 0x40, 0x41, 0x80, 0xFF};
+    Fnv single;
+    for (World w : {World::Firmware, World::Resident, World::MidiBlob}) {
+        for (int arg : kArgs) {
+            for (uint32_t c = 0; c < 256; ++c) {
+                GsDevice d;
+                sweep_prepare(d, w, resident, midi_blob, module, tables.data());
+                sweep_step(d, single, arg, static_cast<uint8_t>(c));
+                sweep_step(d, single, 0, 0x39);
+                sweep_step(d, single, -1, 0x20);
+            }
+        }
+    }
+    // Пары команд в прошивке: хвост одной против кода другой.
+    Fnv pairs;
+    for (uint32_t c1 = 0; c1 < 256; ++c1) {
+        for (uint32_t c2 = 0; c2 < 256; ++c2) {
+            GsDevice d;
+            sweep_prepare(d, World::Firmware, resident, midi_blob, module, tables.data());
+            sweep_step(d, pairs, 0x01, static_cast<uint8_t>(c1));
+            sweep_step(d, pairs, 0x02, static_cast<uint8_t>(c2));
+        }
+    }
+    std::printf("  single %08X pairs %08X\n", single.h, pairs.h);
+    CHECK_EQ(single.h, 0x08DF44B3u);
+    CHECK_EQ(pairs.h, 0x91B55725u);
+
+    // Регулятор Z-Player 3.x/5.x: громкость в регистре данных, затем #EF
+    // резиденту - громкость модуля, как от #2A прошивки.
+    GsDevice r;
+    sweep_prepare(r, World::Resident, resident, midi_blob, module, tables.data());
+    r.write_data(0x20);
+    r.write_command(0xEF);
+    std::printf("  resident #EF with 0x20: module volume %02X\n", r.module_volume());
+    CHECK_EQ(r.module_volume(), 0x20u);
+
+    // Брошенный блок не закрывает ответ следующей команды: блок состояния
+    // #01 начат и не дочитан, #20 обязан ответить, как на чистой карте.
+    GsDevice d, ref;
+    sweep_prepare(d, World::MidiBlob, resident, midi_blob, module, tables.data());
+    sweep_prepare(ref, World::Firmware, resident, midi_blob, module, tables.data());
+    d.write_command(0x01);
+    d.write_command(0x00);
+    d.read_data();
+    d.write_command(0x20);
+    ref.write_command(0x20);
+    std::printf("  #20 after a dropped block: %02X, clean card %02X\n", d.peek_data(), ref.peek_data());
+    CHECK_EQ(d.peek_data(), ref.peek_data());
+}
+
+// Сброс (#F3) после любой работы возвращает автомат к состоянию только
+// что включённой карты: те же ответы на ту же последовательность. Не
+// сбрасываются по замыслу счётчики покрытия, гистограмма и внутренние
+// порты - их проба не трогает.
+void test_reset_equals_power_on() {
+    std::printf("test_gs_reset_equals_power_on\n");
+    const std::vector<uint8_t> resident = read_bin("ZPlayer/v41/gs_interp_5B00.bin");
+    std::vector<uint8_t> midi_blob      = read_bin("ZPlayer/v51/27_gs_midi.bin");
+    if (resident.size() != 428u || midi_blob.size() != 2356u) {
+        CHECK(false);
+        return;
+    }
+    const std::vector<uint8_t> module = sweep_module();
+    std::vector<uint8_t> tables(gs::kMidiNamesBytes + gs::kMidiInfoBytes, 0x5A);
+    for (World w : {World::Firmware, World::Resident, World::MidiBlob}) {
+        for (uint8_t reset_cmd : {0xF3, 0xF4}) {
+            GsDevice dirty;
+            sweep_prepare(dirty, w, resident, midi_blob, module, tables.data());
+            Bus b{dirty};
+            // Посреди всего: хвост #48, начатый прямой запуск, ответ #20.
+            b.sd(0x05);
+            b.sc(0x2A);
+            b.sd(0x07);
+            b.sc(0x2E);
+            b.sd(0x01);
+            b.sc(0x39);
+            b.sd(0x10);
+            b.sc(0x48);
+            b.sd(0x02);
+            b.sc(0x98);
+            b.sc(0x20);
+            b.sd(0x77); // аргумент, оставшийся без команды
+            dirty.write_command(reset_cmd);
+            dirty.take_event();
+
+            GsDevice fresh;
+            fresh.reset();
+            fresh.set_position(0x25, 0x13); // позицию ставит платформа перед каждой командой
+            Fnv hd, hf;
+            observe(dirty, hd, false);
+            observe(fresh, hf, false);
+            for (uint8_t c : {0x02, 0x20, 0x2A, 0x2B, 0x2E, 0x3D, 0x39, 0x00, 0x01, 0xEE, 0x60, 0x62, 0xF7, 0x3A, 0x30, 0xD2}) {
+                sweep_step(dirty, hd, 0x03, c, false);
+                sweep_step(fresh, hf, 0x03, c, false);
+            }
+            CHECK_EQ(hd.h, hf.h);
+        }
+    }
+}
+
 } // namespace
 
 void run_gs_device_tests() {
@@ -2239,4 +2544,7 @@ void run_gs_device_tests() {
     test_position_feedback();
     test_detect_sequence_from_real_player();
     test_link_ports_report_traffic();
+    test_command_sweep_golden();
+    test_abort_exchange_ends_the_stream();
+    test_reset_equals_power_on();
 }

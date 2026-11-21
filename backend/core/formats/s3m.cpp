@@ -5,6 +5,7 @@
 #include <cstring>
 
 #include "platform/compiler.h"
+
 #include "core/formats/load_stats.h"
 #include "core/codec/loop_unroll.h"
 #include "core/codec/pack_file_pcm.h"
@@ -479,6 +480,14 @@ bool load(formats::ByteSource src, memory::TrackMemory& mem, Song& out, const ch
     const bool liquid_tracker = reserved2 == 0 && ultra_clicks == 16 && channels_raw[1] != 1;
     const bool openmpt        = (cwtv & kTrackerMask) == 0x5000u && (cwtv & 0xff00u) != 0x5700u && cwtv != 0x5447u && !liquid_tracker && (cwtv & 0x0fffu) != 0;
     const bool is_stereo      = (master_volume_raw & kMasterVolumeStereo) != 0 || modplug || openmpt;
+    // Чем сделан: старший нибл cwtv, у ST3 и IT - с версией.
+    {
+        static constexpr const char* kPrograms[] = {nullptr,          "Scream Tracker", "Imago Orpheus", "Impulse Tracker",
+                                                    "Schism Tracker", "OpenMPT",        "BeRoTracker",   "CreamTracker"};
+        const uint32_t id                        = cwtv >> 12;
+        const char* name                         = modplug ? "ModPlug Tracker" : id < 8 ? kPrograms[id] : nullptr;
+        if (name != nullptr) soundsinth::model::set_program(out, name, 20, !modplug && (id == 1 || id == 3) ? cwtv & 0x0fffu : 0);
+    }
     // Настоящий ST3 - cwtv 0x1xxx без отпечатков других трекеров с тем же
     // номером: ModPlug и Schism (как выше, число order чётное), Velvet Studio,
     // PlayerPRO и Impulse Tracker до 1.03 (флаги 0 или 8, без таблицы

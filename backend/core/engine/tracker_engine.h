@@ -11,6 +11,7 @@
 #include <type_traits>
 
 #include "platform/compiler.h"
+
 #include "core/config.h"
 #include "core/engine/effect_dispatch.h"
 #include "core/engine/resonant_filter.h"
@@ -30,10 +31,10 @@ namespace soundsinth::engine {
 class TrackerEngine {
 public:
     // song и mem хранятся по ссылке и должны жить не меньше TrackerEngine.
-    // mod_pan_percent - глубина разводки каналов MOD, проценты от
-    // аппаратной (100 - как Amiga, 0 - по центру). Ставится при сборке:
-    // разводка считается один раз, в channels_init.
-    TrackerEngine(const soundsinth::model::Song& song, memory::TrackMemory& mem, uint8_t mod_pan_percent = 100);
+    // mod_pan_percent - глубина разводки каналов MOD, проценты от аппаратной
+    // (100 - как Amiga, 0 - по центру); сужает и 8xx/E8x.
+    // mod_steps - лесенка Paula вместо интерполяции у MOD (MOD_INTERPOLATION=0).
+    TrackerEngine(const soundsinth::model::Song& song, memory::TrackMemory& mem, uint8_t mod_pan_percent = 100, bool mod_steps = false);
 
     mixbus::SoundSource* as_sound_source() { return &iface_; }
 
@@ -235,6 +236,8 @@ private:
     void advance_nna_slot_envelopes(uint32_t envelope_time_step_q8);
     void apply_retrigger_and_note_cut();
     void sync_voice_pitch();
+    // Note-Off: голоса на петле удержания переводятся на обычную петлю.
+    void release_sustained_voices();
     // Общий шаг после dispatch_row_effects и NoteDelay, раз за тик из
     // advance_tick. Диспетчер про Voice не знает и только выставляет
     // ChannelState::triggered_this_row/stop_voice_pending; здесь по ним
@@ -267,6 +270,8 @@ private:
 
     mixbus::SoundSource iface_;
     const soundsinth::model::Song& song_;
+    // Признаки для голосов: квирки песни плюс kQuirkPaulaSteps у MOD.
+    soundsinth::model::QuirkFlags voice_quirks_ = 0;
     memory::TrackMemory& mem_;
     uint8_t channel_count_;
 
@@ -380,10 +385,10 @@ private:
     uint8_t chorus_send_[soundsinth::model::kMaxPatternChannels] = {};
     // Параметры общих эффектов: пишет SetEffectParam, в ревербератор и хорус
     // переносит рендер блока при расхождении с применёнными.
-    uint8_t fx_params_[static_cast<uint32_t>(soundsinth::model::FxParam::Count)]  = {soundsinth::model::kFxParamDefault, soundsinth::model::kFxParamDefault,
-                                                                                     soundsinth::model::kFxParamDefault};
-    uint8_t fx_applied_[static_cast<uint32_t>(soundsinth::model::FxParam::Count)] = {soundsinth::model::kFxParamDefault, soundsinth::model::kFxParamDefault,
-                                                                                     soundsinth::model::kFxParamDefault};
+    static constexpr uint8_t kFxDef = model::kFxParamDefault;
+    static_assert(static_cast<uint32_t>(model::FxParam::Count) == 3, "fx_params_ initializer must list every FxParam");
+    uint8_t fx_params_[3]  = {kFxDef, kFxDef, kFxDef};
+    uint8_t fx_applied_[3] = {kFxDef, kFxDef, kFxDef};
 
     volatile uint32_t mute_mask_  = 0;
     int32_t solo_channel_         = -1;

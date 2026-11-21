@@ -132,7 +132,9 @@ bool load(formats::ByteSource src, uint32_t file_length, memory::TrackMemory& me
 //
 // Идемпотентна: уже резидентный сэмпл возвращает успех без перекладки.
 // Прогоны PCM, общие у нескольких записей, разделяются: цепочка страниц
-// при игре только читается.
+// при игре только читается. Нехватка страниц - kSamplesDoNotFit, места в
+// каталоге - memory::kSampleCatalogFull.
+inline constexpr char kSamplesDoNotFit[] = "bank samples do not fit PSRAM";
 bool load_sample_from_bank(memory::TrackMemory& mem, const bank::Bank& bank, const soundsinth::model::Song& song, uint16_t index,
                            const char** error_out = nullptr);
 

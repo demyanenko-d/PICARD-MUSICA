@@ -1,5 +1,12 @@
 add_library(soundsinth_core STATIC
     audio/mixbus.cpp
+    audio/meter.cpp
+    util/inflate.cpp
+    chips/blep.cpp
+    chips/ay_chip.cpp
+    chips/sn_chip.cpp
+    chips/saa_chip.cpp
+    chips/scc_chip.cpp
     memory/psram_alloc.cpp
     memory/psram_store.cpp
     memory/sample_cache_catalog.cpp
@@ -38,7 +45,6 @@ add_library(soundsinth_core STATIC
     config/config.cpp
     config/config_store.cpp
     config/config_ini.cpp
-    config/config_page.cpp
 )
 
 # Корень включений - родительский каталог: .h и .cpp лежат рядом, пути

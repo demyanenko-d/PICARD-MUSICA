@@ -17,9 +17,10 @@
 
         .module scr
         .globl  _fw_scr_cls
-        .globl  _fw_scr_at_hl
+        .globl  _fw_scr_at
         .globl  _fw_scr_putc
         .globl  _fw_scr_puts
+        .globl  _fw_scr_fill
         .globl  _fw_scr_attr
         .globl  _fw_scr_fill_attr
         .globl  _fw_scr_x
@@ -66,12 +67,9 @@ _fw_scr_fill_attr::
         ldir
         ret
 
-;; Поставить курсор: H = x (0..31), L = y (0..23).
-;;
-;; _hl на конце: рядом живёт переходник fw_scr_at для Си, берущий
-;; координаты там, где их кладёт SDCC.
-_fw_scr_at_hl::
-        ld      a, h
+;; Поставить курсор: A = x (0..31), L = y (0..23) - там же, где SDCC
+;; кладёт аргументы (u8, u8).
+_fw_scr_at::
         ld      (_fw_scr_x), a
         ld      a, l
         ld      (_fw_scr_y), a
@@ -180,3 +178,38 @@ _fw_scr_puts::
         call    _fw_scr_putc
         pop     hl
         jr      _fw_scr_puts
+
+;; A пробелов текущим цветом, в пределах строки: точки - нули, атрибуты -
+;; fw_scr_attr. Вчетверо быстрее putc: знак не рисуется.
+_fw_scr_fill::
+        or      a
+        ret     z
+        ld      c, a
+        call    scr_attr_addr
+        ld      a, (_fw_scr_attr)
+        ld      b, c
+scr_fill_attr:
+        ld      (hl), a
+        inc     hl
+        djnz    scr_fill_attr
+        call    scr_addr
+        ld      e, #8
+scr_fill_line:
+        push    hl
+        ld      b, c
+        xor     a
+scr_fill_byte:
+        ld      (hl), a
+        inc     l
+        djnz    scr_fill_byte
+        pop     hl
+        inc     h
+        dec     e
+        jr      nz, scr_fill_line
+        ld      a, (_fw_scr_x)
+        add     a, c
+        cp      #32
+        jr      c, scr_putc_x
+        xor     a
+        ld      (_fw_scr_x), a
+        jr      scr_down

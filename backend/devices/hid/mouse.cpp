@@ -1,10 +1,9 @@
 // SPDX-License-Identifier: MIT
 #include "devices/hid/mouse.h"
 
-#include "platform/hot_path.h"
+#include "platform/compiler.h"
 
 #include "devices/hal/z80_ports.h"
-#include "platform/compiler.h"
 
 namespace devices::hid {
 namespace {
@@ -40,7 +39,7 @@ void mouse_reset() {
     publish_buttons();
 }
 
-void SOUNDSINTH_HOT_PATH(mouse_move)(int8_t dx, int8_t dy) {
+void mouse_move(int8_t dx, int8_t dy) {
     s_x = static_cast<uint8_t>(s_x + static_cast<uint8_t>(dx));
     s_y = static_cast<uint8_t>(s_y + static_cast<uint8_t>(dy));
     // Порядок не важен: счётчики независимы, а чтение берёт один байт.
@@ -48,12 +47,12 @@ void SOUNDSINTH_HOT_PATH(mouse_move)(int8_t dx, int8_t dy) {
     s_page[kMouseHiY] = s_y;
 }
 
-void SOUNDSINTH_HOT_PATH(mouse_set_buttons)(uint8_t mask) {
+void mouse_set_buttons(uint8_t mask) {
     s_buttons = mask;
     publish_buttons();
 }
 
-void SOUNDSINTH_HOT_PATH(mouse_wheel)(int8_t clicks) {
+void mouse_wheel(int8_t clicks) {
     if (clicks == 0) return;
     s_wheel = static_cast<uint8_t>(s_wheel + static_cast<uint8_t>(clicks) * kMouseWheelStep);
     publish_buttons();

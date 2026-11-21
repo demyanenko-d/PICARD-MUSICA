@@ -12,4 +12,8 @@ namespace player {
 // Тело задачи. Не возвращается.
 void audio_chain_task(void* arg);
 
+// Живые чипы (AY, SAA1099) - с чистого листа по настройкам; false -
+// остановить. Только при снятом рендере.
+void live_chips_configure(bool on);
+
 } // namespace player

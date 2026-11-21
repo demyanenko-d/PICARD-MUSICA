@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: MIT
 #pragma once
 
-// Межъядерная поверхность звука и загрузки. Кроме неё Core0 читает счётчики
-// шины и карты только для лога (log_task).
+// Общее состояние звука и загрузки между ядрами. Кроме него Core0 читает
+// счётчики шины и карты только для лога (log_task).
 //
 // Раскладка по ядрам: Core1 - шина и загрузка (без ОС: PIO, DMA, ISR,
 // session_orchestrator_run), Core0 - звук (FreeRTOS: app_task,
@@ -33,6 +33,10 @@
 #include "core/model/song.h"
 #include "core/memory/track_memory.h"
 
+namespace player::vgm {
+class Player;
+}
+
 namespace shared {
 
 extern soundsinth::memory::TrackMemory g_track_memory;
@@ -46,6 +50,9 @@ extern soundsinth::bank::Bank g_bank;
 // Банк во флеше - для живого MIDI: сэмплы подгружаются в PSRAM отсюда, не
 // с карты. Открывается при старте всегда, независимо от g_bank.
 extern soundsinth::bank::Bank g_flash_bank;
+// Оба банка открыты (banks_open на Core1, через сотни мс после старта
+// Core0): до этого "банка нет" ничего не значит. release после полей банков.
+extern std::atomic<bool> g_banks_ready;
 extern soundsinth::model::Song g_song;
 
 // 0 - ничего не загружено. Увеличивает Core1 (загрузка и эмуляция GS)
@@ -63,7 +70,7 @@ extern std::atomic<uint32_t> g_song_generation;
 extern std::atomic<uint32_t> g_stale_generation;
 
 // Для строки застоя на Core1. Пишет только app_task: обороты цикла (раз в
-// 50 мс) и поколение, из которого собран движок. Стоят обороты - стоит
+// 5-25 мс) и поколение, из которого собран движок. Стоят обороты - стоит
 // Core0 (или задачу не пускает RenderTask); поколение собранного отстаёт
 // от g_song_generation - движок не собран.
 extern std::atomic<uint32_t> g_app_task_loops;
@@ -74,6 +81,8 @@ extern std::atomic<uint32_t> g_engine_generation;
 // счётчик с фазой называет место, где Core1 ждёт: окно от хоста (Load),
 // снос движка на Core0 (TeardownWait), разбор модуля GS без обслуживания шины.
 enum class Core1Phase : uint8_t { Loop, Load, TeardownWait, GsModule };
+extern std::atomic<uint32_t> g_core1_loops;
+extern std::atomic<Core1Phase> g_core1_phase;
 
 // Где именно в витке находится Core1. Нужно сторожу живости: фаза
 // говорит "в цикле", а шаг - на чём именно встало.
@@ -131,11 +140,20 @@ inline const char* core1_step_name(Core1Step step) {
     }
     return "?";
 }
-extern std::atomic<uint32_t> g_core1_loops;
-extern std::atomic<Core1Phase> g_core1_phase;
+
 // Кадр конца трека для затухания шины (0 - нет). Пишет Core1 до
 // g_song_generation (release), читает Core0 после неё.
 extern std::atomic<uint32_t> g_track_end_frame;
+
+// Длинное затухание перед кадром конца, в кадрах (0 - нет): трек из файла
+// не обрывается на полном звуке. Пишется и читается там же, где
+// g_track_end_frame.
+extern std::atomic<uint32_t> g_track_end_fade;
+
+// Трек этого поколения - журнал VGM: плеер в арене трека, Core0 ставит его
+// источником шины вместо движка. nullptr - играет g_song. Пишется и
+// читается там же, где g_track_end_frame.
+extern std::atomic<player::vgm::Player*> g_vgm;
 
 // Пишет Core0 (TrackerEngine::elapsed_frames()), читает Core1
 // (периодический set_position()).
@@ -150,7 +168,7 @@ extern std::atomic<uint32_t> g_playback_frames;
 extern std::atomic<bool> g_teardown_requested;
 
 // Пишет Core0 (app_task): true, когда TrackerEngine::song_ended() стал
-// true. Читает Core1: телеметрия позиции (0x87) с playback_state = 2.
+// true. Читает Core1: кадр позиции (kStPosition) с PlaybackState::Ended.
 // Сбрасывает track_load_begin, когда движок снят, иначе флаг прошлого
 // трека перенёсся бы на следующий.
 extern std::atomic<bool> g_song_ended;
@@ -169,6 +187,33 @@ extern std::atomic<bool> g_playback_finished;
 // (задача рендера). Выход гаснет затуханием, дальше источники не зовутся -
 // позиция стоит. Сбрасывается вместе с прочим при смене трека.
 extern std::atomic<bool> g_playback_paused;
+
+// Остановить музыку, играющую без хоста: сброс машины (по настройке
+// STOP_MUSIC_ON_RESET) или F10. Счётчик просьб: растит Core1 (сигналы
+// машины, клавиатура), исполняет цикл Core1 так же, как сброс от хоста.
+// g_gs_reset_req - то же со сбросом карты GS: только сброс машины.
+// Трек, поднятый, но ещё не собранный, не собирать; Core0 (app_task) сносит
+// текущий движок. Зовёт Core1: сброс хоста, остановка музыки, сброс карты GS.
+inline void forget_built_track() {
+    g_stale_generation.store(g_song_generation.load(std::memory_order_relaxed), std::memory_order_relaxed);
+    g_teardown_requested.store(true, std::memory_order_release);
+}
+
+// Сбросов машины с загрузки: растит Core1 (сигналы машины) при любой
+// настройке. Ожидание окна загрузки по нему обрывается: программа хоста
+// исчезла, кадра RESET не будет.
+extern std::atomic<uint32_t> g_machine_resets;
+extern std::atomic<uint32_t> g_music_stop_req;
+extern std::atomic<uint32_t> g_gs_reset_req;
+inline void music_stop_request(bool gs_reset) {
+    if (gs_reset) g_gs_reset_req.fetch_add(1, std::memory_order_relaxed);
+    g_music_stop_req.fetch_add(1, std::memory_order_release);
+}
+
+// Меню NMI навигатора открыто: ставит Core1 по флагу навигатора, исполняет
+// Core0 паузой микшера - музыка и чипы смолкают затуханием, на выходе
+// играют дальше. Отдельно от g_playback_paused: ту ставит и снимает хост.
+extern std::atomic<bool> g_nmi_mute;
 
 // Перемотка вперёд: на сколько выходных отсчётов уехать, 0 - не просили.
 // Ставит Core1 (команда хоста), исполняет Core0. Сама прокрутка тиков долгая и
@@ -240,12 +285,23 @@ bool try_mark_engine_alive();
 
 // Трек в памяти готов играть: счётчик воспроизведения с нуля, конец трека
 // (0 - конец задаёт плеер GS), смена поколения - по ней Core0 соберёт
-// движок. Основной поток Core1, после track_load_end; не из обработчиков.
+// движок или, если дан vgm, поставит источником его. Основной поток Core1,
+// после track_load_end; не из обработчиков.
 //
 // Счётчик обнуляется здесь: до сборки нового движка в нём значение прошлого
 // трека, и "доиграл" сработал бы сразу. До track_load_begin нельзя: Core0 до
 // сноса движка допишет старое значение.
-void publish_loaded_track(uint32_t end_frame);
+void publish_loaded_track(uint32_t end_frame, player::vgm::Player* vgm = nullptr, uint32_t end_fade = 0);
+
+// Измерители выхода для телеметрии. Просит Core1: хост в начале сеанса
+// заказал VU или спектр. Считает и пишет Core0. Шкала уровня - байт,
+// core/audio/meter.h; g_vu - левый канал в младшем байте, правый в следующем;
+// g_spectrum - 16 полос по байту, младшая полоса в младшем байте слова 0.
+extern std::atomic<bool> g_meter_wanted;
+extern std::atomic<uint32_t> g_vu;
+extern std::atomic<uint32_t> g_spectrum[4];
+// Растёт после каждой записи g_vu и g_spectrum: по его смене Core1 шлёт их хосту.
+extern std::atomic<uint32_t> g_meter_seq;
 
 // Битовая карта "сэмпл держит живой голос сейчас", включая хвосты NNA.
 // Такие сэмплы вытеснять нельзя: Voice держит свои first_page/page, и

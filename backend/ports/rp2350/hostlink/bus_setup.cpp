@@ -1,35 +1,33 @@
 // SPDX-License-Identifier: MIT
 // Монтаж шины: раздача автоматов PIO, цепочки DMA, прерывания. Логика - в
 // bus.cpp, развязка - bus_setup.h.
-//
-// Порядок разделов как в bus.cpp: плагинная шина, затем эмуляция ПЗУ и
-// памяти.
 
 #include "bus_setup.h"
 
 #include <cinttypes>
-
 #include <cstring>
+#include <iterator> // std::size
 
 #include "hardware/clocks.h"
 #include "hardware/dma.h"
-#include <iterator> // std::size
-
 #include "hardware/gpio.h"
 #include "hardware/irq.h"
 #include "hardware/pio.h"
+#include "hardware/pwm.h"
 #include "hardware/structs/bus_ctrl.h"
+#include "hardware/structs/m33.h"
 #include "pico.h"
 
 #include "platform/log.h"
-#include "divmmc.h"
 
+#include "divmmc.h"
 // Порядок программ PIO во флеше - порядок этих строк.
 #include "ports.pio.h"
 #include "memory.pio.h"
 #include "trap_join.pio.h"
 #include "reset_watch.pio.h"
 #include "trdos.pio.h"
+#include "pentagon.pio.h"
 // Только для счёта команд ниже: программа звука грузится в i2s_sink.
 #include "i2s_pio.pio.h"
 
@@ -48,31 +46,54 @@ inline constexpr size_t kPioWords = 32;
 static_assert(pio_words(rom_detect_program_instructions, rom_join_program_instructions, rom_trap_program_instructions) <= kPioWords,
               "PIO0 instruction memory overflows in the DivMMC mode");
 static_assert(pio_words(bus_wr_program_instructions, port_detect_program_instructions, rom_serve_program_instructions) <= kPioWords,
-              "PIO1 instruction memory overflows");
+              "PIO1 instruction memory overflows in the DivMMC mode");
+// Без DivMMC: pio1 - захват записей без ветки памяти, детектор портов с
+// выбором таблицы по DOS, ответчик.
+static_assert(pio_words(bus_wr_ports_program_instructions, port_detect_dos_program_instructions, rom_serve_program_instructions) <= kPioWords,
+              "PIO1 instruction memory overflows without DivMMC");
+// Флаги блока pio0 у TR-DOS и своего ПЗУ одни: DOS читают port_detect_dos и
+// dos_drive, ПЗУ 48 ставят ядро (TR-DOS) и paging_filter (своё ПЗУ).
+static_assert(TRDOS_IRQ_DOS == IRQ_DOS && TRDOS_IRQ_ROM48 == IRQ_ROM48, "TR-DOS and the Pentagon ROM keep DOS and ROM 48 in different flags");
+static_assert(PENTAGON_IRQ_ROM48 == TRDOS_IRQ_ROM48, "paging_filter and the TR-DOS core set ROM 48 in different flags");
 static_assert(pio_words(trap_join_program_instructions, trap_route_program_instructions, port_join_program_instructions, i2s_out_program_instructions) <=
                   kPioWords,
               "PIO2 instruction memory overflows in the DivMMC mode");
-// Без DivMMC: pio0 - триггер TR-DOS; pio2 - склейщик портов, привод TR-DOS и
-// звук.
-static_assert(pio_words(trdos_detect_program_instructions, reset_watch_program_instructions) <= kPioWords,
-              "PIO0 instruction memory overflows in the TR-DOS mode");
-static_assert(pio_words(port_join_program_instructions, trdos_drive_program_instructions, i2s_out_program_instructions) <= kPioWords,
+// TR-DOS: pio0 - отдача ПЗУ навигатора и отметка выборки; pio1 - захват
+// записей с веткой памяти (окно ОЗУ навигатора), детектор портов с выбором
+// таблицы по DOS, ответчик; pio2 - склейщик портов с удержанием чтения,
+// решатель DOS, вывод DOS_N и звук.
+static_assert(pio_words(trdos_nav_program_instructions, trdos_fetch_program_instructions) <= kPioWords, "PIO0 instruction memory overflows in the TR-DOS mode");
+static_assert(pio_words(bus_wr_program_instructions, port_detect_dos_program_instructions, rom_serve_program_instructions) <= kPioWords,
+              "PIO1 instruction memory overflows in the TR-DOS mode");
+static_assert(pio_words(port_join_hold_program_instructions, trdos_gate_program_instructions, dos_drive_program_instructions, i2s_out_program_instructions) <=
+                  kPioWords,
               "PIO2 instruction memory overflows in the TR-DOS mode");
+// Своё ПЗУ Пентагона: pio0 - отдача и вход в DOS; pio2 - склейщик портов,
+// вывод DOS_N и звук. Сторожа сброса нет: сброс ловит счётчик M1 на PWM.
+static_assert(pio_words(pentagon_rom_program_instructions, dos_enter_program_instructions) <= kPioWords,
+              "PIO0 instruction memory overflows in the Pentagon ROM mode");
+static_assert(pio_words(port_join_program_instructions, paging_filter_program_instructions, dos_drive_program_instructions, i2s_out_program_instructions) <=
+                  kPioWords,
+              "PIO2 instruction memory overflows in the Pentagon ROM mode");
 
 // Номера управляющих линий зашиты в wait gpio программ PIO: смена пина
 // должна ломать сборку, а не шину.
 static_assert(PIN_M1_N == Z80_M1_N_GPIO && PIN_WR_N == Z80_WR_N_GPIO && PIN_RD_N == Z80_RD_N_GPIO && PIN_IORQ_N == Z80_IORQ_N_GPIO &&
                   PIN_MREQ_N == Z80_MREQ_N_GPIO,
               "the Z80 line numbers disagree with the wait gpio in ports.pio and memory.pio");
+static_assert(PIN_M1_N == TRDOS_Z80_M1_N_GPIO && PIN_WR_N == TRDOS_Z80_WR_N_GPIO && PIN_RD_N == TRDOS_Z80_RD_N_GPIO && PIN_MREQ_N == TRDOS_Z80_MREQ_N_GPIO,
+              "the Z80 line numbers disagree with the wait gpio in trdos.pio");
+static_assert(PIN_M1_N == PENTAGON_Z80_M1_N_GPIO && PIN_WR_N == PENTAGON_Z80_WR_N_GPIO && PIN_RD_N == PENTAGON_Z80_RD_N_GPIO &&
+                  PIN_MREQ_N == PENTAGON_Z80_MREQ_N_GPIO,
+              "the Z80 line numbers disagree with the wait gpio in pentagon.pio");
 // Сдвиги снимков пинов в rom_detect и bus_wr считаются от A0 и A8.
 static_assert(PIN_A0 == A0_GPIO && PIN_A8 == A8_GPIO, "the address pins disagree with A0_GPIO and A8_GPIO in ports.pio and memory.pio");
 // Окно выводов блока, который ведёт DOS_N, - 16..47.
 static_assert(PIN_DOS_N >= 16u && PIN_DOS_N <= 47u, "DOS_N is outside the pin window of the audio block");
 
-// --- Общее для обоих режимов: пины и каналы DMA ---
+// --- Общее для всех режимов: пины и каналы DMA ---
 //
-// Электрика шины одна на оба режима: плагинный и эмуляции ПЗУ отличаются
-// только блоком PIO и автоматом, которому отдаются пины.
+// Электрика шины одна на все режимы.
 
 namespace {
 
@@ -187,11 +208,8 @@ void dma_over_cores() {
 
 // --- Эмуляция ПЗУ ---
 
-// Последовательность подъёма шины. Шину поднимает одна из двух, и от неё
-// же зависят подтяжки, ветка памяти захвата записи и хозяин канала выдачи
-// байта:
-//   RomEmulation - эмуляция ПЗУ (DivMMC или конфигуратор), rom_emu_init;
-//   PortsOnly    - только порты, без эмуляции памяти (plugin_ports_init).
+// Части подъёма: RomEmulation - с чтением памяти (подтяжка MREQ, ветка
+// памяти bus_wr, канал выдачи байта у чтения памяти), PortsOnly - без него.
 enum class BringUp : uint8_t { RomEmulation, PortsOnly };
 
 // PortsOnly - ещё подтяжки линий цикла порта.
@@ -221,21 +239,25 @@ namespace {
 
 // RomEmulation - ловить и записи в память ниже 0x4000. PortsOnly - ветка
 // памяти заменяется переходом к концу цикла: записи в ОЗУ машины
-// прерывания не будят.
+// прерывания не будят. Будит ядро у первого непустая очередь, у второго
+// флаг IRQ 0.
 void setup_bus_wr(BringUp mode) {
-    uint16_t code[sizeof(bus_wr_program_instructions) / sizeof(bus_wr_program_instructions[0])];
-    for (uint32_t k = 0; k < std::size(code); ++k) {
-        code[k] = bus_wr_program_instructions[k];
-    }
-    if (mode == BringUp::PortsOnly) code[bus_wr_offset_mem] = static_cast<uint16_t>(pio_encode_jmp(bus_wr_offset_done));
-    pio_program_t prog = bus_wr_program;
-    prog.instructions  = code;
-    const uint off     = pio_add_program(PIO_WATCH, &prog);
+    // Счётчик тактов DWT этого ядра - замер худшего прохода bus_wr_isr.
+    // Отладчик не нужен: TRCENA открывает блок DWT и без C_DEBUGEN.
+    m33_hw->demcr    |= M33_DEMCR_TRCENA_BITS;
+    m33_hw->dwt_ctrl |= M33_DWT_CTRL_CYCCNTENA_BITS;
+
     pio_sm_claim(PIO_WATCH, SM_BUS_WRITE);
-    bus_wr_program_init(PIO_WATCH, SM_BUS_WRITE, off);
+    auto wake = pis_interrupt0;
+    if (mode == BringUp::PortsOnly) {
+        bus_wr_ports_program_init(PIO_WATCH, SM_BUS_WRITE, pio_add_program(PIO_WATCH, &bus_wr_ports_program));
+    } else {
+        bus_wr_program_init(PIO_WATCH, SM_BUS_WRITE, pio_add_program(PIO_WATCH, &bus_wr_program));
+        wake = static_cast<pio_interrupt_source>(pis_sm0_rx_fifo_not_empty + SM_BUS_WRITE);
+    }
 
     const uint irq = pio_get_irq_num(PIO_WATCH, 0);
-    pio_set_irq0_source_enabled(PIO_WATCH, pis_interrupt0, true);
+    pio_set_irq0_source_enabled(PIO_WATCH, wake, true);
     irq_set_exclusive_handler(irq, bus_wr_isr);
     // 0x40: выше чтения портов. Запись должна успеть до чтения того же байта,
     // около 1.7 мкс: ПЗУ DivMMC проверяет ОЗУ (inc (hl) / cp (hl) по 0x3D00).
@@ -254,7 +276,7 @@ void setup_trap() {
 
     // Оба склейщика в блоке звука: пины шины им нужны только A8..A13 (база
     // GPIO 16 стоит с загрузки платы). Места там хватает именно в режиме
-    // DivMMC: trdos_drive заводится только без него - дисковая система одна.
+    // DivMMC: решатель DOS заводится только без него - дисковая система одна.
     const uint off_join = pio_add_program(PIO_AUDIO, &trap_join_program);
     s_sm_trap_join      = static_cast<int>(pio_claim_unused_sm(PIO_AUDIO, true));
     const auto join_sm  = static_cast<uint>(s_sm_trap_join);
@@ -310,19 +332,36 @@ void setup_trap() {
     pio_sm_set_enabled(PIO_DETECT, SM_ROM_TRAP, true);
 }
 
-void setup_ports(BringUp mode) {
-    const uint off_det = pio_add_program(PIO_WATCH, &port_detect_program);
+// hold - склейщик с удержанием чтения (/WAIT), только TR-DOS: в прочих
+// режимах /WAIT ставится программно (wait_late).
+void setup_ports(BringUp mode, bool hold = false) {
     pio_sm_claim(PIO_WATCH, SM_PORT_DETECT);
-    port_detect_program_init(PIO_WATCH, SM_PORT_DETECT, off_det, PIN_RD_N, PIN_A0, reinterpret_cast<uintptr_t>(s_porttab));
+    if (rom_emu_enabled()) {
+        port_detect_program_init(PIO_WATCH, SM_PORT_DETECT, pio_add_program(PIO_WATCH, &port_detect_program), PIN_RD_N, PIN_A0,
+                                 reinterpret_cast<uintptr_t>(s_porttab));
+    } else {
+        // Флаг DOS - IRQ блока pio0.
+        dos_ports_enable();
+        port_detect_dos_program_init(PIO_WATCH, SM_PORT_DETECT, pio_add_program(PIO_WATCH, &port_detect_dos_program), PIN_RD_N, PIN_A0,
+                                     reinterpret_cast<uintptr_t>(bus_porttab_dos), PIO_SM0_EXECCTRL_STATUS_N_VALUE_IRQ_PREVPIO | IRQ_DOS);
+    }
 
     // Склейщик - в блоке звука: из шины ему нужны только A8..A15, а они в
     // окне базы GPIO 16, которую ставит i2s_sink_set_block_base до этого
     // места. Запускает склейщик очередь, а не шина, линии управления ему не
     // нужны - в блоках с базой 0 места под программу не осталось.
-    const uint off_join = pio_add_program(PIO_AUDIO, &port_join_program);
-    s_sm_port_join      = static_cast<int>(pio_claim_unused_sm(PIO_AUDIO, true));
-    const uint join_sm  = static_cast<uint>(s_sm_port_join);
-    port_join_program_init(PIO_AUDIO, join_sm, off_join, PIN_A8);
+    s_sm_port_join     = static_cast<int>(pio_claim_unused_sm(PIO_AUDIO, true));
+    const uint join_sm = static_cast<uint>(s_sm_port_join);
+    if (hold) {
+        port_join_hold_program_init(PIO_AUDIO, join_sm, pio_add_program(PIO_AUDIO, &port_join_hold_program), PIN_A8, PIN_WAIT_N);
+        // /WAIT: уровень 0 и вход, пока вывод не отдан блоку (port_dos_hold) -
+        // удержание тянет линию только направлением.
+        pio_sm_set_pins_with_mask64(PIO_AUDIO, join_sm, 0, 1ull << PIN_WAIT_N);
+        pio_sm_set_pindirs_with_mask64(PIO_AUDIO, join_sm, 0, 1ull << PIN_WAIT_N);
+        s_hold_up = true;
+    } else {
+        port_join_program_init(PIO_AUDIO, join_sm, pio_add_program(PIO_AUDIO, &port_join_program), PIN_A8);
+    }
 
     s_dma_port_addr = dma_claim_unused_channel(true);
     s_dma_port_ptr  = dma_claim_unused_channel(true);
@@ -358,8 +397,8 @@ void setup_ports(BringUp mode) {
     // (irq_set_exclusive_handler, приоритет планировщика).
     dma_irqn_set_channel_enabled(DMA_IRQ_INDEX_PORT_RD, s_dma_port_join, true);
     irq_set_exclusive_handler(DMA_IRQ_NUM(DMA_IRQ_INDEX_PORT_RD), port_rd_isr);
-    // Самый низкий из трёх: следующее чтение порта карты Z80 сделает не
-    // раньше чем через несколько команд.
+    // Ниже записи: следующее чтение порта карты Z80 сделает не раньше чем
+    // через несколько команд.
     irq_set_priority(DMA_IRQ_NUM(DMA_IRQ_INDEX_PORT_RD), IRQ_PRIO_PORT_RD);
     irq_set_enabled(DMA_IRQ_NUM(DMA_IRQ_INDEX_PORT_RD), true);
 
@@ -391,44 +430,9 @@ void nmi_line_to_input() {
 // старший байт, младший автомат не разбирает.
 constexpr uint8_t kTrDosWindowHi = 0x3d;
 
-// Триггер TR-DOS. Решает автомат в pio0, ведёт вывод автомат в pio2,
-// решение переносит один канал DMA из очереди в очередь.
-//
-// Блоки разные: M1, RD и адрес видит только блок с окном
-// выводов 0..31, а до DOS_N достаёт только блок с окном 16..47. Через SIO
-// нельзя - он на шине IOPORT, у ядер, DMA туда не ходит.
-//
-// В этом режиме DivMMC выключен, и pio0 свободен целиком; в pio2 рядом со
-// звуком и склейщиком портов место есть.
-//
-// Канал обычного приоритета: у цепочек шины есть срок до защёлкивания
-// байта Z80, у этого - нет.
-void setup_trdos() {
-    const uint off_detect = pio_add_program(PIO_DETECT, &trdos_detect_program);
-    pio_sm_claim(PIO_DETECT, SM_TRDOS_DETECT);
-    // После сброса машины ПЗУ 128: флага ПЗУ 48 нет, порт открыт.
-    pio_interrupt_clear(PIO_DETECT, IRQ_ROM48);
-    pio_interrupt_clear(PIO_DETECT, IRQ_PAGING_LOCKED);
-    trdos_detect_program_init(PIO_DETECT, SM_TRDOS_DETECT, off_detect, PIN_A0, PIN_M1_N, kTrDosWindowHi, IRQ_ROM48);
-    s_trdos_detect_offset = static_cast<int>(off_detect);
-
-    // Окно выводов блока - общее с звуком, и значение у них одно.
-    pio_set_gpio_base(PIO_AUDIO, 16);
-    const uint off_drive = pio_add_program(PIO_AUDIO, &trdos_drive_program);
-    s_sm_trdos_drive     = static_cast<int>(pio_claim_unused_sm(PIO_AUDIO, true));
-    const uint drive_sm  = static_cast<uint>(s_sm_trdos_drive);
-    trdos_drive_program_init(PIO_AUDIO, drive_sm, off_drive, PIN_DOS_N);
-
-    setup_fifo_channel(dma_claim_unused_channel(true), &PIO_AUDIO->txf[drive_sm], &PIO_DETECT->rxf[SM_TRDOS_DETECT],
-                       pio_get_dreq(PIO_DETECT, SM_TRDOS_DETECT, false));
-
-    pio_sm_set_enabled(PIO_AUDIO, drive_sm, true);
-    pio_sm_set_enabled(PIO_DETECT, SM_TRDOS_DETECT, true);
-}
-
-// Слежение за сбросом машины в pio0: там видны M1 (окно выводов 0..31), а с
-// выключенным DivMMC блок свободен, кроме триггера TR-DOS. Нет места -
-// строка в журнал, слежения нет.
+// Слежение за сбросом машины в pio0: там видны M1 (окно выводов 0..31), а
+// без дисковой системы блок свободен. Нет места - строка в журнал, слежения
+// нет.
 void setup_reset_watch() {
     if (!pio_can_add_program(PIO_DETECT, &reset_watch_program)) {
         debug_log("bus: no room in pio0 for the machine reset watch\n");
@@ -497,7 +501,7 @@ void setup_memory_read() {
     // pio_enable_sm_mask_in_sync работает в одном блоке. Детектор с rom_join -
     // синхронно в pio0, rom_serve - после них: до этого места идёт передача
     // OE_N в PIO без глитча; запущенный раньше, он работает с ненастроенной
-    // линией буфера и выводит мусор на шину. Хост в это время в сбросе.
+    // линией буфера и выводит мусор на шину.
     pio_enable_sm_mask_in_sync(PIO_DETECT, (1u << SM_ROM_DETECT) | (1u << SM_ROM_JOIN));
 
     pio_sm_set_enabled(PIO_SERVE, SM_SERVE, true);
@@ -511,7 +515,7 @@ void setup_memory_read() {
 // Первый уровень - 1024: восемь бит индекса (A0..A7) плюс два бита
 // масштаба. Подтаблицы - 128: пять бит (A8..A12) плюс два; они лежат в
 // дырах таблицы страниц, выровненных на 512, по четыре строки на дыру.
-alignas(kTrapLoEntries * sizeof(uint32_t)) uint32_t s_trap_lo_storage[kTrapLoEntries];
+alignas(kTrapLoEntries * sizeof(uint32_t)) SOUNDSINTH_BUSMEM("traplo") uint32_t s_trap_lo_storage[kTrapLoEntries];
 
 void rom_emu_init() {
     // Выравнивание карт держит alignas, но склейщики молча перепутали бы
@@ -553,6 +557,170 @@ void rom_emu_init() {
 }
 
 namespace {
+
+// Своё ПЗУ Пентагона; образ уже разложен в блоке.
+//
+// Цепочка одна: автомат отдаёт готовый адрес байта, канал пишет его в
+// триггер канала выдачи, тот кладёт байт rom_serve. Таблицы страниц нет:
+// страница - целые 16 КБ.
+//
+// Флаг DOS ставится до запуска: Пентагон стартует со страницы 0.
+void setup_pentagon_read() {
+    s_pentagon_word = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(pentagon_rom_block()) >> kPentagonWordShift);
+
+    const uint off_rom   = pio_add_program(PIO_DETECT, &pentagon_rom_program);
+    const uint off_enter = pio_add_program(PIO_DETECT, &dos_enter_program);
+    pio_sm_claim(PIO_DETECT, SM_PENTAGON_ROM);
+    pio_sm_claim(PIO_DETECT, SM_DOS_ENTER);
+    pentagon_rom_program_init(PIO_DETECT, SM_PENTAGON_ROM, off_rom, PIN_A0, PIN_RD_N, s_pentagon_word);
+    pentagon_state_after_reset();
+    dos_enter_program_init(PIO_DETECT, SM_DOS_ENTER, off_enter, PIN_A0, PIN_M1_N, kTrDosWindowHi);
+
+    dma_over_cores();
+    s_dma_byte_addr = dma_claim_unused_channel(true);
+    s_dma_byte_data = dma_claim_unused_channel(true);
+    setup_chain(s_dma_byte_addr, s_dma_byte_data, &PIO_DETECT->rxf[SM_PENTAGON_ROM], &PIO_SERVE->txf[SM_SERVE],
+                pio_get_dreq(PIO_DETECT, SM_PENTAGON_ROM, false), DMA_SIZE_8);
+}
+
+// Фильтр 7FFD в pio2 и кольцо снимков записи в порт. Канал кольца берёт
+// снимок из очереди bus_wr и по каждому слову запускает канал копии, тот
+// отдаёт это же слово фильтру. Кольца у обоих одного размера и шага, и
+// идут они в ногу. Звать после setup_bus_wr.
+void setup_paging_filter() {
+    const uint off = pio_add_program(PIO_AUDIO, &paging_filter_program);
+    const uint sm  = pio_claim_unused_sm(PIO_AUDIO, true);
+    paging_filter_program_init(PIO_AUDIO, sm, off, s_pentagon_word >> 1);
+    // Слово базы фильтра - в очередь автомата отдачи.
+    setup_fifo_channel(dma_claim_unused_channel(true), &PIO_DETECT->txf[SM_PENTAGON_ROM], &PIO_AUDIO->rxf[sm], pio_get_dreq(PIO_AUDIO, sm, false));
+
+    constexpr uint kRingBits = 7;
+    static_assert((1u << kRingBits) == kWrRingBytes, "the DMA ring is the size of the write ring");
+    s_dma_wr_ring     = static_cast<int>(dma_claim_unused_channel(true));
+    const uint ch_cp  = dma_claim_unused_channel(true);
+    const auto ch_rng = static_cast<uint>(s_dma_wr_ring);
+
+    dma_channel_config_t cp = dma_channel_get_default_config(ch_cp);
+    channel_config_set_dreq(&cp, pio_get_dreq(PIO_AUDIO, sm, true));
+    channel_config_set_read_increment(&cp, true);
+    channel_config_set_write_increment(&cp, false);
+    channel_config_set_ring(&cp, false, kRingBits);
+    channel_config_set_transfer_data_size(&cp, DMA_SIZE_32);
+    channel_config_set_chain_to(&cp, ch_cp);
+    dma_channel_configure(ch_cp, &cp, &PIO_AUDIO->txf[sm], s_wr_ring, 1, false);
+
+    dma_channel_config_t rc = dma_channel_get_default_config(ch_rng);
+    channel_config_set_dreq(&rc, pio_get_dreq(PIO_WATCH, SM_BUS_WRITE, false));
+    channel_config_set_read_increment(&rc, false);
+    channel_config_set_write_increment(&rc, true);
+    channel_config_set_ring(&rc, true, kRingBits);
+    channel_config_set_transfer_data_size(&rc, DMA_SIZE_32);
+    channel_config_set_chain_to(&rc, ch_cp);
+    dma_channel_configure(ch_rng, &rc, s_wr_ring, &PIO_WATCH->rxf[SM_BUS_WRITE], dma_encode_transfer_count_with_self_trigger(1), true);
+
+    pio_sm_set_enabled(PIO_AUDIO, sm, true);
+}
+
+// Вывод DOS_N - автомат в pio2 по флагу DOS блока pio0.
+void setup_dos_drive() {
+    pio_set_gpio_base(PIO_AUDIO, 16);
+    const uint off      = pio_add_program(PIO_AUDIO, &dos_drive_program);
+    const uint drive_sm = pio_claim_unused_sm(PIO_AUDIO, true);
+    dos_drive_program_init(PIO_AUDIO, drive_sm, off, PIN_DOS_N);
+    pio_sm_set_enabled(PIO_AUDIO, drive_sm, true);
+}
+
+// Сброс машины без сторожа в pio0: спады M1 считает PWM (вход B у GPIO3).
+// Выход пина PWM запрещён перекрытием: линию M1 ведёт процессор. Вход пина
+// видят все блоки сразу, автоматы PIO читают его как прежде.
+void setup_m1_counter() {
+    const uint slice = pwm_gpio_to_slice_num(PIN_M1_N);
+    pwm_config c     = pwm_get_default_config();
+    pwm_config_set_clkdiv_mode(&c, PWM_DIV_B_FALLING);
+    pwm_config_set_clkdiv(&c, 1.0f);
+    gpio_set_oeover(PIN_M1_N, GPIO_OVERRIDE_LOW);
+    gpio_set_function(PIN_M1_N, GPIO_FUNC_PWM);
+    pwm_init(slice, &c, true);
+}
+
+// Шина своего ПЗУ: порты как без эмуляции (захват записи без ветки памяти),
+// канал выдачи байта - общий с памятью. ROM_BLK_N - выход SIO в нуле с
+// запуска автоматов до выключения платы: ПЗУ машины не отвечает никогда.
+void bring_up_pentagon() {
+    setup_gpio(BringUp::RomEmulation);
+    setup_serve();
+    setup_pentagon_read();
+    setup_bus_wr(BringUp::PortsOnly);
+    setup_ports(BringUp::RomEmulation);
+    setup_paging_filter();
+    if (s_pentagon_drive_dos) setup_dos_drive();
+    setup_m1_counter();
+    pio_enable_sm_mask_in_sync(PIO_DETECT, (1u << SM_PENTAGON_ROM) | (1u << SM_DOS_ENTER));
+    pio_sm_set_enabled(PIO_SERVE, SM_SERVE, true);
+    // Машина в сбросе платы - ПЗУ сразу. Работает (RESET_SIGNAL=0) - по её
+    // первому сбросу: подменить ПЗУ под исполняемым кодом - мусор на экране.
+    if (gpio_get_out_level(PIN_RESET_N)) {
+        gpio_put(PIN_ROM_BLK_N, 0);
+    } else {
+        s_rom_take_on_reset = true;
+        debug_log("bus: Pentagon ROM waits for the machine reset - the machine runs (RESET_SIGNAL=0)\n");
+    }
+    debug_logf("bus: Pentagon ROM from 0x%08" PRIx32 ", DOS_N %s\n", s_pentagon_word << kPentagonWordShift, s_pentagon_drive_dos ? "driven" : "not driven");
+}
+
+// Триггер TR-DOS: отметка выборки в pio0, решение и вывод DOS_N в pio2.
+// Блоки разные: M1, RD и адрес видит только блок с окном выводов 0..31, а
+// до DOS_N достаёт только блок с окном 16..47. Флаг отметки автомат pio2
+// берёт у соседнего блока сам. Сброс машины считает PWM: сторожу в pio0
+// места нет.
+void setup_trdos() {
+    trdos_state_after_reset();
+    const uint off_fetch = pio_add_program(PIO_DETECT, &trdos_fetch_program);
+    pio_sm_claim(PIO_DETECT, SM_TRDOS_FETCH);
+    trdos_fetch_program_init(PIO_DETECT, SM_TRDOS_FETCH, off_fetch, PIN_A0, PIN_M1_N, nav_page() != nullptr ? kNavEntry : kNavNoEntry);
+
+    // Окно выводов блока - общее с звуком, и значение у них одно.
+    pio_set_gpio_base(PIO_AUDIO, 16);
+    const uint off_gate = pio_add_program(PIO_AUDIO, &trdos_gate_program);
+    const uint gate_sm  = pio_claim_unused_sm(PIO_AUDIO, true);
+    trdos_gate_program_init(PIO_AUDIO, gate_sm, off_gate, PIN_A8, kTrDosWindowHi);
+    setup_dos_drive();
+    setup_m1_counter();
+    s_trdos_up = true;
+    pio_sm_set_enabled(PIO_AUDIO, gate_sm, true);
+}
+
+// Отдача ПЗУ навигатора: цепочка одна, как у своего ПЗУ - автомат отдаёт
+// готовый адрес байта. Без навигатора автомат заведён тот же, флага ему не
+// ставит никто.
+void setup_trdos_read() {
+    const uint off = pio_add_program(PIO_DETECT, &trdos_nav_program);
+    pio_sm_claim(PIO_DETECT, SM_TRDOS_NAV);
+    trdos_nav_program_init(PIO_DETECT, SM_TRDOS_NAV, off, PIN_A0, PIN_RD_N, PIN_ROM_BLK_N, nav_prepare());
+    dma_over_cores();
+    s_dma_byte_addr = dma_claim_unused_channel(true);
+    s_dma_byte_data = dma_claim_unused_channel(true);
+    setup_chain(s_dma_byte_addr, s_dma_byte_data, &PIO_DETECT->rxf[SM_TRDOS_NAV], &PIO_SERVE->txf[SM_SERVE], pio_get_dreq(PIO_DETECT, SM_TRDOS_NAV, false),
+                DMA_SIZE_8);
+}
+
+// TR-DOS с ПЗУ машины: порты с таблицей при DOS, захват записи с веткой
+// памяти (окно ОЗУ навигатора), отдача ПЗУ навигатора, триггер. Канал
+// выдачи байта - общий с памятью. Подтяжки - и памяти, и портов.
+void bring_up_trdos() {
+    setup_gpio(BringUp::RomEmulation);
+    gpio_pull_up(PIN_IORQ_N);
+    gpio_pull_up(PIN_WR_N);
+    setup_serve();
+    setup_trdos_read();
+    setup_bus_wr(BringUp::RomEmulation);
+    setup_ports(BringUp::RomEmulation, true);
+    setup_trdos();
+    pio_enable_sm_mask_in_sync(PIO_DETECT, (1u << SM_TRDOS_NAV) | (1u << SM_TRDOS_FETCH));
+    pio_sm_set_enabled(PIO_SERVE, SM_SERVE, true);
+    debug_logf("bus: TR-DOS, image navigator %s\n", nav_page() != nullptr ? "on" : "off");
+}
+
 // Без эмуляции ПЗУ шину поднимает только путь портов - тот же, что с ней:
 // детектор, указатели с пустым триггером, общий ответчик, захват записи
 // без ветки памяти. Ответчик включается последним.
@@ -563,10 +731,6 @@ void bring_up_ports_only() {
     setup_bus_wr(BringUp::PortsOnly);
     setup_ports(BringUp::PortsOnly);
     pio_sm_set_enabled(PIO_SERVE, SM_SERVE, true);
-    // После эмуляции ПЗУ: там pio0 занят детектором и сборкой адреса,
-    // и триггеру в нём места нет. Вместе они и не нужны - дисковая
-    // система одна.
-    if (trdos_enabled()) setup_trdos();
     if (reset_watch_enabled()) setup_reset_watch();
 }
 } // namespace
@@ -578,15 +742,20 @@ void plugin_ports_init(player::protocol::HostProtocol& protocol) {
     // Порт команд хост и читает, и пишет (команды) - регистрируются оба
     // направления.
     s_wr_table[PORT_CMD] = port_write_cmd;
-    // Ответы - в s_porttab; нулевая запись - порт не наш, склейщик её
-    // отбрасывает.
-    // Вооружение отдаётся протоколу: он решает, что выставить, платформа -
+    // Выставление кадра отдаётся протоколу: он решает, что выставить, платформа -
     // как (кодирует слова и публикует статус последним).
     protocol.set_arm(&arm_frame, nullptr, &hide_frame);
     port_set_read(PORT_CMD, player::protocol::HostProtocol::kStNone);
 
     // С эмуляцией ПЗУ путь портов поднял rom_emu_init.
-    if (!rom_emu_enabled()) bring_up_ports_only();
+    if (rom_emu_enabled()) return;
+    if (pentagon_rom_enabled()) {
+        bring_up_pentagon();
+    } else if (trdos_enabled()) {
+        bring_up_trdos();
+    } else {
+        bring_up_ports_only();
+    }
 }
 
 } // namespace bus

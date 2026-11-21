@@ -6,6 +6,7 @@ namespace shared {
 soundsinth::memory::TrackMemory g_track_memory;
 soundsinth::bank::Bank g_bank;
 soundsinth::bank::Bank g_flash_bank;
+std::atomic<bool> g_banks_ready{false};
 soundsinth::model::Song g_song;
 std::atomic<uint32_t> g_song_generation{0};
 std::atomic<uint32_t> g_stale_generation{0};
@@ -15,11 +16,21 @@ std::atomic<uint32_t> g_core1_loops{0};
 std::atomic<Core1Step> g_core1_step{Core1Step::GsPoll};
 std::atomic<Core1Phase> g_core1_phase{Core1Phase::Loop};
 std::atomic<uint32_t> g_track_end_frame{0};
+std::atomic<player::vgm::Player*> g_vgm{nullptr};
+std::atomic<uint32_t> g_track_end_fade{0};
+std::atomic<bool> g_meter_wanted{false};
+std::atomic<uint32_t> g_vu{0};
+std::atomic<uint32_t> g_spectrum[4];
+std::atomic<uint32_t> g_meter_seq{0};
 std::atomic<uint32_t> g_playback_frames{0};
 std::atomic<bool> g_teardown_requested{false};
 std::atomic<bool> g_song_ended{false};
 std::atomic<bool> g_playback_finished{false};
 std::atomic<bool> g_playback_paused{false};
+std::atomic<uint32_t> g_machine_resets{0};
+std::atomic<uint32_t> g_music_stop_req{0};
+std::atomic<uint32_t> g_gs_reset_req{0};
+std::atomic<bool> g_nmi_mute{false};
 std::atomic<uint32_t> g_seek_frames{0};
 std::atomic<uint16_t> g_order_pos{0};
 std::atomic<uint16_t> g_row_pos{0};
@@ -90,9 +101,11 @@ void track_load_end() {
     g_load_in_progress.store(false, std::memory_order_release);
 }
 
-void publish_loaded_track(uint32_t end_frame) {
+void publish_loaded_track(uint32_t end_frame, player::vgm::Player* vgm, uint32_t end_fade) {
     g_playback_frames.store(0, std::memory_order_relaxed);
     g_track_end_frame.store(end_frame, std::memory_order_relaxed);
+    g_track_end_fade.store(end_fade, std::memory_order_relaxed);
+    g_vgm.store(vgm, std::memory_order_relaxed);
     g_song_generation.fetch_add(1, std::memory_order_release);
 }
 

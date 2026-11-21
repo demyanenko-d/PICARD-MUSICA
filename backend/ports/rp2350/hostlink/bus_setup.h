@@ -10,7 +10,7 @@
 //
 // Разделы:
 //   0. Внутренний интерфейс - разбор слова записи, таблица страниц, карта
-//      трапов, порты плагина в режиме DivMMC: зовут только bus.cpp,
+//      трапов, разбор портов протокола: зовут только bus.cpp,
 //      bus_setup.cpp и divmmc.cpp.
 //   1. Раскладка - номера портов протокола, производные пины, размеры
 //      таблиц. inline constexpr: одно определение на все единицы
@@ -23,13 +23,17 @@
 
 #pragma once
 
+#include "hardware/pio.h"
+
+#include "player/protocol/host_protocol.h"
+
 #include "bus.h"
 #include "firmware_config.h"
 #include "hw_config.h"
 
-#include "hardware/pio.h"
-
-#include "player/protocol/host_protocol.h"
+// Таблица портов при DOS - пара к s_porttab, адрес задаёт скрипт
+// компоновщика: килобайт вплотную перед s_porttab, пара на границе 2 КБ.
+extern "C" uint32_t bus_porttab_dos[256];
 
 namespace bus {
 
@@ -86,12 +90,9 @@ void rom_emu_fill_pages(uint32_t variant, uint32_t region, const void* page);
 // машине ради знакогенератора.
 void rom_emu_set_fetch_page(uint32_t variant, uint32_t page, const void* mem);
 
-// Выбрать вариант таблицы страниц 0..PAGE_TAB_VARIANTS-1.
+// Выбрать вариант таблицы страниц 0..PAGE_TAB_VARIANTS-1: слово в очередь
+// детектора кладётся всегда.
 void rom_emu_select_pages(uint32_t variant);
-// То же без сверки с запомненным вариантом: слово в очередь детектора
-// кладётся всегда.
-// Для повтора после трапа, вклинившегося в смену варианта.
-void rom_emu_force_pages(uint32_t variant);
 
 // Трапы DivMMC - без ядра, цепочкой DMA по карте: ниже 0x2000 по адресу,
 // 0x2000-0x3FFF по странице 256 байт. Сработавший трап кладёт в очередь
@@ -105,10 +106,10 @@ void rom_emu_force_pages(uint32_t variant);
 // Запись первого уровня: ноль - трапов с таким младшим байтом нет; иначе
 // (база подтаблицы >> TRAP_SUB_BASE_SHIFT) << 1 | 1, где младший бит -
 // маршрут. Разбирает его второй автомат PIO (trap_route).
-inline constexpr uint32_t kTrapAddrSpan   = 0x2000u; // область поадресных трапов
-inline constexpr uint32_t kTrapLoEntries  = 256;     // первый уровень, индекс A0..A7
-inline constexpr uint32_t kTrapSubEntries = 32;      // подтаблица, индекс A8..A12
-inline constexpr uint32_t kTrapSubTables  = 24;      // нужно 14, прочее - запас
+inline constexpr uint32_t kTrapAddrSpan   = kZ80BankBytes; // область поадресных трапов
+inline constexpr uint32_t kTrapLoEntries  = 256;           // первый уровень, индекс A0..A7
+inline constexpr uint32_t kTrapSubEntries = 32;            // подтаблица, индекс A8..A12
+inline constexpr uint32_t kTrapSubTables  = 24;            // нужно 14, прочее - запас
 enum class TrapKind : uint8_t { Enter = 0, Exit = 1 };
 void rom_emu_trap_clear();
 // addr ниже 0x2000 - точка; 0x2000-0x3FFF - вся страница адреса.
@@ -128,8 +129,7 @@ void rom_emu_trap_reset_state();
 // вызов (очередь PIO - 8 слов). Близко к восьми - обработчик держат.
 uint32_t bus_wr_peak();
 
-// Порты плагина через путь портов эмуляции ПЗУ: в режиме DivMMC плагинные
-// автоматы класть некуда.
+// Разбор записи и чтения порта, один на все режимы.
 void dispatch_port_write(uint8_t port, uint8_t data);
 void dispatch_port_read_done(uint8_t port);
 // Адрес записи таблицы страниц, прочитанной последней: последнее чтение
@@ -149,16 +149,9 @@ inline constexpr uint8_t PORT_CMD = SOUNDSINTH_BUS_PORT_CMD;
 inline constexpr uint8_t PORT_DAT = SOUNDSINTH_BUS_PORT_DAT;
 inline constexpr uint PIN_A8      = PIN_A0 + 8; // GPIO 16
 
-// Размеры таблиц здесь: на них ссылаются границы массивов в объявлениях
-// ниже.
-// Варианты таблицы заготовлены заранее. Смена
-// банка приходит записью в порт 0xE3, и следующая команда процессора может
-// тут же читать из нового банка - срок порядка полумикросекунды. Перезапись региона в таблице - 64 записи в память;
-// замер: 196 тактов уже на 32 записях при бюджете 252. Не успеть.
-//
-// Заготовленные варианты сводят любую смену состояния к одному слову в
-// очередь детектора. Цена - 64 варианта по 512 байт = 32 КБ SRAM (48
-// нужных, номер по чётности - ROM_BLK_N).
+// Варианты заготовлены: следующая команда после записи в 0xE3 может читать
+// новый банк через полмикросекунды, а перезапись региона - 64 записи, 196
+// тактов уже на 32 из 252. Цена - 64 варианта по 512 байт, 32 КБ SRAM.
 //
 // Даже вариант "подстановки нет" зависит от банка: окно BDI 0x3D00-0x3DFF
 // отдаётся нам по выборке команды и при снятой подстановке, а лежит оно в
@@ -179,9 +172,20 @@ inline constexpr uint32_t PAGE_TAB_REGIONS = PAGES_PER_TABLE / PAGES_PER_REGION;
 // подстановки). Чужая - только единица: ПЗУ машины остаётся, база ноль.
 inline constexpr uint32_t kPageNotOurs = 1u;
 // Карты трапов (trap_join): по адресу 0x0000-0x1FFF, по странице 0x2000-0x3FFF.
-inline constexpr uint32_t kTrapPageMapEntries = 0x2000u / 256u;
+inline constexpr uint32_t kTrapPageMapEntries = kZ80BankBytes / 256u;
 constexpr uint32_t page_entry(uint32_t base_shr8) {
     return base_shr8 << 1;
+}
+
+// Запись таблицы портов: старший разряд - маршрут склейщика. Ноль -
+// готовый адрес ячейки, единица - база страницы на 256 байт, сдвинутая
+// вправо на 8. Адреса SRAM младше 2^31, разряд свободен.
+inline constexpr uint32_t kPortRoutePage = 1u << 31;
+constexpr uint32_t port_page_entry(uint32_t base) {
+    return (base >> 8) | kPortRoutePage;
+}
+constexpr bool port_entry_is_page(uint32_t e) {
+    return (e & kPortRoutePage) != 0u;
 }
 
 // Адрес в SRAM как 32-битное слово: так его читают склейщики и каналы DMA.
@@ -235,13 +239,36 @@ extern int s_dma_byte_data;
 // запись склейщик отбрасывает - так решается "порт не наш". Байт выдаёт
 // канал чтения памяти: он общий, циклы памяти и портов не пересекаются.
 extern uint32_t s_porttab[256];
+// Пара таблиц для port_detect_dos: копия обычной, дальше её ведут ответы.
+void dos_ports_enable();
 extern int s_dma_port_addr;
 extern int s_dma_port_ptr;
 extern int s_dma_port_join;
 extern int s_sm_port_join;
-extern int s_sm_trdos_drive;
-extern int s_trdos_detect_offset; // смещение программы детектора TR-DOS, -1 - не заведён
-extern int s_sm_reset_watch;      // автомат reset_watch, -1 - не заведён
+extern bool s_trdos_up;      // триггер TR-DOS с ПЗУ машины заведён
+extern bool s_hold_up;       // склейщик с удержанием чтения (/WAIT) заведён
+extern int s_sm_reset_watch; // автомат reset_watch, -1 - не заведён
+// После сброса машины: ПЗУ 128, порт 7FFD открыт, DOS и навигатор сняты.
+void trdos_state_after_reset();
+// Навигатор образов: вход - выборка по вектору NMI. nav_prepare кладёт его
+// ПЗУ и отдаёт слово trdos_nav (база >> 14), ноль - навигатор выключен.
+inline constexpr uint32_t kNavEntry   = 0x0066u;
+inline constexpr uint32_t kNavNoEntry = ~0u; // навигатора нет: выборка с ним не сравнится
+uint32_t nav_prepare();
+extern bool s_pentagon_drive_dos;
+// Слово базы автомата отдачи своего ПЗУ: блок >> 15, бит 4 порта 7FFD
+// дописывается при отдаче; ноль - не поднято. Адрес байта = слово << 15 | DOS << 14 | A0..A13.
+inline constexpr uint32_t kPentagonWordShift = 15;
+static_assert(kPentagonRomBytes == 1u << (kPentagonWordShift + 1u), "the ROM block spans bit 4 and DOS pages");
+extern uint32_t s_pentagon_word;
+extern bool s_rom_take_on_reset;
+void pentagon_state_after_reset();
+// Кольцо снимков записи в порт при своём ПЗУ (bus_wr -> кольцо -> ядро и
+// фильтр 7FFD). Степень двойки: кольцо канала DMA задаётся разрядами.
+inline constexpr uint32_t kWrRingWords = 32;
+inline constexpr uint32_t kWrRingBytes = kWrRingWords * sizeof(uint32_t);
+extern uint32_t s_wr_ring[kWrRingWords];
+extern int s_dma_wr_ring;
 
 // Нечётные варианты таблицы страниц старше 2 * PAGE_TAB_BANKS DivMMC не
 // выбирает никогда (variant_of): 16 кусков по 512 Б, каждый выровнен на 512.

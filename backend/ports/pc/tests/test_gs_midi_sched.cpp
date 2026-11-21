@@ -78,6 +78,11 @@ struct MidiBuilder {
         u8(note);
         u8(vel);
     }
+    void program(uint32_t delta, uint8_t ch, uint8_t prog) {
+        varlen(delta);
+        u8(static_cast<uint8_t>(0xc0 | ch));
+        u8(prog);
+    }
     void sysex(uint32_t delta, const uint8_t* body, uint32_t len) {
         varlen(delta);
         u8(0xf0);
@@ -213,6 +218,68 @@ void sysex_longer_than_frame_survives() {
     CHECK(s.events() > 0);
 }
 
+// Дамп длиннее двух порций на дорожке без канальных событий до него: пока
+// хвост не отдан, выбор дорожки не зовётся - иначе байт данных дампа
+// читается как событие, running у дорожки 0, и она снимается целиком.
+void sysex_tail_longer_than_two_frames() {
+    uint8_t body[200];
+    for (uint32_t i = 0; i < sizeof(body) - 1; ++i)
+        body[i] = static_cast<uint8_t>(1 + (i % 100));
+    body[sizeof(body) - 1] = 0xf7;
+
+    MidiBuilder m;
+    m.header(96);
+    m.track_begin();
+    m.sysex(0, body, sizeof(body));
+    m.note_on(0, 0, 60, 100);
+    m.track_end();
+
+    auto work                                   = work_buf();
+    uint8_t state[devices::gs::kMidiStateBytes] = {};
+    MidiSched s;
+    CHECK(s.begin(m.bytes.data(), (uint32_t)m.bytes.size(), facts_for(m, 96), work.data(), state));
+    std::vector<uint8_t> line;
+    for (int i = 0; i < 32; ++i) {
+        const uint16_t n  = s.next_frame();
+        const uint8_t* fr = s.frame();
+        for (uint16_t k = 0; k + 1 < n; ++k)
+            line.push_back(fr[k]);
+    }
+    bool dump = false, note = false;
+    for (size_t i = 0; i + 2 < line.size(); ++i) {
+        if (line[i] == 0xf0 && i + sizeof(body) < line.size() && std::memcmp(&line[i + 1], body, sizeof(body)) == 0) dump = true;
+        if (line[i] == 0x90 && line[i + 1] == 60 && line[i + 2] == 100) note = true;
+    }
+    std::printf("  sysex %u bytes: dump whole %d, note after it %d, line %u bytes\n", static_cast<unsigned>(sizeof(body)), dump ? 1 : 0, note ? 1 : 0,
+                static_cast<unsigned>(line.size()));
+    CHECK(dump);
+    CHECK(note);
+}
+
+// Признак "играть" падает кадром позже последних событий: плеер по нулю
+// уходит, и порция, где они лежат, обязана уйти раньше нуля.
+void playing_falls_after_last_events() {
+    MidiBuilder m;
+    m.header(96);
+    m.track_begin();
+    m.note_on(0, 0, 60, 100);
+    m.note_on(0, 0, 62, 100);
+    m.track_end();
+
+    auto work                                   = work_buf();
+    uint8_t state[devices::gs::kMidiStateBytes] = {};
+    MidiSched s;
+    CHECK(s.begin(m.bytes.data(), (uint32_t)m.bytes.size(), facts_for(m, 96), work.data(), state));
+    int last_data = -1, fell = -1;
+    for (int i = 0; i < 16 && fell < 0; ++i) {
+        if (s.next_frame() > 1) last_data = i;
+        if (state[player::gs::kMidiStatePlaying] == 0) fell = i;
+    }
+    std::printf("  last events in frame %d, playing falls in frame %d\n", last_data, fell);
+    CHECK(last_data >= 0);
+    CHECK(fell > last_data);
+}
+
 // Дамп, разрезанный между кадрами, обязан дойти подряд. Вторая дорожка
 // стоит на том же такте и готова писать - её байты не должны встать в
 // середину.
@@ -254,6 +321,65 @@ void sysex_split_is_not_interleaved() {
     CHECK(found);
 }
 
+// Порция не длиннее kMidiFrameData вместе с байтом статуса. Две смены
+// программы (4 байта) и 15 нот дают 49; шестнадцатая нота в 52-й байт не
+// встаёт и уходит в следующий кадр. На 52 байтах Z-Player уходит в ветку
+// перегрузки и больше не запрашивает состояние.
+void frame_counts_status_byte() {
+    MidiBuilder m;
+    m.header(96);
+    m.track_begin();
+    m.program(0, 0, 1);
+    m.program(0, 1, 2);
+    for (int i = 0; i < 16; ++i)
+        m.note_on(0, 0, static_cast<uint8_t>(60 + i), 100);
+    m.track_end();
+
+    auto work                                   = work_buf();
+    uint8_t state[devices::gs::kMidiStateBytes] = {};
+    MidiSched s;
+    CHECK(s.begin(m.bytes.data(), (uint32_t)m.bytes.size(), facts_for(m, 96), work.data(), state));
+
+    const uint16_t n1 = first_data_frame(s);
+    CHECK_EQ(n1, static_cast<uint16_t>(4 + 15 * 3 + 1));
+    const uint16_t n2 = s.next_frame();
+    const uint8_t* f2 = s.frame();
+    CHECK_EQ(n2, static_cast<uint16_t>(3 + 1));
+    CHECK_EQ(f2[0], 0x90);
+    CHECK_EQ(f2[1], 60 + 15);
+}
+
+// Системный статус #F1..#F6 running-статусом не становится: не влезший в
+// кадр, он обязан уйти в следующий со своим байтом статуса, а не телом под
+// статусом прошлого канала.
+void system_status_over_frame_keeps_status() {
+    MidiBuilder m;
+    m.header(96);
+    m.track_begin();
+    m.program(0, 0, 1);
+    for (int i = 0; i < 16; ++i)
+        m.note_on(0, 0, static_cast<uint8_t>(60 + i), 100);
+    m.varlen(0);
+    m.u8(0xf2); // Song Position Pointer, два байта данных
+    m.u8(0x11);
+    m.u8(0x22);
+    m.track_end();
+
+    auto work                                   = work_buf();
+    uint8_t state[devices::gs::kMidiStateBytes] = {};
+    MidiSched s;
+    CHECK(s.begin(m.bytes.data(), (uint32_t)m.bytes.size(), facts_for(m, 96), work.data(), state));
+
+    const uint16_t n1 = first_data_frame(s);
+    CHECK_EQ(n1, static_cast<uint16_t>(2 + 16 * 3 + 1));
+    const uint16_t n2 = s.next_frame();
+    const uint8_t* f2 = s.frame();
+    CHECK_EQ(n2, static_cast<uint16_t>(3 + 1));
+    CHECK_EQ(f2[0], 0xf2);
+    CHECK_EQ(f2[1], 0x11);
+    CHECK_EQ(f2[2], 0x22);
+}
+
 } // namespace
 
 void run_gs_midi_sched_tests() {
@@ -262,4 +388,8 @@ void run_gs_midi_sched_tests() {
     sysex_over_frame_moves_whole();
     sysex_longer_than_frame_survives();
     sysex_split_is_not_interleaved();
+    sysex_tail_longer_than_two_frames();
+    playing_falls_after_last_events();
+    frame_counts_status_byte();
+    system_status_over_frame_keeps_status();
 }

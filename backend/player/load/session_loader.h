@@ -26,13 +26,13 @@ namespace player::load {
 
 // Каким загрузчиком разобран трек. При прогрессивной загрузке PCM
 // сэмплов тянется позже метаданных, и надо знать, чей load_sample_pcm()
-// вызывать (load_track_sample).
-enum class TrackFormat : uint8_t { None, Midi, It, Xm, S3m, Mod };
+// вызывать (load_track_sample). Vgm - журнал записей в чипы: песни и
+// сэмплов нет, его кладёт player::vgm::load_track.
+enum class TrackFormat : uint8_t { None, Midi, It, Xm, S3m, Mod, Vgm };
 
 // Банк инструментов для .mid. Без него MThd не узнаётся, и файл
 // отвергается как "не наш", а не падает посреди загрузки. На плате банк
-// берётся с карты, без него - из региона флеша
-// (SOUNDSINTH_BANK_FLASH_OFFSET); ставится раз при старте.
+// берётся с карты, без него - банк из флеша; ставится раз при старте.
 void session_loader_set_bank(const soundsinth::bank::Bank* bank);
 
 // Чем занять долгие проходы разбора. Проход длительности идёт по всему

@@ -28,6 +28,7 @@ void psram_base_release(uint8_t* base);
 // алиас без кэша: запись мимо кэша вдвое быстрее (плата: 44.7 МБ/с против
 // 22.7), а старая изменённая строка не затрёт её при вытеснении. Писать
 // выровненными 32-битными словами. p и bytes кратны 8. ПК - p.
+using WriteAliasFn = uint8_t* (*)(uint8_t* p, size_t bytes);
 uint8_t* psram_write_alias(uint8_t* p, size_t bytes);
 
 } // namespace platform

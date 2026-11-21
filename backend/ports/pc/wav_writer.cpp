@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 #include "pc/wav_writer.h"
 
+#include <cstring>
+
 namespace platform_pc {
 namespace {
 
@@ -15,6 +17,10 @@ void write_u16le(std::FILE* f, uint16_t v) {
 } // namespace
 
 bool WavWriter::open(const char* path, uint32_t sample_rate_hz) {
+    data_bytes_ = 0;
+    fnv_        = 14695981039346656037ull;
+    hash_only_  = std::strcmp(path, "hash:") == 0;
+    if (hash_only_) return true;
     file_ = std::fopen(path, "wb");
     if (!file_) {
         return false;
@@ -47,11 +53,24 @@ bool WavWriter::open(const char* path, uint32_t sample_rate_hz) {
 
 void WavWriter::write_frames(const int16_t* interleaved, uint32_t frame_count) {
     const uint32_t bytes = frame_count * 2 * static_cast<uint32_t>(sizeof(int16_t));
+    if (hash_only_) {
+        const auto* p = reinterpret_cast<const uint8_t*>(interleaved);
+        for (uint32_t i = 0; i < bytes; ++i) {
+            fnv_ = (fnv_ ^ p[i]) * 1099511628211ull;
+        }
+        data_bytes_ += bytes;
+        return;
+    }
     std::fwrite(interleaved, 1, bytes, file_);
     data_bytes_ += bytes;
 }
 
 void WavWriter::close() {
+    if (hash_only_) {
+        std::printf("pcm fnv1a %016llx, %u bytes\n", static_cast<unsigned long long>(fnv_), data_bytes_);
+        hash_only_ = false;
+        return;
+    }
     if (!file_) {
         return;
     }

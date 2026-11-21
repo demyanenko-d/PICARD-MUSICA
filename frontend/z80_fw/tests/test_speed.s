@@ -34,7 +34,6 @@
         .globl  _fat_clus
         .globl  _fat_page_check
         .globl  _fat_page_work
-        .globl  _fat_page_pre
         .globl  _fat_page_dir
         .globl  _fat_port_shadow
         .globl  start
@@ -63,14 +62,11 @@ start::
         call    ts_zero4
 
         ;; Страницы берём НЕЧЕРЕДУЮЩИЕСЯ: на 128K банки 1, 3, 5 и 7
-        ;; тормозит ULA. Свободных ровно три - 0, 4, 6, - и нам ровно
-        ;; столько и нужно.
+        ;; тормозит ULA. Свободных ровно три - 0, 4, 6.
         ld      a, #0x10
         ld      (_fat_port_shadow), a
         ld      a, #0
         ld      (_fat_page_work), a
-        ld      a, #4
-        ld      (_fat_page_pre), a
         ld      a, #6
         ld      (_fat_page_dir), a
         call    _fat_page_check
@@ -165,7 +161,6 @@ ts_one:
         ld      de, #_fat_ent_size
         call    ts_copy4_to_de
         ld      (ts_ptr), hl
-        xor     a
         call    _fat_open
         jp      c, ts_openfail
 

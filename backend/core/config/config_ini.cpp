@@ -1,15 +1,16 @@
 // SPDX-License-Identifier: MIT
 #include "core/config/config_ini.h"
 
-#include "core/config/config_fields.h"
-
 #include <cstring>
+
+#include "core/config/config_fields.h"
 
 namespace soundsinth::config {
 namespace {
 
-bool printable(char c) {
-    return static_cast<unsigned char>(c) > ' ' && static_cast<unsigned char>(c) != 0x7F;
+// Виден и не пробел.
+bool visible_char(char c) {
+    return static_cast<unsigned char>(c) > ' ' && static_cast<unsigned char>(c) != 0x7f;
 }
 
 char upper(char c) {
@@ -21,7 +22,7 @@ char upper(char c) {
 uint32_t squeeze(const char* p, uint32_t n, char* out, uint32_t cap) {
     uint32_t len = 0;
     for (uint32_t i = 0; i < n; ++i) {
-        if (!printable(p[i])) continue;
+        if (!visible_char(p[i])) continue;
         if (len + 1u >= cap) return 0;
         out[len++] = upper(p[i]);
     }
@@ -34,8 +35,16 @@ bool parse_value(const KeyDesc& k, const char* v, uint8_t& out) {
 
     const NameTable t = names_of(k.kind);
     if (t.items != nullptr) {
+        // Значение пришло без пробелов, имя сравнивается без них же.
+        auto same = [](const char* a, const char* name) {
+            for (;; ++name) {
+                if (*name == ' ') continue;
+                if (*a != *name) return false;
+                if (*a++ == '\0') return true;
+            }
+        };
         for (uint32_t i = 0; i < t.count; ++i) {
-            if (std::strcmp(v, t.items[i].name) == 0) {
+            if (same(v, t.items[i].name)) {
                 out = t.items[i].value;
                 return true;
             }
@@ -97,6 +106,33 @@ bool parse_joy_keys(const char* v, uint8_t (&out)[kJoyKeysPerAction]) {
     return true;
 }
 
+const TextDesc* text_key(const char* key) {
+    for (const TextDesc& d : kTextKeys) {
+        if (std::strcmp(key, d.name) == 0) return &d;
+    }
+    return nullptr;
+}
+
+// Строковая настройка: значение - всё после "=" без пробелов по краям,
+// регистр и пробелы внутри сохраняются.
+bool parse_text(const TextDesc& t, const char* v, uint32_t n, Settings& s) {
+    while (n > 0u && (*v == ' ' || *v == '\t')) {
+        ++v;
+        --n;
+    }
+    while (n > 0u && (v[n - 1u] == ' ' || v[n - 1u] == '\t')) {
+        --n;
+    }
+    if (n > t.max) return false;
+    for (uint32_t i = 0; i < n; ++i) {
+        if (!ascii_printable(static_cast<uint8_t>(v[i]))) return false;
+    }
+    char* dst = text_of(s, t);
+    std::memset(dst, 0, t.max + 1u);
+    std::memcpy(dst, v, n);
+    return true;
+}
+
 int joy_action_of(const char* key) {
     for (uint32_t i = 0; i < kJoyActions; ++i) {
         if (std::strcmp(key, kJoyActionNames[i]) == 0) return static_cast<int>(i);
@@ -110,6 +146,33 @@ void put(const char* s, char* out, uint32_t cap, uint32_t& len) {
     for (const char* p = s; *p != '\0'; ++p) {
         if (out != nullptr && len + 1u < cap) out[len] = *p;
         ++len;
+    }
+}
+
+void put_texts(const Settings& s, char* out, uint32_t cap, uint32_t& len) {
+    for (const TextDesc& t : kTextKeys) {
+        if (t.section != nullptr) {
+            put("\n\n; --- ", out, cap, len);
+            put(t.section, out, cap, len);
+            put(" ---\n", out, cap, len);
+        }
+        put("\n; ", out, cap, len);
+        put(t.comment, out, cap, len);
+        put("\n", out, cap, len);
+        if (t.secret) {
+            // Выгрузку пересылают; без строки пароль при заливке не трогается.
+            put("; ", out, cap, len);
+            put(t.name, out, cap, len);
+            put(text_of(s, t)[0] != '\0' ? "= (set, not written)\n" : "= (empty)\n", out, cap, len);
+            continue;
+        }
+        // Пустая строка - комментарием: залитый обратно файл не стирает
+        // заданное.
+        if (text_of(s, t)[0] == '\0') put("; ", out, cap, len);
+        put(t.name, out, cap, len);
+        put("=", out, cap, len);
+        put(text_of(s, t), out, cap, len);
+        put("\n", out, cap, len);
     }
 }
 
@@ -171,7 +234,8 @@ void put_joy_value(const uint8_t (&codes)[kJoyKeysPerAction], char* out, uint32_
 void put_joy_keys(const Settings& s, const Settings& defaults, char* out, uint32_t cap, uint32_t& len) {
     put("\n; keys for the joystick actions in the Win+F2 mode, up to two per action separated by a comma; NONE leaves the action without keys;\n", out, cap,
         len);
-    put("; ESC cannot be bound; names: A..Z, 0..9, F1..F12, UP, DOWN, LEFT, RIGHT, ENTER, SPACE, TAB, BACKSPACE, INSERT, DELETE, HOME, END,\n", out, cap, len);
+    put("; ESC and BACKSPACE cannot be bound; names: A..Z, 0..9, F1..F12, UP, DOWN, LEFT, RIGHT, ENTER, SPACE, TAB, INSERT, DELETE, HOME, END,\n", out, cap,
+        len);
     put("; PAGEUP, PAGEDOWN, KP_0..KP_9, KP_ENTER, KP_PLUS, KP_MINUS, KP_STAR, KP_SLASH, KP_DOT and the punctuation keys by name;\n", out, cap, len);
     put("; FIRE2..FIRE4 reach the machine only with JOY_8BIT=1\n", out, cap, len);
     for (uint32_t i = 0; i < kJoyActions; ++i) {
@@ -203,7 +267,7 @@ IniResult ini_parse(const char* text, uint32_t len, Settings& s) {
 
         // Комментарий узнаётся по первому печатному знаку строки.
         uint32_t first = 0;
-        while (first < line_len && !printable(line[first])) {
+        while (first < line_len && !visible_char(line[first])) {
             ++first;
         }
         if (first == line_len) continue;
@@ -218,6 +282,10 @@ IniResult ini_parse(const char* text, uint32_t len, Settings& s) {
         char key[32];
         char val[32];
         const uint32_t klen = squeeze(line + first, eq - first, key, sizeof(key));
+        if (const TextDesc* t = klen != 0 ? text_key(key) : nullptr) {
+            ++(parse_text(*t, line + eq + 1u, line_len - eq - 1u, s) ? res.applied : res.bad);
+            continue;
+        }
         const uint32_t vlen = squeeze(line + eq + 1u, line_len - eq - 1u, val, sizeof(val));
         if (klen == 0 || vlen == 0) {
             ++res.bad;
@@ -276,7 +344,7 @@ uint32_t ini_render(const Settings& s, char* out, uint32_t cap) {
     put(";\n", out, cap, len);
     put("; GPIO32  log, output, 115200 8N1        - setting LOG\n", out, cap, len);
     put("; GPIO33  live MIDI input, 31250 8N1     - setting LIVE_MIDI=WIRE\n", out, cap, len);
-    put("; GPIO34  Wi-Fi, module enable           - setting WIFI\n", out, cap, len);
+    put("; GPIO34  Wi-Fi, module CTS, not used    - setting WIFI\n", out, cap, len);
     put("; GPIO36  DOS_N, output, active low      - setting DISKSYS=TRDOS\n", out, cap, len);
     put("; GPIO38  Wi-Fi, transmit                - setting WIFI\n", out, cap, len);
     put("; GPIO39  Wi-Fi, receive                 - setting WIFI\n", out, cap, len);
@@ -299,6 +367,7 @@ uint32_t ini_render(const Settings& s, char* out, uint32_t cap) {
         put("\n", out, cap, len);
         if (k.field == &Settings::joy_8bit) put_joy_keys(s, kDefaults, out, cap, len);
     }
+    put_texts(s, out, cap, len);
 
     if (out != nullptr && cap != 0) out[len < cap ? len : cap - 1u] = '\0';
     return len;

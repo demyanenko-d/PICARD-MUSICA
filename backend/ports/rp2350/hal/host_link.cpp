@@ -4,8 +4,6 @@
 // Переходник: сам сеанс про PIO, DMA и мост GS не знает, а они про сеанс -
 // только через колбэки протокола.
 
-#include "player/hal/host_link.h"
-
 #include "hardware/irq.h"
 #include "hardware/structs/timer.h"
 #include "hardware/sync.h"
@@ -16,12 +14,17 @@
 #include "platform/log.h"
 #include "platform/mono_time.h"
 
+#include "player/hal/host_link.h"
+
 #include "bus.h"
 #include "divmmc.h"
 #include "hostlink/hostlink.h"
 #include "hw_config.h"
 
 namespace {
+
+// Сон ожидания данных от хоста (host_service_and_wait), мкс.
+constexpr uint32_t kServeSleepMaxUs = 100;
 
 // Будильник холостого витка. Прерывание разрешается в NVIC того ядра,
 // которое крутит цикл сеанса, поэтому init зовётся оттуда же.
@@ -58,7 +61,12 @@ void player::hal::host_service() {
 
 SOUNDSINTH_HOT_PATH_ATTR("host_service_and_wait")
 void player::hal::host_service_and_wait() {
-    hostlink::service_and_wait();
+    hostlink::service();
+    // Сон не до любого прерывания, а не дольше 100 мкс: чтение статуса хостом
+    // прерывания не даёт, и после разобранной команды (DONE окна) ядро спало
+    // до чужого. Хост, не видя запроса, уходит в HALT на кадр. Замер, IT
+    // 4.4 МБ: сон до 163 мс, 66 с из 81 с загрузки.
+    idle_wait(kServeSleepMaxUs);
 }
 
 void player::hal::host_set_file_info(uint8_t minutes, uint8_t seconds, uint16_t samples, uint16_t patterns, uint16_t instruments) {

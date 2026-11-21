@@ -5,20 +5,29 @@
 // отмечает срок, отпускает виток. Занятым ожиданием тут нельзя - тот же
 // виток обслуживает USB и подкачку.
 
-#include "devices/hal/host_signals.h"
-
-#include "devices/hid/usb_map.h"
+#include "hal/host_signals.h"
 
 #include "hardware/gpio.h"
 #include "hardware/watchdog.h"
 
 #include "platform/boot_mode.h"
+#include "platform/compiler.h"
 #include "platform/hot_path.h"
 #include "platform/log.h"
 #include "platform/mono_time.h"
 
+#include "devices/hal/host_signals.h"
+#include "devices/bdi/bdi.h"
+#include "devices/hid/usb_map.h"
+#include "devices/storage/storage_host.h"
+
+#include "player/config/config_service.h"
+#include "player/gs/bridge.h"
+#include "player/live/ay_live.h"
+#include "player/live/saa_live.h"
+#include "player/shared_state.h"
+
 #include "bus.h"
-#include "hal/host_signals.h"
 
 namespace {
 
@@ -29,7 +38,7 @@ constexpr uint32_t kResetHoldUs = 50000;
 // NMI защёлкивается фронтом, и по такту машины хватило бы сотен
 // микросекунд: при 3.5 МГц это уже сотни тактов. Но линия монтажная, с
 // подтяжкой и своей ёмкостью - как у сброса, где по той же причине стоят
-// десятки миллисекунд. С 200 мкс машина ловила нажатие не всегда, по
+// десятки миллисекунд. С 200 мкс машина ловит нажатие не всегда, по
 // два-три раза на срабатывание. Пять миллисекунд взяты с запасом на
 // постоянную времени линии, а не по такту процессора.
 constexpr uint32_t kNmiHoldUs = 5000;
@@ -46,12 +55,27 @@ bool s_nmi_held        = false;
 bool s_hard_armed      = false;
 // Перезапуск затеян ради конфигуратора: запрос отличает его от обычного.
 bool s_hard_config = false;
-// До разбора настроек сброс разрешён: машину держит в нём сама загрузка.
+// До разбора настроек - разрешён.
 bool s_reset_allowed = true;
 
 // Срок вышел? Разность беззнаковых переживает заворот счётчика.
 bool expired(uint32_t deadline) {
     return static_cast<int32_t>(platform::mono_us() - deadline) >= 0;
+}
+
+// Машину сбросили: замок записи на носители снят, Beta Disk и AY сброшены,
+// как линией RESET; музыка без хоста и карта GS - по настройке.
+SOUNDSINTH_NOINLINE void devices_after_machine_reset() {
+    shared::g_machine_resets.store(shared::g_machine_resets.load(std::memory_order_relaxed) + 1u, std::memory_order_relaxed);
+    devices::storage::storage_release_writers();
+    devices::bdi::bdi_machine_reset();
+    player::live::ay_live_machine_reset();
+    player::live::saa_live_machine_reset();
+    if (player::config::settings().stop_music_on_reset != 0) {
+        shared::music_stop_request(true);
+    } else {
+        player::gs::bridge_machine_reset_light();
+    }
 }
 
 } // namespace
@@ -70,8 +94,9 @@ void devices::hal::host_reset_request() {
     // страничено: признак обязан совпасть, иначе машина стартует с чужим
     // окном памяти.
     bus::trdos_release();
-    // Уровень читается ПОСЛЕ снятия: в режиме DISKSYS=TRDOS вывод отдан
-    // автомату trdos_drive, и запись в регистр SIO до пада не доходит -
+    devices_after_machine_reset();
+    // Уровень читается после снятия: в режиме DISKSYS=TRDOS вывод отдан
+    // автомату dos_drive, и запись в регистр SIO до пада не доходит -
     // единица здесь означает, что признак действительно снят.
     debug_logf("signal: machine reset, DOS_N=%u\n", gpio_get(bus::PIN_DOS_N) ? 1u : 0u);
 }
@@ -85,6 +110,10 @@ void devices::hal::host_nmi_request() {
     // не идёт никогда и встречно кнопке не работает.
     gpio_set_dir(bus::PIN_NMI_N, GPIO_OUT);
     debug_log("signal: NMI\n");
+}
+
+void devices::hal::host_music_stop_request() {
+    shared::music_stop_request(false);
 }
 
 void devices::hal::host_hard_reset_request() {
@@ -125,8 +154,8 @@ void host_signals_allow_reset(bool allow) {
 
 void SOUNDSINTH_HOT_PATH(host_signals_tick)() {
     if (s_hard_armed && expired(s_hard_at)) {
-        // Перезапуск с нуля: загрузка платы сама поднимет машину в сбросе,
-        // приведёт в исходное эмуляторы и отпустит её, когда будет готова.
+        // Перезапуск с нуля: загрузка приведёт эмуляторы в исходное; машину
+        // держит в сбросе, только если сброс разрешён.
         if (s_hard_config) {
             platform::BootRequest req;
             req.configurator = true;
@@ -146,7 +175,10 @@ void SOUNDSINTH_HOT_PATH(host_signals_tick)() {
     if (const uint32_t seen = bus::machine_resets_seen(); seen != s_resets_handled) {
         s_resets_handled = seen;
         devices::hid::usb_map_set_key_mode(devices::hid::KeyMode::Normal);
+        devices_after_machine_reset();
     }
+    // Меню навигатора: музыка ждёт выхода из него.
+    shared::g_nmi_mute.store(bus::nav_open(), std::memory_order_relaxed);
     if (s_nmi_held && expired(s_nmi_until)) {
         gpio_set_dir(bus::PIN_NMI_N, GPIO_IN);
         s_nmi_held = false;

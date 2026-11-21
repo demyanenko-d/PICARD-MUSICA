@@ -68,7 +68,7 @@ inline constexpr uint32_t kBootSectorBytes = 512;
 // Настройки при старте: блок для записи, текст файла и состояние тома
 // FatFs. Постоянного места им не надо - живут они одну загрузку, а на
 // стеке Core0 до планировщика всего 4 КБ.
-inline constexpr uint32_t kConfigBytes = 4096 + 6144 + 1024;
+inline constexpr uint32_t kConfigBytes = 4096 + 8192 + 1024;
 
 // Проход секвенсора: отметки посещённых (order_pos, row) 256x256 бит и
 // PlayState прохода. Размер держит static_assert у прохода.
@@ -92,11 +92,14 @@ enum class Scratch : uint8_t {
     None,
     BootSector,   // сектор 0 карты, до первой загрузки
     Config,       // блок настроек и текст файла, при старте
+    Unpack,       // таблицы распаковки gzip журнала VGM, внутри загрузки
+    RhythmRom,    // том и файл ПЗУ ритма YM2608, внутри загрузки VGM
     PatternPack,  // упаковщик паттернов, внутри load()
     XmSampleHdrs, // заголовки сэмплов XM: после паттернов, до первого PCM
     DurationPass, // длительность и упреждение: после разбора, до перепаковки
     SampleRepack, // перепаковка PCM в резидентный кодек
     Play,         // ревербератор и его шина: от сборки движка до сноса
+    Tools,        // инструменты конфигуратора: трека в этом режиме нет
 };
 
 // Сценарии живут на вершине резидентного пула, вниз от неё, навстречу
@@ -173,8 +176,11 @@ struct TrackMemory {
     TrackScratch scratch;
 
     // Временные массивы переменного размера на время разбора заголовков
-    // (ScratchArena). В объединение не входит.
-    alignas(4) uint8_t loader_scratch_buffer[kLoaderScratchBytes];
+    // (ScratchArena), затем план догрузки. kLoaderScratchBytes, постоянный
+    // блок PSRAM от track_memory_create: читает и пишет только Core1.
+    // Без инициализатора: с ним объект целиком (20 КБ, отметки PSRAM
+    // ненулевые) уходит из .bss в .data.
+    uint8_t* loader_scratch_buffer;
 
     PsramStore psram;
     SampleCacheCatalog sample_cache;

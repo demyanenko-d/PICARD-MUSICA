@@ -310,8 +310,8 @@ void plat_send_data_fast(u32 offset)
     ON_BUS(bus_done());
 }
 
-/* Пустых кругов до отказа: провалив разбор файла, плата молча
-   сбрасывается - "не смогла" в проводе нет. */
+/* Пустых кругов до отказа: плата с прошивкой до 0.49 об отказе молчит,
+   новая шлёт состояние BUS_STATE_FAILED. */
 #define SESSION_TRIES 2000000ul
 
 static u16 s_laps;   // круги главного цикла, для пульса
@@ -392,6 +392,11 @@ void main(void)
             break;
         }
 
+        if (bus_state == BUS_STATE_FAILED) {       // плата файл не приняла
+            ON_BUS(bus_trace(TRACE_LOADED, 0, 0));
+            ui_done("Session rejected by board");
+            return;
+        }
         if (bus_state == BUS_STATE_ENDED) break;   // трек доиграл сам
         if (ui_get_user_action()) break;           // пользователь переключает
     }

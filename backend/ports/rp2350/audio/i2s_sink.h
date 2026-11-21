@@ -20,6 +20,9 @@ void i2s_sink_set_block_base();
 // живёт до конца работы, смену трека закрывает i2s_sink_set_silent.
 void i2s_sink_start(player::audio::BufferPool& pool, uint32_t sample_rate_hz);
 
+// Частота вывода по поставленному делителю, мГц.
+uint64_t i2s_sink_rate_mhz();
+
 // Диагностика: сколько раз DMA IRQ не нашёл готового буфера в pool и
 // снова поставил в канал его прежний буфер.
 uint32_t i2s_sink_underrun_count();

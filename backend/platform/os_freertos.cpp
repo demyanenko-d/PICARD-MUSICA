@@ -1,12 +1,11 @@
 // SPDX-License-Identifier: MIT
-#include "platform/os.h"
-
-#include "platform/hot_path.h"
-
 #include "FreeRTOS.h"
 #include "queue.h"
 #include "semphr.h"
 #include "task.h"
+
+#include "platform/os.h"
+#include "platform/hot_path.h"
 
 // Реализация platform/os.h, единственная: собирают её оба порта (плата -
 // GCC_ARM_CM33_NTZ_NONSECURE, ПК - симулятор Windows). Различие между ними

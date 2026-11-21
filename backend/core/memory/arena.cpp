@@ -9,6 +9,14 @@ void arena_init(Arena& arena, uint8_t* base, size_t capacity) {
     arena.offset   = 0;
     arena.floor    = capacity;
     arena.peak     = 0;
+    arena.keep     = 0;
+}
+
+void* arena_keep(Arena& arena, size_t size, size_t align) {
+    if (arena.offset != arena.keep) return nullptr;
+    void* const p = arena_alloc(arena, size, align);
+    if (p != nullptr) arena.keep = arena.offset;
+    return p;
 }
 
 void* arena_alloc(Arena& arena, size_t size, size_t align) {

@@ -25,7 +25,7 @@ for %%F in (sd fat page file dir scr kbd irq font) do (
 )
 
 echo [2/4] Assembling tests...
-for %%F in (test_sd test_fat test_dir test_dirtab test_ext test_file test_fwd test_load test_pre test_speed test_ui) do (
+for %%F in (test_sd test_fat test_dir test_dirtab test_ext test_file test_fwd test_load test_speed test_ui test_remount) do (
     sdasz80 -plosgff obj\%%F.rel tests\%%F.s
     if errorlevel 1 ( echo FAIL tests\%%F.s && exit /b 1 )
 )
@@ -56,8 +56,9 @@ if errorlevel 1 ( echo FAIL link test_sd && exit /b 1 )
 %LINK% obj\test_fwd.rel obj\sd.rel -o obj\test_fwd.ihx
 if errorlevel 1 ( echo FAIL link test_fwd && exit /b 1 )
 
-REM The rest just take the whole library: the linker drops what is unused.
-for %%P in (test_fat test_dir test_dirtab test_ext test_file test_load test_pre test_speed) do (
+REM The rest take the whole library. sdld keeps every module it is given,
+REM unused code included.
+for %%P in (test_fat test_dir test_dirtab test_ext test_file test_load test_speed test_remount) do (
     %LINK% obj\%%P.rel %LIB% -o obj\%%P.ihx
     if errorlevel 1 ( echo FAIL link %%P && exit /b 1 )
 )
@@ -66,7 +67,7 @@ for %%P in (test_fat test_dir test_dirtab test_ext test_file test_load test_pre 
 if errorlevel 1 ( echo FAIL link test_ui && exit /b 1 )
 
 echo [4/4] Flattening and checking the memory map...
-for %%P in (test_sd test_fat test_dir test_dirtab test_ext test_file test_fwd test_load test_pre test_speed test_ui) do (
+for %%P in (test_sd test_fat test_dir test_dirtab test_ext test_file test_fwd test_load test_speed test_ui test_remount) do (
     call :flatten %%P
     if errorlevel 1 exit /b 1
     call :checkmap %%P

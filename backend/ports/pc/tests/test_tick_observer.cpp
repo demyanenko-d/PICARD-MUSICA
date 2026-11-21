@@ -9,6 +9,7 @@
 #include "testing.h"
 
 #include <cstdio>
+#include <filesystem>
 #include <fstream>
 #include <set>
 #include <vector>
@@ -17,6 +18,7 @@
 #include "core/engine/tracker_engine.h"
 #include "core/formats/it.h"
 #include "core/formats/mod.h"
+#include "core/formats/s3m.h"
 #include "core/formats/xm.h"
 #include "core/formats/memory_byte_source.h"
 #include "player/load/sample_prefetch.h"
@@ -279,6 +281,89 @@ void check_mod_panning(const char* path, uint32_t frames) {
 void test_mod_panning_depth() {
     std::printf("test_mod_panning_depth\n");
     check_mod_panning("SD/test_music/mod/00.mod", 44100 * 5);
+    // 54 команды 8xx: при 0% они обязаны встать в центр.
+    check_mod_panning("music/src/mod/dope.mod", 44100 * 30);
+}
+
+// Эрмитова интерполяция есть только на ПК: загрузчик, поставивший
+// kQuirkHermiteInterpolation, развёл бы эталоны ПК с платой. Пока квирк -
+// только pc_player --hermite.
+void test_no_loader_sets_hermite() {
+    std::printf("test_no_loader_sets_hermite\n");
+    const struct {
+        const char* dir;
+        LoadFn load;
+    } formats_[]    = {{"SD/test_music/mod", &formats::mod::load},
+                       {"SD/test_music/s3m", &formats::s3m::load},
+                       {"SD/test_music/xm", &formats::xm::load},
+                       {"SD/test_music/it", &formats::it::load}};
+    uint32_t loaded = 0;
+    for (const auto& fmt : formats_) {
+        std::error_code ec;
+        for (const auto& e : std::filesystem::directory_iterator(fmt.dir, ec)) {
+            const std::vector<uint8_t> bytes = read_whole_file(e.path().string().c_str());
+            memory::TrackMemory mem;
+            memory::track_memory_create(mem);
+            soundsinth::model::Song song;
+            formats::MemoryByteSource src(bytes.data(), static_cast<uint32_t>(bytes.size()));
+            if (fmt.load(src.as_byte_source(), mem, song, nullptr, true)) {
+                CHECK((song.quirks & soundsinth::model::kQuirkHermiteInterpolation) == 0);
+                ++loaded;
+            }
+            memory::track_memory_destroy(mem);
+        }
+    }
+    std::printf("  files %u\n", static_cast<unsigned>(loaded));
+    if (loaded == 0) std::printf("  SKIP (file not found): SD/test_music\n");
+}
+
+// Стерео подряд; пусто - файла нет.
+std::vector<int32_t> render_file(LoadFn load, const char* path, uint32_t frames, bool mod_steps) {
+    std::vector<int32_t> out;
+    const std::vector<uint8_t> bytes = read_whole_file(path);
+    if (bytes.empty()) return out;
+    memory::TrackMemory mem;
+    memory::track_memory_create(mem);
+    soundsinth::model::Song song;
+    formats::MemoryByteSource src(bytes.data(), static_cast<uint32_t>(bytes.size()));
+    if (load(src.as_byte_source(), mem, song, nullptr, false)) {
+        engine::TrackerEngine eng(song, mem, 100, mod_steps);
+        constexpr uint32_t kChunk = SOUNDSINTH_AUDIO_BUFFER_FRAMES;
+        std::vector<int32_t> l(kChunk), r(kChunk);
+        mixbus::SoundSource* s = eng.as_sound_source();
+        for (uint32_t done = 0; done < frames; done += kChunk) {
+            std::fill(l.begin(), l.end(), 0);
+            std::fill(r.begin(), r.end(), 0);
+            s->render_add(s->self, l.data(), r.data(), kChunk);
+            for (uint32_t i = 0; i < kChunk; ++i) {
+                out.push_back(l[i]);
+                out.push_back(r[i]);
+            }
+        }
+    }
+    memory::track_memory_destroy(mem);
+    return out;
+}
+
+// MOD_INTERPOLATION=0: лесенка проходит всю цепочку (движок, очередь
+// VoiceLink, голос) - MOD звучит так же, как с удержанием у всех голосов.
+// XM лесенку не берёт.
+void test_mod_steps_chain() {
+    std::printf("test_mod_steps_chain\n");
+    const char* const mod            = "SD/test_music/mod/00.mod";
+    const std::vector<int32_t> steps = render_file(&formats::mod::load, mod, 44100 * 5, true);
+    if (steps.empty()) {
+        std::printf("  SKIP (file not found): %s\n", mod);
+        return;
+    }
+    engine::voice_set_hold_render(true);
+    const std::vector<int32_t> hold = render_file(&formats::mod::load, mod, 44100 * 5, false);
+    engine::voice_set_hold_render(false);
+    const std::vector<int32_t> linear = render_file(&formats::mod::load, mod, 44100 * 5, false);
+    CHECK(steps == hold);
+    CHECK(steps != linear);
+    const char* const xm = "SD/test_music/xm/001.xm";
+    CHECK(render_file(&formats::xm::load, xm, 44100 * 2, true) == render_file(&formats::xm::load, xm, 44100 * 2, false));
 }
 
 void test_channel_telemetry_moves() {
@@ -304,4 +389,6 @@ void run_tick_observer_tests() {
     test_tick_observer_reports_live_voices_and_position();
     test_channel_telemetry_moves();
     test_mod_panning_depth();
+    test_mod_steps_chain();
+    test_no_loader_sets_hermite();
 }

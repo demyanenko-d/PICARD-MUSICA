@@ -1,8 +1,11 @@
 /*
  * main.c - навигатор по карте и плеер.
  *
- * Экран поделён надвое: сверху шесть строк про воспроизведение, снизу
- * список файлов. Обе половины живут одновременно, следующий трек
+ * Верхний уровень - устройства карты: Z-Controller и две карты DivMMC. Вход
+ * в устройство поднимает его карту и том; трек, открытый на другом, играет
+ * дальше - файл читается со своего устройства.
+ *
+ * Экран поделён надвое: сверху дека плеера, снизу список файлов. Обе половины живут одновременно, следующий трек
  * выбирается не прерывая текущий.
  *
  * Звук делает плата, сюда приходят только запросы на данные. Главный цикл
@@ -13,12 +16,6 @@
 #include "ui.h"
 #include "../common/bus_client.h"
 
-/*
- * Ядро плеера, платформонезависимое: знает только протокол
- * (bus_client.h). Всё, что упирается в машину, объявлено как plat_* и
- * реализовано ниже.
- */
-
 /**
  * Ответ на BUS_EV_READ: отдать len байт с offset и подтвердить. Не
  * прочиталось - bus_nak, плата попросит то же окно.
@@ -28,10 +25,16 @@ void plat_send_data(u32 offset, u16 len);
 /** Ответ на BUS_EV_READ_FAST: то же, но ровно BUS_WINDOW_BYTES байт. */
 void plat_send_data_fast(u32 offset);
 
-/** Телеметрия обновилась - показать. */
-void ui_update(void);
-
 /* -- Навигатор -- */
+
+/* Верхний уровень навигатора. */
+#define DEV_NONE 0xFF
+static const char *const s_dev_name[FW_DEV_COUNT] = { "ZC", "DIVMMC1", "DIVMMC2" };
+static u8 s_dev = DEV_NONE;     /* чей том смонтирован */
+static bool_t s_in_dev;         /* показан каталог устройства, а не их список */
+/* 1 - в корне устройства: первая строка - ".." к списку устройств, у
+   корня FAT своей нет. Записи таблицы каталога сдвинуты на неё. */
+static u8 s_up;
 
 static u16 s_count;             /* сколько записей в текущем каталоге */
 static u16 s_cursor;            /* какая выбрана */
@@ -43,12 +46,13 @@ static u8  s_depth;             /* насколько глубоко ушли о
 #define MAX_DEPTH 8
 static u32 s_path[MAX_DEPTH];
 
-/* Имена каталогов на том же пути - для строки полного пути. Держим не всё
-   имя: в строку влезает 32 знака, длинные всё равно не показать целиком, а
-   прошивка отдаёт до 260 байт. */
+/* Тот же путь строкой "/имя/имя/" для показа; s_path_end[d] - её длина на
+   глубине d. От имени каталога - до NAME_KEEP - 1 знаков: в строку
+   влезает 40, длинные всё равно не показать целиком, а прошивка отдаёт до
+   260 байт. */
 #define NAME_KEEP 16
-static char s_names[MAX_DEPTH][NAME_KEEP];
-static char s_path_buf[MAX_DEPTH * NAME_KEEP + 2];
+static char s_path_str[MAX_DEPTH * NAME_KEEP + 2];
+static u8 s_path_end[MAX_DEPTH];
 
 /* Первая показываемая запись: "." - ссылка каталога на самого себя,
    смотреть в ней нечего. Прошивка её отдаёт намеренно, решать нам. */
@@ -62,49 +66,59 @@ static bool_t s_play_active;    /* есть чему доигрывать */
    подсветки, и живёт дольше s_play_active - тот про автопереход и гаснет
    при смене каталога, а подсветка обязана вернуться, когда вернулись. */
 static u32 s_play_dir;
+static u8 s_play_dev;
 static bool_t s_play_marked;
-static u16 s_open_fails;         /* сколько раз не открылся файл, для строки отказа */
+static bool_t s_here;           /* играющее - в показанном каталоге */
 
 static u32  s_idle;             /* пустых кругов подряд, пока не заиграло */
 
-/* Сколько таких кругов терпим. Провалив разбор файла, плата просто
-   сбрасывается - отдельного "не смогла" в проводе нет, и затянувшаяся
-   тишина на загрузке это единственный признак. */
+/* Режим повтора, клавиша M: всё по кругу, один трек, шафл, каталог один
+   раз и стоп. */
+#define REP_ALL     0
+#define REP_ONE     1
+#define REP_SHUFFLE 2
+#define REP_ONCE    3
+static u8 s_repeat;
+
+/* Шафл как в магнитоле: порядок случайный, без повторов до конца круга.
+   Регистр сдвига с полным периодом обходит 1..2^n-1 по разу; номер записи -
+   значение минус один, лишние пропускаются. */
+static u16 s_lfsr, s_lfsr_taps;
+static const u16 s_taps[] = { 0x3, 0x5, 0x9, 0x12, 0x21, 0x41, 0x8E, 0x108, 0x204, 0x402, 0x829, 0x100D, 0x2015 };
+
+/* Сколько пустых кругов главного цикла на загрузке терпим, пока плата не
+   сказала BUS_STATE_FAILED: прошивка без этого состояния, провалив разбор
+   файла, просто сбрасывается, и признак отказа - только тишина. */
 #define SESSION_TRIES 2000000ul
 
-static void copy_name(char *dst, const char *src, u8 max)
+/* Имя в dst, не больше max - 1 знаков и ноль; возвращает место нуля. */
+static char *copy_name(char *dst, const char *src, u8 max)
 {
-    u8 i = 0;
-    while (src[i] && i < (u8)(max - 1)) { dst[i] = src[i]; ++i; }
-    dst[i] = 0;
+    while (*src && --max) *dst++ = *src++;
+    *dst = 0;
+    return dst;
 }
 
 /* -- Каталог -- */
-
-/** Полный путь в строку состояния. Длиннее 32 знаков - показываем хвост. */
-static void draw_path(void)
-{
-    u16 len = 0;
-    u8 i, j;
-
-    s_path_buf[len++] = '/';
-    for (i = 0; i < s_depth; ++i) {
-        for (j = 0; j < NAME_KEEP && s_names[i][j]; ++j) s_path_buf[len++] = s_names[i][j];
-        s_path_buf[len++] = '/';
-    }
-    s_path_buf[len] = 0;
-
-    if (len <= 32) { ui_draw_path(s_path_buf); return; }
-    s_path_buf[len - 32] = '.';
-    s_path_buf[len - 31] = '.';
-    s_path_buf[len - 30] = '.';
-    ui_draw_path(s_path_buf + len - 32);
-}
 
 /** Запись под курсором - это ".."? */
 static bool_t ent_is_updir(void)
 {
     return (bool_t)(fat_ent_name[0] == '.' && fat_ent_name[1] == '.' && fat_ent_name[2] == 0);
+}
+
+/** Запись idx списка в fat_ent_*. */
+static void ent_get(u16 idx)
+{
+    if (idx < s_up) {
+        fat_ent_name[0] = '.';
+        fat_ent_name[1] = '.';
+        fat_ent_name[2] = 0;
+        fat_ent_attr = FW_ATTR_DIR;
+        fat_ent_clus = 0;
+        return;
+    }
+    fw_dir_get(idx - s_up);
 }
 
 /** Кластер текущего каталога; у корня нулевой. */
@@ -113,139 +127,251 @@ static u32 cur_dir_clus(void)
     return s_depth ? s_path[s_depth - 1] : 0;
 }
 
+/* Ответить на запрос данных; остальные события - телеметрия, её уже
+   разобрал bus_client. */
+static void serve(u8 ev)
+{
+    if (ev == BUS_EV_READ_FAST) plat_send_data_fast(bus_req_offset);
+    else if (ev == BUS_EV_READ) plat_send_data(bus_req_offset, bus_req_length);
+}
+
+/* Опрос платы изнутри долгой работы: чтение каталога, сортировка,
+   отрисовка списка. Не чаще раза в кадр, без ожидания: что плата
+   выставила, то и разобрать, затем экран. reads == FALSE - карта занята
+   каталогом, запрос чтения ждёт. Конец трека разбирает главный цикл:
+   здесь карту под новый файл не открыть. */
+static void bus_service(bool_t reads)
+{
+    static u8 last;
+    u8 n, ev;
+    if ((u8)fw_ticks == last || !bus_board_found) return;
+    last = (u8)fw_ticks;
+    for (n = 0; n < 4; ++n) {
+        ev = bus_poll_now(reads);
+        if (ev == BUS_EV_NONE) break;
+        serve(ev);
+    }
+    ui_update();
+}
+
+/* Вызов из dirsort.s, не чаще раза в кадр. Карта свободна; отдача данных
+   переключает страницу, поэтому страница каталога включается заново. */
+void dir_sort_tick(void)
+{
+    bus_service(TRUE);
+    fw_dir_page(fat_page_dir);
+}
+
+/* Вызов из цикла чтения каталога (dir.s, _fat_dir_hook). */
+static void dir_load_tick(void)
+{
+    bus_service(FALSE);
+}
+
+/* -- Список -- */
+
+/* Цвет записи idx: курсор и играющее. */
+static u8 mark(u16 idx)
+{
+    return (u8)((idx == s_cursor ? UI_MARK_CURSOR : 0) | (s_here && idx == s_play_idx ? UI_MARK_PLAYING : 0));
+}
+
+/* Видимая строка с записью idx; за концом каталога - пустая. */
+static void row_draw(u16 idx)
+{
+    const u8 row = (u8)(idx - s_top);
+    if (idx >= s_count) {
+        ui_draw_entry(row, "", 0, 0);
+        return;
+    }
+    if (!s_in_dev) {
+        ui_draw_entry(row, s_dev_name[idx], 1, mark(idx));
+        return;
+    }
+    ent_get(idx);
+    ui_draw_entry(row, fat_ent_name, (u8)((fat_ent_attr & FW_ATTR_DIR) != 0), mark(idx));
+}
+
+/* Цвет записи idx, если она на экране: текст там уже верный. */
+static void row_attr(u16 idx)
+{
+    if (idx >= s_top && idx < s_top + UI_LIST_ROWS) ui_entry_attr((u8)(idx - s_top), mark(idx));
+}
+
 static void list_draw(void)
 {
-    /* Играющее подсвечивается только в своём каталоге: номер записи в
-       чужом означает чужой файл. */
-    const bool_t here = (bool_t)(s_play_marked && cur_dir_clus() == s_play_dir);
-    u16 i;
-    for (i = 0; i < UI_LIST_ROWS; ++i) {
-        u16 idx = s_top + i;
-        if (idx >= s_count) {
-            ui_draw_entry((u8)i, "", 0, 0, 0);
-            continue;
-        }
-        fw_dir_get(idx);
-        ui_draw_entry((u8)i, fat_ent_name,
-                      (u8)((fat_ent_attr & FW_ATTR_DIR) != 0),
-                      (u8)(idx == s_cursor),
-                      (u8)(here && idx == s_play_idx));
+    u16 idx;
+    for (idx = s_top; idx < s_top + UI_LIST_ROWS; ++idx) {
+        row_draw(idx);
+        bus_service(TRUE);
     }
+}
+
+/* Курсор на запись idx. Окно стоит - перекрасить две строки; сдвинулось на
+   строку - сдвинуть экран и нарисовать открывшуюся; иначе весь список. */
+static void cursor_to(u16 idx)
+{
+    const u16 old = s_cursor, top = s_top;
+    if (idx >= s_count) return;
+
+    s_cursor = idx;
+    if (s_cursor < s_top) s_top = s_cursor;
+    if (s_cursor >= s_top + UI_LIST_ROWS) s_top = s_cursor - UI_LIST_ROWS + 1;
+    if (s_top == top + 1 || s_top + 1 == top) {
+        ui_scroll_list((bool_t)(s_top > top));
+        row_draw(s_top > top ? s_top + UI_LIST_ROWS - 1 : s_top);
+    } else if (s_top != top) {
+        list_draw();
+        return;
+    }
+    row_attr(old);
+    row_attr(s_cursor);
+}
+
+/* Страница вперёд или назад: окно и курсор сдвигаются на UI_LIST_ROWS, курсор
+   остаётся в той же строке экрана. У края списка окно упирается, курсор
+   встаёт на крайнюю запись. */
+static void page_move(bool_t down)
+{
+    u16 c, t;
+
+    if (s_count <= s_first) return;
+    if (down) {
+        c = s_cursor + UI_LIST_ROWS;
+        if (c >= s_count) c = s_count - 1u;
+        t = s_top + UI_LIST_ROWS >= s_count ? s_top
+          : s_top + UI_LIST_ROWS * 2u > s_count ? s_count - UI_LIST_ROWS
+          : s_top + UI_LIST_ROWS;
+    } else {
+        c = s_cursor >= s_first + UI_LIST_ROWS ? s_cursor - UI_LIST_ROWS : s_first;
+        t = s_top >= s_first + UI_LIST_ROWS ? s_top - UI_LIST_ROWS : s_first;
+    }
+    if (t == s_top || c < t || c >= t + UI_LIST_ROWS) { cursor_to(c); return; }
+    s_top = t;
+    s_cursor = c;
+    list_draw();
 }
 
 /* -- Сортировка списка --
  *
- * Каталоги вперёд, дальше по имени без учёта регистра.
- *
+ * Каталоги вперёд, дальше по имени без учёта регистра (dirsort.s).
  * Переставляется только таблица указателей: записи лежат в своей
- * странице, указатель два байта против десятков у записи.
- *
- * Шелл: каталог влезает в страницу целиком, до ~680 записей. Сортируется
- * один раз при загрузке каталога, не при перерисовке.
+ * странице, указатель два байта против десятков у записи. Сортируется один
+ * раз при загрузке каталога, не при перерисовке.
  */
 
-#define DIR_INDEX_TOP  0xFFFEu   /* указатель записи i лежит по DIR_INDEX_TOP - i*2 */
-#define ENT_NAME_OFS   9u        /* attr(1) + кластер(4) + размер(4) */
-
-static u16 *idx_slot(u16 i)
-{
-    return (u16 *)(DIR_INDEX_TOP - (u16)(i << 1));
-}
-
-/* Регистр вверх. Кроме латиницы - CP866: а-п лежат подряд с 0xA0, а р-я
-   оторваны на 0xE0, поэтому смещения разные. Имена приходят и длинные
-   (там регистр как у пользователя), и 8.3 (там всегда заглавные), так
-   что без приведения список разъехался бы на две группы. */
-static u8 fold(u8 c)
-{
-    if (c >= 0x61 && c <= 0x7A) return (u8)(c - 0x20);   /* a-z */
-    if (c >= 0xA0 && c <= 0xAF) return (u8)(c - 0x20);   /* а-п */
-    if (c >= 0xE0 && c <= 0xEF) return (u8)(c - 0x50);   /* р-я */
-    return c;
-}
-
-/* 1 - запись a должна идти после b. Страница уже должна быть домаплена. */
-static u8 ent_after(u16 pa, u16 pb)
-{
-    const u8 *ea = (const u8 *)pa;
-    const u8 *eb = (const u8 *)pb;
-    const u8 da = (u8)((ea[0] & FW_ATTR_DIR) != 0);
-    const u8 db = (u8)((eb[0] & FW_ATTR_DIR) != 0);
-    const u8 *na, *nb;
-
-    if (da != db) return (u8)(da ? 0 : 1);   /* каталоги вперёд */
-
-    na = ea + ENT_NAME_OFS;
-    nb = eb + ENT_NAME_OFS;
-    for (;;) {
-        const u8 ca = fold(*na++);
-        const u8 cb = fold(*nb++);
-        if (ca != cb) return (u8)(ca > cb);
-        if (ca == 0) return 0;               /* совпали целиком */
-    }
-}
+void dir_sort_ptrs(u16 n);
 
 static void dir_sort(void)
 {
     const u8 saved = (u8)(fat_port_shadow & 0x07);
-    u16 gap, i, j, tmp;
-
-    if (s_count < 2) return;
+    if (fat_dir_count < 2) return;
     fw_dir_page(fat_page_dir);
-
-    gap = 1;
-    while (gap < s_count / 3u) gap = (u16)(gap * 3u + 1u);
-    for (;;) {
-        for (i = gap; i < s_count; ++i) {
-            tmp = *idx_slot(i);
-            for (j = i; j >= gap && ent_after(*idx_slot((u16)(j - gap)), tmp); j = (u16)(j - gap)) {
-                *idx_slot(j) = *idx_slot((u16)(j - gap));
-            }
-            *idx_slot(j) = tmp;
-        }
-        if (gap == 1) break;                 /* gap/3 обнулился бы и зациклил */
-        gap /= 3u;
-    }
-
+    dir_sort_ptrs(fat_dir_count);
     fw_dir_page(saved);
 }
 
 static void list_reload(void)
 {
+    s_lfsr_taps = 0;            /* круг шафла - по новому каталогу */
     if (fw_dir_load()) {
         ui_alarm("dir read error");
         s_count = 0;
         return;
     }
-    s_count = fat_dir_count;
     dir_sort();   /* до любого fw_dir_get: он читает уже упорядоченный список */
+    s_up = (u8)(s_depth == 0);
+    s_count = fat_dir_count + s_up;
 
     /* "." в FAT всегда первая, но проверяем явно, а не по порядку. Прятать
        её достаточно тем, что окно списка ниже неё не опускается. */
     s_first = 0;
     if (s_count) {
-        fw_dir_get(0);
+        ent_get(0);
         if (fat_ent_name[0] == '.' && fat_ent_name[1] == 0) s_first = 1;
     }
     s_cursor = s_first;
     s_top = s_first;
-    /* s_play_idx указывал в прошлый список - в новом это другой файл.
-       Играющий трек не трогаем (он уже на плате), но автопереход
-       обрываем: продолжать очередь можно только там, где она началась. */
-    s_play_active = FALSE;
+    /* Играющее подсвечивается и очередь идёт только в своём каталоге:
+       номер записи в чужом означает чужой файл. Ушли - автопереход
+       стоит, трек на плате доигрывает; вернулись - очередь продолжается,
+       а доигравший без нас трек сменится сразу (bus_state ENDED). */
+    s_here = (bool_t)(s_play_marked && s_play_dev == s_dev && cur_dir_clus() == s_play_dir);
+    s_play_active = s_here;
     list_draw();
 }
 
-/** Открыть корень и показать его. */
-static void go_root(void)
+/* Путь и список открытого каталога глубины s_depth. */
+static void show_dir(void)
 {
-    s_depth = 0;
+    const u8 len = s_path_end[s_depth];
+    s_path_str[len] = 0;
+    ui_draw_path(s_path_str, len);
+    list_reload();
+}
+
+/* Открыть каталог глубины s_depth заново от корня и показать. Хранить
+   открытым только текущий каталог дешевле, чем держать состояние обхода на
+   каждый уровень; каталогов на пути единицы, лишние чтения незаметны. */
+static bool_t reopen(void)
+{
+    u8 i;
     if (fw_dir_open_root()) {
         ui_alarm("no root");
-        return;
+        return FALSE;
     }
-    draw_path();
-    list_reload();
+    for (i = 0; i < s_depth; ++i) {
+        fat_ent_clus = s_path[i];
+        if (fw_dir_open_ent()) {
+            ui_alarm("dir open error");
+            return FALSE;
+        }
+    }
+    show_dir();
+    return TRUE;
+}
+
+/** Открыть корень устройства и показать его. Путь - "/ИМЯ/". */
+static void go_root(void)
+{
+    char *end;
+    s_depth = 0;
+    s_path_str[0] = '/';
+    end = copy_name(s_path_str + 1, s_dev_name[s_dev], NAME_KEEP);
+    *end = '/';
+    s_path_end[0] = (u8)(end + 1 - s_path_str);
+    (void)reopen();
+}
+
+/** Список устройств, курсор на устройстве cur. */
+static void show_devices(u8 cur)
+{
+    s_in_dev = FALSE;
+    s_play_active = FALSE;
+    s_here = FALSE;
+    s_count = FW_DEV_COUNT;
+    s_first = 0;
+    s_cursor = cur < FW_DEV_COUNT ? cur : 0;
+    s_top = 0;
+    ui_draw_path("/", 1);
+    list_draw();
+}
+
+/**
+ * Войти в устройство: поднять карту и том, если смонтирован чужой, и
+ * показать корень. Играющий трек с другого устройства не прерывается.
+ */
+static void open_dev(u8 dev)
+{
+    if (dev != s_dev) {
+        s_dev = DEV_NONE;
+        sd_use(dev);
+        if (fw_sd_init()) { ui_alarm("no card"); return; }
+        if (fw_mount())   { ui_alarm("no fat32"); return; }
+        s_dev = dev;
+    }
+    s_in_dev = TRUE;
+    go_root();
 }
 
 /** Войти в каталог под курсором. */
@@ -261,7 +387,11 @@ static void go_into(void)
        его нет, и вести учёт самим надёжнее, чем разбирать особый случай.
        Имя копируем ДО открытия: оно затрёт fat_ent_*. */
     s_path[s_depth] = fat_ent_clus;
-    copy_name(s_names[s_depth], fat_ent_name, NAME_KEEP);
+    {
+        char *end = copy_name(s_path_str + s_path_end[s_depth], fat_ent_name, NAME_KEEP);
+        *end = '/';
+        s_path_end[s_depth + 1] = (u8)(end + 1 - s_path_str);
+    }
     ++s_depth;
 
     if (fw_dir_open_ent()) {
@@ -269,68 +399,31 @@ static void go_into(void)
         --s_depth;
         return;
     }
-    draw_path();
-    list_reload();
+    show_dir();
 }
-
-static void cursor_to(u16 idx);
 
 /** Подняться на уровень выше. */
 static void go_up(void)
 {
-    u8 i;
     u32 came_from;
     u16 k;
 
-    if (s_depth == 0) return;
+    if (!s_in_dev) return;
+    if (s_depth == 0) { show_devices(s_dev); return; }
     --s_depth;
     came_from = s_path[s_depth];
-
-    /* Пройти путь заново от корня: хранить открытым только текущий каталог
-       дешевле, чем держать состояние обхода на каждый уровень. Каталогов
-       на пути единицы, и лишние чтения тут незаметны. */
-    if (fw_dir_open_root()) { ui_alarm("no root"); return; }
-    for (i = 0; i < s_depth; ++i) {
-        fat_ent_clus = s_path[i];
-        if (fw_dir_open_ent()) { ui_alarm("dir open error"); return; }
-    }
-    draw_path();
-    list_reload();
+    if (!reopen()) return;
 
     /* Курсор на тот каталог, из которого вышли, а не в начало списка: по
        кластеру, а не по имени - имя в записи обрезано и в своём регистре,
        а кластер у каталога один. */
     for (k = s_first; k < s_count; ++k) {
-        fw_dir_get(k);
+        ent_get(k);
         if ((fat_ent_attr & FW_ATTR_DIR) != 0 && fat_ent_clus == came_from) {
             cursor_to(k);
             return;
         }
     }
-}
-
-/** Поставить курсор на запись idx, подкрутив прокрутку и перерисовав. */
-static void cursor_to(u16 idx)
-{
-    if (idx >= s_count) return;
-
-    s_cursor = idx;
-    if (s_cursor < s_top) s_top = s_cursor;
-    if (s_cursor >= s_top + UI_LIST_ROWS) s_top = s_cursor - UI_LIST_ROWS + 1;
-    list_draw();
-}
-
-static void cursor_move(i16 delta)
-{
-    i16 pos = (i16)s_cursor + delta;
-    if (pos < (i16)s_first) pos = (i16)s_first;
-    if (pos >= (i16)s_count) pos = (i16)s_count - 1;
-    if (pos < (i16)s_first) return;   /* пустой каталог */
-
-    s_cursor = (u16)pos;
-    if (s_cursor < s_top) s_top = s_cursor;
-    if (s_cursor >= s_top + UI_LIST_ROWS) s_top = s_cursor - UI_LIST_ROWS + 1;
-    list_draw();
 }
 
 /* -- Плеер -- */
@@ -343,26 +436,22 @@ static void cursor_move(i16 delta)
  */
 static void play_entry(u16 idx)
 {
-    copy_name(s_playing, fat_ent_name, sizeof(s_playing));
-    ui_field(0, UI_ROW_FILE, 32, "file:", UI_ATTR_PLAIN);
-    ui_field(5, UI_ROW_FILE, 27, s_playing, UI_ATTR_TITLE);
+    const u16 was = s_play_idx;
 
-    if (fw_open(0)) {
-        /* Причина - в своей строке, которую телеметрия не перерисовывает, и
-           остаётся до следующего отказа: номер отказа с начала работы, "ovf" -
-           отрезков больше, чем держит страница, "io" - карта не ответила;
-           число - сколько отрезков набралось, "c" - младшее слово первого
-           кластера. */
-        ++s_open_fails;
-        ui_field_num(0, UI_ROW_ERROR, 11, "open err ", s_open_fails, UI_ATTR_ALARM);
-        ui_field_num(11, UI_ROW_ERROR, 10, fat_ext_overflow ? "ovf " : "io ", fat_ext_count, UI_ATTR_ALARM);
-        ui_field_num(21, UI_ROW_ERROR, 11, "c ", (u16)fat_ent_clus, UI_ATTR_ALARM);
-        ui_alarm("open failed");
+    copy_name(s_playing, fat_ent_name, sizeof(s_playing));
+
+    if (fw_open()) {
+        /* "ovf" - отрезков больше, чем держит страница, иначе карта не
+           ответила. */
+        ui_alarm(fat_ext_overflow ? "open failed: ovf" : "open failed: io");
         s_play_active = FALSE;
         s_play_marked = FALSE;
+        s_here = FALSE;
+        row_attr(was);
         return;
     }
 
+    ui_set_file(s_playing, fat_file_size);
     bus_reset();
     /* Размер плата должна знать заранее, чтобы понимать, где конец файла.
        Перемотка здесь бесплатна (fw_seek встаёт куда угодно), поэтому
@@ -372,12 +461,15 @@ static void play_entry(u16 idx)
     s_play_idx = idx;
     s_play_active = TRUE;
     s_play_dir = cur_dir_clus();
+    s_play_dev = s_dev;
     s_play_marked = TRUE;
+    s_here = TRUE;
     s_idle = 0;
+    row_attr(was);
 
-    /* Навигатор идёт за играющим треком. Последней строкой не случайно:
-       list_draw зовёт fw_dir_get на каждую видимую запись и затирает
-       fat_ent_*, откуда выше берутся имя и размер файла. */
+    /* Курсор - на играющую запись. Последней строкой не случайно:
+       перерисовка списка зовёт fw_dir_get и затирает fat_ent_*, откуда
+       выше берутся имя и размер файла. */
     cursor_to(idx);
 }
 
@@ -391,34 +483,81 @@ static void play_selected(void)
     play_entry(s_cursor);
 }
 
-/**
- * Трек доиграл - переходим на следующий файл списка, каталоги пропускаем.
- * Список кончился - останавливаемся.
- */
-static void play_next(void)
+/** Запись i - файл, а не каталог. Оставляет её в fat_ent_*. */
+static bool_t is_file(u16 i)
 {
-    u16 i;
+    ent_get(i);
+    return (bool_t)(!(fat_ent_attr & FW_ATTR_DIR));
+}
 
-    for (i = s_play_idx + 1u; i < s_count; ++i) {
-        fw_dir_get(i);
-        if (!(fat_ent_attr & FW_ATTR_DIR)) { play_entry(i); return; }
+/** Следующий номер шафла; s_count, если файлов нет. */
+static u16 shuffle_next(void)
+{
+    u16 n;
+    if (!s_lfsr_taps) {
+        u8 w = 0;
+        u16 mask = 3;
+        while (mask < s_count) { mask = (u16)(mask << 1 | 1u); ++w; }
+        s_lfsr_taps = s_taps[w];
+        /* Начало круга - от часов, любое из 1..mask. */
+        s_lfsr = fw_ticks & mask;
+        if (!s_lfsr) s_lfsr = 1;
+    }
+    for (n = 0; n < 0x4000u; ++n) {
+        s_lfsr = (u16)((s_lfsr >> 1) ^ ((s_lfsr & 1u) ? s_lfsr_taps : 0u));
+        if (s_lfsr - 1u < s_count && s_lfsr - 1u >= s_first && is_file((u16)(s_lfsr - 1u))) return (u16)(s_lfsr - 1u);
+    }
+    return s_count;
+}
+
+/**
+ * Трек доиграл или пропущен - следующий по режиму повтора, каталоги
+ * пропускаются. skip - пропуск клавишей: и в режиме "один" идём дальше.
+ */
+static void play_next(bool_t skip)
+{
+    u16 i = s_play_idx, n;
+
+    ui_flash(UI_FLASH_NEXT);
+    if (s_repeat == REP_ONE && !skip && is_file(i)) { play_entry(i); return; }
+    if (s_repeat == REP_SHUFFLE) {
+        i = shuffle_next();
+        if (i < s_count) { play_entry(i); return; }
+    } else {
+        /* Со следующей по кругу до играющей включительно; "один раз" - до
+           конца каталога. */
+        for (n = s_count - s_first; n; --n) {
+            if (++i >= s_count) {
+                if (s_repeat == REP_ONCE) break;
+                i = s_first;
+            }
+            if (is_file(i)) { play_entry(i); return; }
+        }
     }
 
     s_play_active = FALSE;
 }
 
-/* Перемотка бесплатна: z80_fw встаёт на произвольную позицию. */
-static u8 s_window[BUS_WINDOW_BYTES];
+/* Перемотка бесплатна: z80_fw встаёт на произвольную позицию. Окно уходит
+   в порт порциями по сектору, подряд: плата считает байты порта, порции
+   для неё не видны. При сбое чтения часть окна уже ушла, NAK - поверх. */
+static u8 s_chunk[512];
 
 /* Смещение кратно сектору, длина не больше остатка файла: за конец файла
    плата не просит. */
 
 void plat_send_data(u32 offset, u16 len)
 {
-    fw_seek(offset);
-    if (fw_read_bytes(s_window, len)) { bus_nak(); return; }
+    u16 left = len, n;
 
-    bus_send(s_window, len);
+    fw_seek(offset);
+    while (left) {
+        n = left < sizeof(s_chunk) ? left : (u16)sizeof(s_chunk);
+        if (fw_read_bytes(s_chunk, n)) { bus_nak(); return; }
+        bus_send(s_chunk, n);
+        left -= n;
+    }
+    bus_sent_external(len);
     bus_done();
 }
 
@@ -446,47 +585,45 @@ void plat_send_data_fast(u32 offset)
 static void fatal(const char *text)
 {
     ui_alarm(text);
-    ui_field(0, UI_ROW_STATE, 15, "press any key", UI_ATTR_PLAIN);
-    while (fw_kbd_get() == 0) { }
+    while (fw_kbd_get() == 0) ui_update();
 }
 
 void main(void)
 {
-    u8 key;
+    u8 key, ev;
 
-    /* Страницы под отрезки файлов и таблицу каталога: банки 2 и 5 уже
-       видны в других окнах, свободных ровно три. */
+    /* Страницы под отрезки файла и таблицу каталога: банки 2 и 5 уже
+       видны в других окнах. */
     fat_port_shadow = 0x10;
     fat_page_work = 0;
-    fat_page_pre = 4;
     fat_page_dir = 6;
 
+    /* Большой каталог читается секундами: плату обслуживать изнутри. */
+    fat_dir_hook = dir_load_tick;
     fw_irq_init();
     ui_init();
 
     if (fw_page_check()) { fatal("bad pages"); goto done; }
-    if (fw_sd_init())    { fatal("no card");   goto done; }
-    if (fw_mount())      { fatal("no fat32");  goto done; }
 
     /* Плата может и не отозваться - навигатор от этого работать не
        перестанет, просто играть будет нечему. */
     bus_ping();
     ui_update();
 
-    go_root();
+    show_devices(FW_DEV_ZC);
 
     for (;;) {
         key = fw_kbd_get();
         switch (key) {
-        case FW_KEY_UP:    cursor_move(-1); break;
-        case FW_KEY_DOWN:  cursor_move(1);  break;
-        /* Влево/вправо - в начало и в конец каталога.
-           Постранично листать незачем: список короткий, шестнадцать строк,
-           а вот до конца длинного каталога иначе добираться долго. */
-        case FW_KEY_LEFT:  cursor_to(s_first); break;
-        case FW_KEY_RIGHT: if (s_count) cursor_to(s_count - 1u); break;
+        case FW_KEY_UP:    if (s_cursor > s_first) cursor_to(s_cursor - 1u); break;
+        case FW_KEY_DOWN:  cursor_to(s_cursor + 1u); break;
+        /* Влево/вправо - страница назад и вперёд: в длинном каталоге
+           построчно долго, а прыжок в начало или конец мало что даёт. */
+        case FW_KEY_LEFT:  page_move(FALSE); break;
+        case FW_KEY_RIGHT: page_move(TRUE); break;
         case FW_KEY_ENTER:
-            if (s_count) { fw_dir_get(s_cursor); play_selected(); }
+            if (!s_in_dev) open_dev((u8)s_cursor);
+            else if (s_count) { ent_get(s_cursor); play_selected(); }
             break;
         case FW_KEY_DEL:
             go_up();
@@ -494,7 +631,14 @@ void main(void)
         case FW_KEY_SPACE:
             /* Пропустить трек. Играет он или уже доиграл - неважно:
                play_next просто идёт дальше по списку. */
-            if (s_play_active) play_next();
+            if (s_play_active) play_next(TRUE);
+            break;
+        case 'm':
+        case 'M':
+            s_repeat = (u8)((s_repeat + 1u) & 3u);
+            s_lfsr_taps = 0;
+            ui_set_repeat(s_repeat);
+            ui_flash(UI_FLASH_REPEAT);
             break;
         case 'p':
         case 'P':
@@ -506,10 +650,11 @@ void main(void)
         case 'F':
             /* Перемотка вперёд на шаг. Плата гасит выход, прогоняет тики и
                возвращает звук; нажатия копятся. Назад движок не умеет. */
-            if (s_play_active && bus_board_found && bus_seek_ok) bus_transport(BUS_TRANS_FORWARD);
+            if (s_play_active && bus_board_found && bus_seek_ok) {
+                bus_transport(BUS_TRANS_FORWARD);
+                ui_flash(UI_FLASH_FORWARD);
+            }
             break;
-        case FW_KEY_ESC:
-            goto done;
         default:
             break;
         }
@@ -518,43 +663,32 @@ void main(void)
            клавиатуру опрашивает прерывание. Трек кончился или нет,
            навигатору всё равно: список остаётся живым. */
         if (bus_board_found) {
-            switch (bus_poll()) {
-            case BUS_EV_READ_FAST:
-                plat_send_data_fast(bus_req_offset);
-                s_idle = 0;
-                break;
-            case BUS_EV_READ:
-                plat_send_data(bus_req_offset, bus_req_length);
-                s_idle = 0;
-                break;
-            case BUS_EV_TELEMETRY:
-            case BUS_EV_READY:
-                ui_update();
-                s_idle = 0;
-                break;
-            default:
-                /* Плата молчит на загрузке дольше всякого разумного -
-                   значит файл она не приняла. Не застреваем на нём. */
-                if (s_play_active && bus_state == BUS_STATE_LOADING && ++s_idle > SESSION_TRIES) {
-                    ui_alarm("file rejected");
-                    play_next();
-                }
-                break;
-            }
+            ev = bus_poll();
+            serve(ev);
+            if (ev != BUS_EV_NONE) s_idle = 0;
+            else if (s_play_active && bus_state == BUS_STATE_LOADING) ++s_idle;
 
-            /* Трек доиграл. bus_state приходит с телеметрией позиции, а
-               bus_start сразу ставит его в "загрузку" - так что второй раз
-               на том же ENDED мы не сработаем. */
-            if (s_play_active && bus_state == BUS_STATE_ENDED) play_next();
+            if (s_play_active) {
+                /* Трек доиграл. bus_state приходит с телеметрией позиции,
+                   а bus_start сразу ставит его в "загрузку" - так что
+                   второй раз на том же ENDED мы не сработаем. */
+                if (bus_state == BUS_STATE_ENDED) {
+                    play_next(FALSE);
+                } else if (bus_state == BUS_STATE_FAILED || s_idle > SESSION_TRIES) {
+                    /* Файл не принят: плата говорит это сама или молчит
+                       на загрузке дольше всякого разумного. */
+                    ui_alarm("file rejected");
+                    play_next(TRUE);
+                }
+            }
         } else {
             fw_wait_frames(1);
         }
+        /* Анимация экрана; рисует не чаще раза в кадр. */
+        ui_update();
     }
 
 done:
-    /* Плата играет сама по себе: не сбросить - так и останется играть уже
-       после выхода. До bus_ping() сюда попадают только ошибки старта, там
-       платы ещё нет. */
-    if (bus_board_found) bus_reset();
+    /* Сюда - только ошибка старта, до bus_ping(): выхода из плеера нет. */
     fw_irq_stop();
 }

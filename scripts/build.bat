@@ -8,8 +8,8 @@ REM  into garbage that breaks command parsing. Same rule as the other
 REM  .bat files in this tree.
 REM
 REM  Nine artefacts:
-REM    1. UNIMOD.$C                  TR-DOS application (Hobeta, for a real machine)
-REM    2. UNIMOD.sna                 the same app as a 128K snapshot, for emulators
+REM    1. ugly.$c                  TR-DOS application (Hobeta, for a real machine)
+REM    2. ugly.sna                 the same app as a 128K snapshot, for emulators
 REM    3. UMPLAYER.WMF               Wild Commander plugin for TS-Config
 REM    4. soundsinth.uf2             firmware, one image for every machine
 REM    5. example/set_config_*.txt   ready-made settings files

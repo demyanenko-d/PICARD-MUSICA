@@ -228,10 +228,44 @@ void refused_load_clears_current() {
 
 } // namespace
 
+// Заявка, поставленная до стопа, не играет: ни в том же проходе (запуск,
+// затем стоп), ни ждущая байтов через сброс карты - иначе она сыграла бы
+// байты следующего сэмпла, легшего на то же место.
+void stop_cancels_earlier_and_waiting_starts() {
+    Area a;
+    a.add_sample(1024);
+    FxPlayer fx;
+    fx.reset();
+    std::atomic<uint32_t> ready{0};
+    fx.attach(&a.dev, a.pcm.data(), &ready);
+    fx.set_fx_volume(0x40);
+
+    ready.store(4096);
+    fx.request_start(start_of(a, 0, 1));
+    fx.request_stop(1);
+    render(fx);
+    CHECK_EQ(static_cast<int>(fx.active_mask()), 0);
+
+    // Байтов ещё нет: заявка ждёт; #F3 (стоп всех), байты нового сэмпла.
+    ready.store(0);
+    fx.request_start(start_of(a, 0, 1));
+    render(fx);
+    CHECK_EQ(static_cast<int>(fx.active_mask()), 0);
+    fx.request_stop(devices::gs::kFxChannelMask);
+    ready.store(4096);
+    render(fx);
+    render(fx);
+    std::printf("  start then stop, waiting start through reset: active %u, started %u\n", static_cast<unsigned>(fx.active_mask()), fx.started());
+    CHECK_EQ(static_cast<int>(fx.active_mask()), 0);
+    CHECK_EQ(fx.started(), 0u);
+    CHECK(!fx.wants_render());
+}
+
 void run_gs_fx_player_tests() {
     std::printf("gs: effect voices\n");
     requests_on_all_channels_survive();
     stop_and_start_in_one_pass();
+    stop_cancels_earlier_and_waiting_starts();
     stop_mask_silences_every_channel();
     voice_adds_to_the_mix();
     start_without_length_does_not_sound();

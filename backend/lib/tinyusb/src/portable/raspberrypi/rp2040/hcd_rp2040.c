@@ -77,6 +77,16 @@ volatile uint32_t soundsinth_hcd_ctrl_timeouts = 0;
 // точки этапа (от старшего байта к младшему); wValue и wIndex.
 volatile uint32_t soundsinth_hcd_ctrl_cut_req   = 0;
 volatile uint32_t soundsinth_hcd_ctrl_cut_value = 0;
+// SoundSinth: connection events seen by the root port, by speed - tells a
+// device that drops off the bus from one that stays and keeps silent.
+volatile uint32_t soundsinth_hcd_conn_low  = 0;
+volatile uint32_t soundsinth_hcd_conn_full = 0;
+volatile uint32_t soundsinth_hcd_disconn   = 0;
+volatile uint32_t soundsinth_hcd_data_seq  = 0; // data sequence errors, see the IRQ
+// RX timeouts: all, and those inside the control grace window (not failed).
+volatile uint32_t soundsinth_hcd_rx_timeouts      = 0;
+volatile uint32_t soundsinth_hcd_rx_timeouts_kept = 0;
+enum { SOUNDSINTH_CTRL_RX_GRACE_US = 1000000 };
 
 static void soundsinth_ctrl_deadline_arm(hw_endpoint_t *ep) {
   soundsinth_ctrl_submit_us[ep - ep_pool] = time_us_32();
@@ -363,8 +373,14 @@ static void __tusb_irq_path_func(hcd_rp2040_irq)(void) {
   if (status & USB_INTS_HOST_CONN_DIS_BITS) {
     uint8_t speed = dev_speed();
     if (speed == SIE_CTRL_SPEED_DISCONNECT) {
+      soundsinth_hcd_disconn++; // SoundSinth
       hcd_event_device_remove(RHPORT_NATIVE, true);
     } else {
+      if (speed == SIE_CTRL_SPEED_LOW) {
+        soundsinth_hcd_conn_low++; // SoundSinth
+      } else {
+        soundsinth_hcd_conn_full++; // SoundSinth
+      }
       if (speed == SIE_CTRL_SPEED_LOW) {
         usb_hw->sie_ctrl = SIE_CTRL_BASE | USB_SIE_CTRL_KEEP_ALIVE_EN_BITS;
       } else {
@@ -382,7 +398,18 @@ static void __tusb_irq_path_func(hcd_rp2040_irq)(void) {
 
   if (status & USB_INTS_ERROR_RX_TIMEOUT_BITS) {
     usb_hw_clear->sie_status = USB_SIE_STATUS_RX_TIMEOUT_BITS;
+    soundsinth_hcd_rx_timeouts++;
 
+    // SoundSinth: grace window for control transfers (as in TinyUSB 0.20 and
+    // the proposal in hathach/tinyusb#3876). A device just reset behind the
+    // hub, and a low-speed one reached with PRE, misses the first tokens; the
+    // SIE retries by itself while the transfer stays armed. Failing on the
+    // first timeout (0.21.0) abandons the enumeration. The 5 s control
+    // deadline stays the backstop.
+    if (epx->state == EPSTATE_ACTIVE && tu_edpt_number(epx->ep_addr) == 0 &&
+        time_us_32() - soundsinth_ctrl_submit_us[epx - ep_pool] < SOUNDSINTH_CTRL_RX_GRACE_US) {
+      soundsinth_hcd_rx_timeouts_kept++;
+    } else {
     const uint32_t sie_ctrl = (usb_hw->sie_ctrl & SIE_CTRL_BASE_MASK) | USB_SIE_CTRL_STOP_TRANS_BITS;
     usb_hw->sie_ctrl        = sie_ctrl;
     // while (usb_hw->sie_ctrl & USB_SIE_CTRL_STOP_TRANS_BITS) {}
@@ -391,6 +418,7 @@ static void __tusb_irq_path_func(hcd_rp2040_irq)(void) {
     // Only handle if epx is active, don't carry more epx transfer since STOP_TRANS is raced and not safe.
     if (epx->state == EPSTATE_ACTIVE) {
       xfer_complete_isr(epx, XFER_RESULT_FAILED, false);
+    }
     }
   }
 
@@ -454,9 +482,18 @@ static void __tusb_irq_path_func(hcd_rp2040_irq)(void) {
   }
   #endif
 
+  // SoundSinth: upstream panics here, and unplugging a device mid-transfer
+  // raises this error (seen on the board: a wireless keyboard receiver pulled
+  // out took Core1 down). Handled like RX timeout: stop the transfer and fail
+  // it; the detach itself arrives as CONN_DIS.
   if (status & USB_INTS_ERROR_DATA_SEQ_BITS) {
     usb_hw_clear->sie_status = USB_SIE_STATUS_DATA_SEQ_ERROR_BITS;
-    panic("Data Seq Error \n");
+    soundsinth_hcd_data_seq++;
+    const uint32_t sie_ctrl  = (usb_hw->sie_ctrl & SIE_CTRL_BASE_MASK) | USB_SIE_CTRL_STOP_TRANS_BITS;
+    usb_hw->sie_ctrl         = sie_ctrl;
+    if (epx->state == EPSTATE_ACTIVE) {
+      xfer_complete_isr(epx, XFER_RESULT_FAILED, false);
+    }
   }
 }
 

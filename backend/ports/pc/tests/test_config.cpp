@@ -7,16 +7,27 @@
 
 #include "testing.h"
 
+#include <cstddef>
 #include <cstring>
 #include <string>
 
 #include "core/config/config.h"
+#include "core/config/config_fields.h"
 #include "core/config/config_ini.h"
-#include "core/config/config_page.h"
+#include "player/config/config_menu.h"
+#include "player/config/config_page.h"
+#include "player/config/config_term.h"
+#include "player/config/config_tools.h"
+#include "player/config/tool_wifi.h"
 #include "core/config/config_store.h"
 #include "core/util/crc32.h"
+#include "core/memory/track_memory.h"
+#include "player/config/tools_service.h"
 
 using namespace soundsinth::config;
+
+// Часы теста (test_sd_spi_emu.cpp): экраны TOOLS перерисовываются по ним.
+extern uint32_t g_test_time_us;
 
 namespace {
 
@@ -28,20 +39,22 @@ void erase(uint8_t* page) {
 Settings other_than_default() {
     const Settings def;
     Settings s;
-    s.disksys            = static_cast<uint8_t>(DiskSys::TrDos);
-    s.zcontroller        = static_cast<uint8_t>(!def.zcontroller);
-    s.usb_mouse          = static_cast<uint8_t>(!def.usb_mouse);
-    s.usb_gamepad        = static_cast<uint8_t>(!def.usb_gamepad);
-    s.reset_signal       = static_cast<uint8_t>(!def.reset_signal);
-    s.mouse_speed        = 9;
-    s.keyboard_layout    = static_cast<uint8_t>(Layout::Picard);
-    s.mod_left_alt       = static_cast<uint8_t>(ModRole::SymbolShift);
-    s.mouse_swap_buttons = 1;
-    s.disksys_media      = static_cast<uint8_t>(Media::Usb);
-    s.auto_volume        = 1;
-    s.joy_8bit           = 1;
-    s.joy_keys[3][1]     = 0x1a; // W вторым к стрелке вверх
-    s.joy_keys[5][0]     = 0x1d; // Z на второй огонь
+    s.disksys             = static_cast<uint8_t>(DiskSys::TrDos);
+    s.zcontroller         = static_cast<uint8_t>(Media::Sd);
+    s.usb_mouse           = static_cast<uint8_t>(!def.usb_mouse);
+    s.usb_gamepad         = static_cast<uint8_t>(!def.usb_gamepad);
+    s.reset_signal        = static_cast<uint8_t>(!def.reset_signal);
+    s.mouse_speed         = 9;
+    s.keyboard_layout     = static_cast<uint8_t>(Layout::Picard);
+    s.mod_left_alt        = static_cast<uint8_t>(ModRole::SymbolShift);
+    s.mouse_swap_buttons  = 1;
+    s.divmmc_card1        = static_cast<uint8_t>(Media::Usb);
+    s.auto_volume         = 1;
+    s.joy_8bit            = 1;
+    s.joy_keys[3][1]      = 0x1a; // W вторым к стрелке вверх
+    s.joy_keys[5][0]      = 0x1d; // Z на второй огонь
+    s.stop_music_on_reset = static_cast<uint8_t>(!def.stop_music_on_reset);
+    s.divmmc_card2        = static_cast<uint8_t>(Media::Sd);
     return s;
 }
 
@@ -140,7 +153,7 @@ void test_ini_ignores_spaces_and_junk() {
     const std::string text = "; comment\n"
                              "  DISKSYS = NONE  \n"
                              "\tmouse_speed\t=\t12\n"
-                             "DISKSYS_MEDIA=usb\n"
+                             "DIVMMC_CARD1=usb\n"
                              "MOD_RIGHT_SHIFT=symbol\n"
                              "GS=off\n";
     const IniResult r      = ini_parse(text.c_str(), static_cast<uint32_t>(text.size()), s);
@@ -149,7 +162,7 @@ void test_ini_ignores_spaces_and_junk() {
     CHECK_EQ(r.bad, 0u);
     CHECK_EQ(s.disksys, static_cast<uint8_t>(DiskSys::None));
     CHECK_EQ(s.mouse_speed, 12);
-    CHECK_EQ(s.disksys_media, static_cast<uint8_t>(Media::Usb));
+    CHECK_EQ(s.divmmc_card1, static_cast<uint8_t>(Media::Usb));
     CHECK_EQ(s.gs, 0);
     CHECK_EQ(s.mod_right_shift, static_cast<uint8_t>(ModRole::SymbolShift));
     // Чего в файле нет, осталось умолчанием.
@@ -170,6 +183,20 @@ void test_ini_bad_lines_do_not_cancel_the_rest() {
     CHECK_EQ(s.usb_gamepad, 0);
     CHECK_EQ(s.mouse_speed, kMouseSpeedUnit);
     CHECK_EQ(s.usb_mouse, Settings{}.usb_mouse);
+}
+
+// Бипер: 1BIT и 2BIT в любом регистре; прежних EAR и CLASSIC нет.
+void test_ini_beeper_names() {
+    Settings s;
+    const std::string two = "BEEPER=2BIT\n";
+    CHECK_EQ(ini_parse(two.c_str(), static_cast<uint32_t>(two.size()), s).applied, 1u);
+    CHECK_EQ(s.beeper, static_cast<uint8_t>(Beeper::TwoBit));
+    const std::string one = "beeper=1bit\n";
+    CHECK_EQ(ini_parse(one.c_str(), static_cast<uint32_t>(one.size()), s).applied, 1u);
+    CHECK_EQ(s.beeper, static_cast<uint8_t>(Beeper::OneBit));
+    const std::string old = "BEEPER=CLASSIC\nBEEPER=EAR\n";
+    CHECK_EQ(ini_parse(old.c_str(), static_cast<uint32_t>(old.size()), s).bad, 2u);
+    CHECK_EQ(s.beeper, static_cast<uint8_t>(Beeper::OneBit));
 }
 
 void test_ini_render_measures_when_it_does_not_fit() {
@@ -198,7 +225,7 @@ void test_clamp() {
     Settings wild;
     wild.mouse_speed     = 200;
     wild.disksys         = 9;
-    wild.disksys_media   = 5;
+    wild.divmmc_card1    = 5;
     wild.mod_left_ctrl   = 77;
     wild.keyboard_layout = 99;
     page_build(p0, wild, 1u);
@@ -207,11 +234,28 @@ void test_clamp() {
     CHECK(page_read(p0, got));
     CHECK_EQ(got.mouse_speed, kMouseSpeedMax);
     CHECK_EQ(got.disksys, static_cast<uint8_t>(DiskSys::None));
-    CHECK_EQ(got.disksys_media, static_cast<uint8_t>(Media::Sd));
+    CHECK_EQ(got.divmmc_card1, static_cast<uint8_t>(Media::None));
     CHECK_EQ(got.mod_left_ctrl, static_cast<uint8_t>(ModRole::None));
     // Чужая раскладка - наша, а не выключенная клавиатура: выключать её
     // из-за чужого номера пользователь не просил.
     CHECK_EQ(got.keyboard_layout, static_cast<uint8_t>(Layout::Picard));
+
+    // Флаги и числа - все по таблице ключей; имя файла ПЗУ - как есть, с
+    // байтами кодовой страницы карты, только ноль в конце.
+    Settings s;
+    s.gs_fx_separate = 7;
+    s.mouse_autoswap = 9;
+    s.mod_panning    = 250;
+    s.mouse_speed    = 0;
+    std::memset(s.rom_file[1], 'A', sizeof(s.rom_file[1]));
+    s.rom_file[1][3] = static_cast<char>(0x8E);
+    settings_clamp(s);
+    CHECK_EQ(s.gs_fx_separate, 1);
+    CHECK_EQ(s.mouse_autoswap, 1);
+    CHECK_EQ(s.mod_panning, kModPanningMax);
+    CHECK_EQ(s.mouse_speed, kMouseSpeedMin);
+    CHECK_EQ(std::strlen(s.rom_file[1]), sizeof(s.rom_file[1]) - 1);
+    CHECK_EQ(static_cast<uint8_t>(s.rom_file[1][3]), 0x8E);
 }
 
 // Умолчания - это набор для TS-Config: машина со своей памятью, своим
@@ -219,7 +263,9 @@ void test_clamp() {
 void test_defaults_are_tsconfig() {
     const Settings s;
     CHECK_EQ(s.disksys, static_cast<uint8_t>(DiskSys::None));
-    CHECK_EQ(s.zcontroller, 0);
+    CHECK_EQ(s.zcontroller, static_cast<uint8_t>(Media::None));
+    CHECK_EQ(s.divmmc_card1, static_cast<uint8_t>(Media::None));
+    CHECK_EQ(s.divmmc_card2, static_cast<uint8_t>(Media::None));
     CHECK_EQ(s.usb_mouse, 0);
     CHECK_EQ(s.usb_gamepad, 0);
     CHECK_EQ(s.reset_signal, 0);
@@ -297,11 +343,9 @@ void test_wire_midi_yields_to_wifi() {
 // зачем хост поднят.
 void test_usb_host_used_by_every_consumer() {
     Settings off;
-    off.keyboard_layout   = static_cast<uint8_t>(Layout::None);
-    off.usb_mouse         = 0;
-    off.usb_gamepad       = 0;
-    off.disksys_media     = static_cast<uint8_t>(Media::Sd);
-    off.zcontroller_media = static_cast<uint8_t>(Media::Sd);
+    off.keyboard_layout = static_cast<uint8_t>(Layout::None);
+    off.usb_mouse       = 0;
+    off.usb_gamepad     = 0;
     CHECK(!usb_host_used(off));
 
     Settings kb        = off;
@@ -316,171 +360,98 @@ void test_usb_host_used_by_every_consumer() {
     gp.usb_gamepad = 1;
     CHECK(usb_host_used(gp));
 
-    // Носитель USB нужен, только если его берёт включённый эмулятор.
-    Settings ds      = off;
-    ds.disksys_media = static_cast<uint8_t>(Media::Usb);
-    ds.disksys       = static_cast<uint8_t>(DiskSys::None);
-    CHECK(!usb_host_used(ds));
-    ds.disksys = static_cast<uint8_t>(DiskSys::DivMmc);
-    CHECK(usb_host_used(ds));
+    // Флешка нужна, только если её выбрало устройство карты.
+    for (uint8_t Settings::*dev : {&Settings::divmmc_card1, &Settings::divmmc_card2, &Settings::zcontroller}) {
+        Settings d = off;
+        d.*dev     = static_cast<uint8_t>(Media::Sd);
+        CHECK(!usb_host_used(d));
+        d.*dev = static_cast<uint8_t>(Media::Usb);
+        CHECK(usb_host_used(d));
+    }
+    // DIVMMC без карт включает первую на карте.
+    Settings ds = off;
+    ds.disksys  = static_cast<uint8_t>(DiskSys::DivMmc);
+    settings_clamp(ds);
+    CHECK_EQ(ds.divmmc_card1, static_cast<uint8_t>(Media::Sd));
+    // Вторая включена - первую DIVMMC не трогает.
+    Settings d2     = off;
+    d2.disksys      = static_cast<uint8_t>(DiskSys::DivMmc);
+    d2.divmmc_card2 = static_cast<uint8_t>(Media::Usb);
+    settings_clamp(d2);
+    CHECK_EQ(d2.divmmc_card1, static_cast<uint8_t>(Media::None));
+    // Без DIVMMC карты могут быть выключены обе.
+    Settings none = off;
+    none.disksys  = static_cast<uint8_t>(DiskSys::TrDos);
+    settings_clamp(none);
+    CHECK_EQ(none.divmmc_card1, static_cast<uint8_t>(Media::None));
 
-    Settings zc          = off;
-    zc.zcontroller_media = static_cast<uint8_t>(Media::Usb);
-    zc.zcontroller       = 0;
-    CHECK(!usb_host_used(zc));
-    zc.zcontroller = 1;
-    CHECK(usb_host_used(zc));
-
-    // Умолчания: раскладка не выбрана, мышь и джойстик выключены, оба
-    // носителя - карта. Машине без файла настроек USB не нужен никому.
+    // Умолчания: раскладка не выбрана, мышь, джойстик и устройства карты
+    // выключены. Машине без файла настроек USB не нужен никому.
     CHECK(!usb_host_used(Settings{}));
 }
 
-// --- Страница для ПЗУ-конфигуратора ---
+// --- Поля конфигуратора ---
 
-// Номер поля в таблице по указателю на член: тест обязан знать, какой бит
-// маски чей, и узнаёт это тем же путём, что и сама маска.
+// Номер поля по указателю на член: тест обязан знать, какой бит маски чей.
 uint32_t field_index(uint8_t Settings::*f) {
-    Settings probe;
-    for (uint32_t i = 0; i < config_page_field_count(); ++i) {
-        // Пометить одно поле и посмотреть, какое значение уехало в страницу.
-        Settings mark;
-        mark.*f = 0x5A;
-        uint8_t page[kConfigPageBytes];
-        CHECK(config_page_build(mark, page, sizeof(page)) != 0);
-        const auto* h       = reinterpret_cast<const ConfigPageHeader*>(page);
-        const uint8_t* vals = page + h->values_offset;
-        if (vals[i] == 0x5A) return i;
+    Settings mark;
+    mark.*f = 0x5A;
+    for (uint32_t i = 0; i < kPageFieldCount; ++i) {
+        if (config_field_value(mark, i) == 0x5A && config_field_value(Settings{}, i) != 0x5A) return i;
     }
     CHECK(false);
     return 0;
 }
 
-// Построили страницу, забрали обратно - настройки те же. Это главное
-// свойство: иначе правка с экрана теряла бы поля.
-void test_page_round_trip() {
+// Все поля по номеру переносят настройки целиком: иначе правка в меню
+// теряла бы поля.
+void test_fields_round_trip() {
     const Settings want = other_than_default();
-    uint8_t page[kConfigPageBytes];
-    const uint32_t used = config_page_build(want, page, sizeof(page));
-    CHECK(used != 0);
-    CHECK(used <= kConfigPageBytes);
-
     Settings got;
-    CHECK(config_page_apply(page, sizeof(page), got));
+    for (uint32_t i = 0; i < kPageFieldCount; ++i) {
+        char* t = config_field_text(got, i);
+        if (t != nullptr) {
+            std::strcpy(t, config_field_text(want, i));
+        } else {
+            config_field_set(got, i, config_field_value(want, i));
+        }
+    }
     CHECK_EQ(std::memcmp(&got, &want, sizeof(Settings)), 0);
-
-    std::printf("  configurator page: %u B of %u, fields %u\n", static_cast<unsigned>(used), static_cast<unsigned>(kConfigPageBytes),
-                static_cast<unsigned>(config_page_field_count()));
-}
-
-// Страница живёт в памяти, которую пишет машина: чужую или битую плата
-// обязана отвергнуть, не тронув настроек.
-void test_page_rejects_foreign() {
-    const Settings base = other_than_default();
-    uint8_t page[kConfigPageBytes];
-    CHECK(config_page_build(base, page, sizeof(page)) != 0);
-    auto* h = reinterpret_cast<ConfigPageHeader*>(page);
-
-    Settings keep         = Settings{};
-    const Settings before = keep;
-
-    const uint32_t good_magic = h->magic;
-    h->magic                  = 0;
-    CHECK(!config_page_apply(page, sizeof(page), keep));
-    h->magic = good_magic;
-
-    const uint16_t good_version = h->version;
-    h->version                  = static_cast<uint16_t>(good_version + 1u);
-    CHECK(!config_page_apply(page, sizeof(page), keep));
-    h->version = good_version;
-
-    // Сумма значений: одно значение сдвинуто, сумма прежняя.
-    page[h->values_offset] = static_cast<uint8_t>(page[h->values_offset] + 1u);
-    CHECK(!config_page_apply(page, sizeof(page), keep));
-
-    CHECK_EQ(std::memcmp(&keep, &before, sizeof(Settings)), 0);
+    std::printf("  configurator fields %u\n", static_cast<unsigned>(kPageFieldCount));
 }
 
 // Неактивные пункты: зависят от других полей, и правила считает плата.
 void test_page_mask_follows_dependencies() {
-    const uint32_t i_media = field_index(&Settings::disksys_media);
     const uint32_t i_reset = field_index(&Settings::reset_signal);
-    const uint32_t i_zmed  = field_index(&Settings::zcontroller_media);
     const uint32_t i_speed = field_index(&Settings::mouse_speed);
 
     Settings off;
-    off.disksys     = static_cast<uint8_t>(DiskSys::None);
-    off.zcontroller = 0;
-    off.usb_mouse   = 0;
+    off.disksys   = static_cast<uint8_t>(DiskSys::None);
+    off.usb_mouse = 0;
     settings_clamp(off);
     const uint64_t m_off = settings_active_mask(off);
-    CHECK((m_off & (uint64_t{1} << i_media)) == 0);
-    CHECK((m_off & (uint64_t{1} << i_zmed)) == 0);
     CHECK((m_off & (uint64_t{1} << i_speed)) == 0);
     // Сброс при выключенном DivMMC - на выбор пользователя.
     CHECK((m_off & (uint64_t{1} << i_reset)) != 0);
 
     Settings on;
     on.disksys      = static_cast<uint8_t>(DiskSys::DivMmc);
-    on.zcontroller  = 1;
     on.usb_mouse    = 1;
     on.reset_signal = 0;
     settings_clamp(on);
     // DivMMC грузит машину со своей карты и обязан её сбросить.
     CHECK_EQ(on.reset_signal, 1);
     const uint64_t m_on = settings_active_mask(on);
-    CHECK((m_on & (uint64_t{1} << i_media)) != 0);
-    CHECK((m_on & (uint64_t{1} << i_zmed)) != 0);
     CHECK((m_on & (uint64_t{1} << i_speed)) != 0);
     CHECK((m_on & (uint64_t{1} << i_reset)) == 0);
-}
 
-// Пересчёт после правки переписывает значения и маску, не трогая строк.
-void test_page_refresh_keeps_descriptors() {
-    uint8_t page[kConfigPageBytes];
-    CHECK(config_page_build(Settings{}, page, sizeof(page)) != 0);
-    const auto* h = reinterpret_cast<const ConfigPageHeader*>(page);
-
-    uint8_t strings_before[256];
-    std::memcpy(strings_before, page + h->strings_offset, sizeof(strings_before));
-
-    Settings s;
-    s.disksys = static_cast<uint8_t>(DiskSys::DivMmc);
-    settings_clamp(s);
-    CHECK(config_page_refresh(s, page, sizeof(page)));
-
-    CHECK_EQ(std::memcmp(strings_before, page + h->strings_offset, sizeof(strings_before)), 0);
-    Settings got;
-    CHECK(config_page_apply(page, sizeof(page), got));
-    CHECK_EQ(got.disksys, static_cast<uint8_t>(DiskSys::DivMmc));
-    CHECK_EQ(got.reset_signal, 1);
-}
-
-// Снимок сохранённого правкой не меняется: по нему ПЗУ помечает
-// изменённые поля и показывает прежнее значение. Сползи он вслед за
-// правкой - пометок не было бы вовсе.
-void test_page_saved_snapshot_stays() {
-    const uint32_t i_disk = field_index(&Settings::disksys);
-    uint8_t page[kConfigPageBytes];
-    CHECK(config_page_build(Settings{}, page, sizeof(page)) != 0);
-    const auto* h = reinterpret_cast<const ConfigPageHeader*>(page);
-
-    // Сразу после сборки изменённых полей нет.
-    CHECK_EQ(std::memcmp(page + h->values_offset, page + h->saved_offset, h->field_count), 0);
-
-    Settings s;
-    s.disksys = static_cast<uint8_t>(DiskSys::DivMmc);
-    settings_clamp(s);
-    CHECK(config_page_refresh(s, page, sizeof(page)));
-
-    const uint8_t* values = page + h->values_offset;
-    const uint8_t* saved  = page + h->saved_offset;
-    CHECK_EQ(values[i_disk], static_cast<uint8_t>(DiskSys::DivMmc));
-    CHECK_EQ(saved[i_disk], static_cast<uint8_t>(DiskSys::None));
-    // Принуждённое поле тоже видно как изменённое.
-    const uint32_t i_reset = field_index(&Settings::reset_signal);
-    CHECK_EQ(values[i_reset], 1);
-    CHECK_EQ(saved[i_reset], 0);
+    // Файлы ПЗУ - вместе с полем ROM, а не с Wi-Fi: при DIVMMC выбора ПЗУ
+    // нет, без DivMMC он есть и при WIFI=0.
+    for (uint32_t k = 0; k < kTextKeyCount; ++k) {
+        const uint64_t bit = uint64_t{1} << (kTextFieldFirst + k);
+        CHECK(((m_off & bit) != 0) == kTextKeys[k].file);
+        CHECK((m_on & bit) == 0);
+    }
 }
 
 constexpr uint32_t kExtAt = kPayloadOffset + kLegacyBytes;
@@ -545,6 +516,42 @@ void test_store_records_bad_crc_keeps_fixed_part() {
     CHECK_EQ(got.joy_8bit, Settings{}.joy_8bit);
 }
 
+// Блок прежней прошивки: устройств карты в записях нет, выбор выводится из
+// неподвижной части - носитель DivMMC при DISKSYS=DIVMMC, флаг и носитель
+// Z-Controller. Вторая карта выключена.
+void test_store_legacy_devices() {
+    uint8_t page[kPageBytes];
+    Settings old;
+    old.disksys                  = static_cast<uint8_t>(DiskSys::DivMmc);
+    old.legacy_divmmc_media      = static_cast<uint8_t>(Media::Usb);
+    old.legacy_zcontroller       = 1;
+    old.legacy_zcontroller_media = static_cast<uint8_t>(Media::Usb);
+    page_build(page, old, 3u);
+    std::memset(page + kExtAt, 0xFF, kPageBytes - kExtAt);
+    Settings got;
+    CHECK(page_read(page, got));
+    CHECK_EQ(got.divmmc_card1, static_cast<uint8_t>(Media::Usb));
+    CHECK_EQ(got.divmmc_card2, static_cast<uint8_t>(Media::None));
+    CHECK_EQ(got.zcontroller, static_cast<uint8_t>(Media::Usb));
+
+    // Без DIVMMC носитель DivMMC прежде не значил ничего: карта выключена.
+    old.disksys            = static_cast<uint8_t>(DiskSys::TrDos);
+    old.legacy_zcontroller = 0;
+    page_build(page, old, 4u);
+    std::memset(page + kExtAt, 0xFF, kPageBytes - kExtAt);
+    CHECK(page_read(page, got));
+    CHECK_EQ(got.divmmc_card1, static_cast<uint8_t>(Media::None));
+    CHECK_EQ(got.zcontroller, static_cast<uint8_t>(Media::None));
+
+    // Записи есть - они и действуют, старые байты не трогают.
+    Settings now;
+    now.legacy_zcontroller = 1;
+    now.zcontroller        = static_cast<uint8_t>(Media::None);
+    page_build(page, now, 5u);
+    CHECK(page_read(page, got));
+    CHECK_EQ(got.zcontroller, static_cast<uint8_t>(Media::None));
+}
+
 void test_ini_joy_keys() {
     const char text[] = "JOY_UP = w, kp_8\n"
                         "JOY_FIRE=ESC\n"
@@ -566,50 +573,41 @@ void test_ini_joy_keys() {
     CHECK_EQ(s.joy_keys[5][0], def.joy_keys[5][0]);
 }
 
-// Esc занят отменой: числом из блока или со страницы он не проходит.
+// Esc и забой заняты отменой: числом из блока или со страницы они не проходят.
 void test_clamp_joy_keys() {
     Settings s;
     s.joy_keys[0][0] = kKeyEsc;
     s.joy_keys[0][1] = 0x02;
     s.joy_keys[1][0] = 0xE0;
     s.joy_keys[2][1] = 0x63;
+    s.joy_keys[3][1] = kKeyBackspace;
     settings_clamp(s);
+    CHECK_EQ(s.joy_keys[3][1], 0);
     CHECK_EQ(s.joy_keys[0][0], 0);
     CHECK_EQ(s.joy_keys[0][1], 0);
     CHECK_EQ(s.joy_keys[1][0], 0);
     CHECK_EQ(s.joy_keys[2][1], 0x63);
 }
 
-// Привязки на странице: поля вида "клавиша" за ключами таблицы, по клавише действия
-// на поле. Кнопки 2..4 правятся только при восьмиразрядном Kempston, все
+// Привязки: поля вида клавиша за ключами таблицы, по клавише действия на
+// поле. Кнопки 2..4 правятся только при восьмиразрядном Kempston, все
 // привязки - только при включённой клавиатуре.
-void test_page_joy_key_fields() {
+void test_joy_key_fields() {
     Settings s;
     s.keyboard_layout = static_cast<uint8_t>(Layout::Picard);
     s.joy_keys[3][1]  = 0x1a; // W вторым к вверх
-    uint8_t page[kConfigPageBytes];
-    CHECK(config_page_build(s, page, sizeof(page)) != 0);
-    const auto* h = reinterpret_cast<const ConfigPageHeader*>(page);
-    CHECK_EQ(h->field_count, 40u);
+    CHECK_EQ(kPageFieldCount, 55u);
+    const uint32_t first   = kKeyCount;
+    const PageFieldInfo fi = config_field_info(first + 7u);
+    CHECK(fi.page_kind == PageKind::Key);
+    CHECK_EQ(std::strcmp(fi.name, "JOY_UP 2"), 0);
+    CHECK_EQ(config_field_value(s, first + 7u), 0x1a);
 
-    const uint32_t first = h->field_count - kJoyActions * kJoyKeysPerAction;
-    ConfigPageField f{};
-    std::memcpy(&f, page + h->desc_offset + (first + 7u) * kConfigFieldBytes, sizeof(f));
-    CHECK_EQ(f.kind, static_cast<uint8_t>(PageKind::Key));
-    CHECK(f.choices != 0);
-    CHECK_EQ(std::strcmp(reinterpret_cast<const char*>(page + f.name), "JOY_UP 2"), 0);
-    CHECK_EQ(page[h->values_offset + first + 7u], 0x1a);
-
-    // Правка с экрана: Q на второй огонь, Esc на огонь - Esc отсекается.
-    page[h->values_offset + first + 10u] = 0x14;
-    page[h->values_offset + first + 8u]  = kKeyEsc;
-    uint8_t sum                          = 0;
-    for (uint32_t i = 0; i < h->field_count; ++i) {
-        sum = static_cast<uint8_t>(sum + page[h->values_offset + i]);
-    }
-    page[h->values_offset + h->field_count] = sum;
-    Settings got                            = s;
-    CHECK(config_page_apply(page, sizeof(page), got));
+    // Правка: Q на второй огонь, Esc на огонь - Esc отсекается.
+    Settings got = s;
+    config_field_set(got, first + 10u, 0x14);
+    config_field_set(got, first + 8u, kKeyEsc);
+    settings_clamp(got);
     CHECK_EQ(got.joy_keys[5][0], 0x14);
     CHECK_EQ(got.joy_keys[4][0], 0);
 
@@ -620,18 +618,413 @@ void test_page_joy_key_fields() {
     CHECK((settings_active_mask(s) & (uint64_t{1} << (first + 10u))) != 0);
     s.keyboard_layout = static_cast<uint8_t>(Layout::None);
     CHECK((settings_active_mask(s) & (uint64_t{1} << first)) == 0);
-
-    // Ячейка захвата внутри страницы и после маски.
-    uint8_t* cell = config_page_capture(page, sizeof(page));
-    CHECK(cell != nullptr);
-    CHECK_EQ(cell[0], kCaptureIdle);
-    CHECK_EQ(static_cast<uint32_t>(cell - page), static_cast<uint32_t>(h->mask_offset + kConfigMaskBytes));
 }
 
 } // namespace
 
+// Сеть Wi-Fi: строки в файле, в странице конфигуратора и во флеше.
+void test_wifi_texts() {
+    Settings s;
+    s.wifi = 1;
+    // Файл: всё после "=" без пробелов по краям, регистр и пробелы внутри
+    // сохраняются; длиннее предела - отказ.
+    const char* ini = "WIFI_SSID = My Home Net \nwifi_password=p@ss W0rd;#\nWIFI_SSID_X=1\n";
+    IniResult r     = ini_parse(ini, static_cast<uint32_t>(std::strlen(ini)), s);
+    CHECK_EQ(r.applied, 2u);
+    CHECK_EQ(std::string(s.wifi_ssid), std::string("My Home Net"));
+    CHECK_EQ(std::string(s.wifi_pass), std::string("p@ss W0rd;#"));
+    const std::string long_ssid = "WIFI_SSID=" + std::string(33, 'x') + "\n";
+    r                           = ini_parse(long_ssid.c_str(), static_cast<uint32_t>(long_ssid.size()), s);
+    CHECK_EQ(r.bad, 1u);
+    CHECK_EQ(std::string(s.wifi_ssid), std::string("My Home Net"));
+
+    // Выгрузка: имя сети пишется, пароль - нет.
+    static char out[16384];
+    ini_render(s, out, sizeof(out));
+    const std::string text(out);
+    CHECK(text.find("\nWIFI_SSID=My Home Net\n") != std::string::npos);
+    CHECK(text.find("p@ss") == std::string::npos);
+    CHECK(text.find("; WIFI_PASSWORD= (set, not written)") != std::string::npos);
+
+    // Флеш: строки переживают запись и чтение.
+    static uint8_t block[kPageBytes];
+    page_build(block, s, 1);
+    Settings back;
+    CHECK(page_read(block, back));
+    CHECK_EQ(std::string(back.wifi_pass), std::string("p@ss W0rd;#"));
+
+    // Поля: текст, пароль - секрет; значение - длина; без Wi-Fi поля
+    // недоступны.
+    const uint32_t first     = kTextFieldFirst;
+    const PageFieldInfo ssid = config_field_info(first);
+    const PageFieldInfo pass = config_field_info(first + 1u);
+    CHECK(ssid.page_kind == PageKind::Text);
+    CHECK_EQ(ssid.max, 32u);
+    CHECK_EQ(ssid.min, 0u);
+    CHECK_EQ(pass.min, 1u);
+    CHECK_EQ(std::string(config_field_text(s, first)), std::string("My Home Net"));
+    CHECK_EQ(config_field_value(s, first), 11u);
+    CHECK((settings_active_mask(s) & (uint64_t{1} << first)) != 0);
+    Settings off = s;
+    off.wifi     = 0;
+    CHECK((settings_active_mask(off) & (uint64_t{1} << first)) == 0);
+    Settings got = s;
+    std::strcpy(config_field_text(got, first), "Cafe");
+    CHECK_EQ(config_field_value(got, first), 4u);
+    CHECK_EQ(std::string(got.wifi_pass), std::string("p@ss W0rd;#"));
+}
+
+// Своё ПЗУ: имя в файле, незнакомая область - ПЗУ машины, при DivMMC поле
+// неактивно и область не выбрана.
+void test_custom_rom() {
+    Settings s;
+    const std::string text = "DISKSYS=TRDOS\nROM=SLOT2\n";
+    const IniResult r      = ini_parse(text.c_str(), static_cast<uint32_t>(text.size()), s);
+    CHECK_EQ(r.applied, 2u);
+    CHECK_EQ(s.rom, static_cast<uint8_t>(RomSource::Slot2));
+    CHECK_EQ(custom_rom_slot(s), 2u);
+    const uint32_t i_rom = field_index(&Settings::rom);
+    CHECK((settings_active_mask(s) & (uint64_t{1} << i_rom)) != 0);
+
+    s.disksys = static_cast<uint8_t>(DiskSys::DivMmc);
+    CHECK_EQ(custom_rom_slot(s), 0u);
+    CHECK((settings_active_mask(s) & (uint64_t{1} << i_rom)) == 0);
+
+    s.rom = 9;
+    settings_clamp(s);
+    CHECK_EQ(s.rom, static_cast<uint8_t>(RomSource::Board));
+
+    // TR-DOS (Beta Disk платы): своё ПЗУ разрешено; последнее значение
+    // переживает приведение, следующее за ним - уже ни одной системы. BDI -
+    // не режим, а часть TRDOS.
+    Settings b;
+    const std::string bt = "DISKSYS=TRDOS\nROM=SLOT1\nDISKSYS=BDI\n";
+    CHECK_EQ(ini_parse(bt.c_str(), static_cast<uint32_t>(bt.size()), b).applied, 2u);
+    CHECK_EQ(b.disksys, static_cast<uint8_t>(DiskSys::TrDos));
+    CHECK_EQ(custom_rom_slot(b), 1u);
+    CHECK(!usb_medium_needed(b));
+    settings_clamp(b);
+    CHECK_EQ(b.disksys, static_cast<uint8_t>(DiskSys::TrDos));
+    b.disksys = static_cast<uint8_t>(DiskSys::TrDos) + 1u;
+    settings_clamp(b);
+    CHECK_EQ(b.disksys, static_cast<uint8_t>(DiskSys::None));
+    // Каждое имя таблицы разбирается в своё значение.
+    for (const Named& n : kDiskSysNames) {
+        Settings v;
+        const std::string line = std::string("DISKSYS=") + n.name + "\n";
+        CHECK_EQ(ini_parse(line.c_str(), static_cast<uint32_t>(line.size()), v).applied, 1u);
+        CHECK_EQ(v.disksys, n.value);
+    }
+}
+
+// Меню конфигуратора: каждое поле показано ровно одним пунктом, надписи и
+// подсказки влезают в экран, переходы ведут на существующие экраны.
+void test_menu_tree() {
+    uint8_t shown[64]         = {};
+    uint8_t tools[kToolCount] = {};
+    for (uint32_t m = 0; m < kMenuCount; ++m) {
+        const MenuDesc& d = kMenus[m];
+        CHECK(d.count + (m == kMenuMain ? kMenuMainTop : kMenuSubTop) <= kMenuRowsMax);
+        // Подменю начинается пунктом назад.
+        if (m != kMenuMain) CHECK(d.items[0].type == MenuItemType::Back);
+        CHECK(d.title != nullptr);
+        for (uint32_t n = 0; n < d.count; ++n) {
+            const MenuItemDesc& it = d.items[n];
+            const uint8_t field    = it.key == nullptr ? kNoField : config_field_by_name(it.key);
+            if (it.key != nullptr) CHECK(field != kNoField);
+            if (it.type != MenuItemType::Blank && it.type != MenuItemType::Header) {
+                CHECK(it.label != nullptr && std::strlen(it.label) <= kMenuLabelMax);
+                CHECK(it.help != nullptr && std::strlen(it.help) <= kMenuHelpMax);
+            }
+            if (it.type == MenuItemType::Submenu) CHECK(it.menu < kMenuCount && it.menu != m);
+            if (it.type == MenuItemType::Tool) {
+                CHECK(it.menu != 0 && it.menu < kToolCount);
+                CHECK_EQ(field, kNoField);
+                if (it.menu < kToolCount) ++tools[it.menu];
+            }
+            if (it.type == MenuItemType::Field && field < kPageFieldCount) ++shown[field];
+            if (it.type == MenuItemType::KeyRow && field + 1u < kPageFieldCount) {
+                ++shown[field];
+                ++shown[field + 1u];
+            }
+        }
+    }
+    for (uint32_t i = 0; i < kPageFieldCount; ++i) {
+        CHECK_EQ(shown[i], 1u);
+    }
+    // Каждый инструмент - ровно одним пунктом.
+    for (uint32_t t = 1; t < kToolCount; ++t) {
+        CHECK_EQ(tools[t], 1u);
+    }
+    // В списке выбора ПЗУ область 2 названа своим файлом, область 1 - номером.
+    Settings s;
+    std::strcpy(s.rom_file[1], "QUORUM.ROM");
+    CHECK_EQ(std::strcmp(config_choice_name(s, Kind::Rom, 1), "SLOT1"), 0);
+    CHECK_EQ(std::strcmp(config_choice_name(s, Kind::Rom, 2), "QUORUM.ROM"), 0);
+}
+
+// Экран инструмента: кольцо нажатий, строки добиты пробелами, счётчик
+// обновлений растёт.
+void test_tool_screen() {
+    static uint8_t page[kConfigPageBytes];
+    tool_area_reset(page);
+    ToolScreen scr(page);
+    ToolArea& a = scr.area();
+    CHECK_EQ(a.cur_row, kToolNoCursor);
+    CHECK_EQ(a.text[0][0], ' ');
+    uint8_t k = 0;
+    CHECK(!scr.key(k, ToolId::CardInfo));
+    // ПЗУ кладёт два нажатия.
+    a.tool    = static_cast<uint8_t>(ToolId::CardInfo);
+    a.keys[0] = kToolKeyOpen;
+    a.keys[1] = kToolKeyDown;
+    a.req     = 2;
+    CHECK(scr.tool() == ToolId::CardInfo);
+    // Чужой потребитель нажатий открытого экрана не трогает.
+    CHECK(!scr.key(k, ToolId::AtTerminal));
+    CHECK_EQ(a.ack, 0u);
+    CHECK(scr.key(k, ToolId::CardInfo));
+    CHECK_EQ(k, kToolKeyOpen);
+    CHECK(scr.key(k, ToolId::CardInfo));
+    CHECK_EQ(k, kToolKeyDown);
+    CHECK(!scr.key(k, ToolId::CardInfo));
+    CHECK_EQ(a.ack, 2u);
+
+    const uint8_t upd = a.upd;
+    scr.putf(3, kToolYellow, "FREE %u", 12u);
+    scr.publish();
+    CHECK_EQ(a.upd, static_cast<uint8_t>(upd + 1u));
+    CHECK(std::memcmp(a.text[3], " FREE 12 ", 9) == 0);
+    CHECK_EQ(a.text[3][kToolCols - 1u], ' ');
+    CHECK_EQ(a.attr[3], kToolYellow);
+    // Непечатное заменяется, длинное обрезается по ширине.
+    const char odd[] = {'A', 1, 'B', 0};
+    scr.put(4, odd);
+    CHECK(std::memcmp(a.text[4], " A?B", 4) == 0);
+    scr.put(5, "0123456789012345678901234567890123456789");
+    CHECK_EQ(a.text[5][kToolTextCols], '7');
+    CHECK_EQ(a.text[5][kToolCols - 1u], ' ');
+    CHECK_EQ(a.text[6][0], ' ');
+    scr.progress(7, 50, 100);
+    CHECK(std::memcmp(a.text[7], " [##########..........]  50%", 28) == 0);
+
+    char size[16];
+    tool_size_text(size, sizeof(size), 7948206080ull);
+    CHECK_EQ(std::string(size), std::string("7.4 GB"));
+    tool_size_text(size, sizeof(size), 32768u);
+    CHECK_EQ(std::string(size), std::string("32 KB"));
+    // Кластер FAT12 флешки - 512 Б, не "0 KB".
+    tool_size_text(size, sizeof(size), 512u);
+    CHECK_EQ(std::string(size), std::string("512 B"));
+    tool_size_text(size, sizeof(size), 1023u);
+    CHECK_EQ(std::string(size), std::string("1023 B"));
+    tool_size_text(size, sizeof(size), 1024u);
+    CHECK_EQ(std::string(size), std::string("1 KB"));
+}
+
+// Терминал AT: заглавные вне кавычек, готовые команды стрелками, перенос
+// длинного ответа, отправленное - строкой своим цветом.
+void test_at_terminal() {
+    static uint8_t page[kConfigPageBytes];
+    tool_area_reset(page);
+    ToolScreen scr(page);
+    AtTerminal t;
+    t.reset();
+    for (const char c : std::string("at+cwjap=\"Home\",\"pw\"")) {
+        CHECK(!t.key(static_cast<uint8_t>(c)));
+    }
+    CHECK(t.key(kToolKeyEnter));
+    CHECK_EQ(std::string(t.command()), std::string("AT+CWJAP=\"Home\",\"pw\""));
+    CHECK(!t.key(kToolKeyEnter)); // пустая строка не уходит
+    CHECK(!t.key(kToolKeyDown));
+    CHECK(t.key(kToolKeyEnter));
+    CHECK_EQ(std::string(t.command()), std::string("AT"));
+    CHECK(!t.key(kToolKeyUp));
+    CHECK(!t.key(kToolKeyDel));
+    CHECK(t.key(kToolKeyEnter));
+    CHECK_EQ(std::string(t.command()), std::string("AT+RESTOR"));
+
+    const char reply[] = "OK\r\n\r\n+CWLAP:(3,\"A very long network name here\",-67)\r\n";
+    t.feed(reinterpret_cast<const uint8_t*>(reply), sizeof(reply) - 1u);
+    t.render(scr);
+    ToolArea& a    = scr.area();
+    const auto row = [&](uint32_t i) { return std::string(a.text[i] + 1, kToolTextCols); };
+    CHECK_EQ(row(AtTerminal::kOutLines - 1u).substr(0, 18), std::string("rk name here\",-67)"));
+    CHECK_EQ(row(AtTerminal::kOutLines - 2u), std::string("+CWLAP:(3,\"A very long netwo"));
+    CHECK_EQ(row(AtTerminal::kOutLines - 3u).substr(0, 3), std::string("OK "));
+    CHECK_EQ(a.attr[AtTerminal::kOutLines - 4u], kToolCyan);
+    CHECK_EQ(a.cur_row, AtTerminal::kInputLine);
+    CHECK_EQ(a.cur_col, 3u);
+}
+
+// Раскладку страницы ПЗУ конфигуратора читает по ручной копии
+// frontend/config_rom/page.inc: каждое имя оттуда сверяется с платой.
+// Новое имя без строки здесь - тоже отказ.
+// Экраны TOOLS на стороне Core1 без носителей: USB на ПК нет, флешки нет.
+// Проверяется, когда экран публикуется и что с ним делают клавиши.
+void test_tools_serve() {
+    using player::config::tools_serve;
+    static uint8_t page[kConfigPageBytes];
+    tool_area_reset(page);
+    ToolScreen scr(page);
+    ToolArea& a      = scr.area();
+    const auto press = [&](uint8_t k) {
+        a.keys[a.req % kToolKeySlots] = k;
+        a.req                         = static_cast<uint8_t>(a.req + 1u);
+    };
+    const auto open = [&](ToolId t) {
+        a.tool = static_cast<uint8_t>(t);
+        press(kToolKeyOpen);
+    };
+    const auto line = [&](uint32_t i) { return std::string(a.text[i] + 1, kToolTextCols); };
+
+    // Памяти нет: на открытие - строка отказа, экран готов.
+    soundsinth::memory::Arena tiny;
+    static uint8_t tiny_buf[64];
+    tiny.base     = tiny_buf;
+    tiny.capacity = sizeof(tiny_buf);
+    tiny.floor    = sizeof(tiny_buf);
+    soundsinth::memory::TrackScratch no_mem{&tiny};
+    open(ToolId::BoardInfo);
+    uint8_t upd = a.upd;
+    tools_serve(page, no_mem);
+    CHECK_EQ(a.upd, static_cast<uint8_t>(upd + 1u));
+    CHECK(scr.state() == ToolState::Ready);
+    CHECK_EQ(line(0).substr(0, 23), std::string("NO MEMORY FOR THE TOOLS"));
+    CHECK_EQ(a.attr[0], kToolAlert);
+    // Без нажатий - ничего.
+    upd = a.upd;
+    tools_serve(page, no_mem);
+    CHECK_EQ(a.upd, upd);
+
+    static uint8_t pool[16384];
+    soundsinth::memory::Arena arena;
+    arena.base     = pool;
+    arena.capacity = sizeof(pool);
+    arena.floor    = sizeof(pool);
+    soundsinth::memory::TrackScratch scratch{&arena};
+    const auto serve = [&]() {
+        upd = a.upd;
+        tools_serve(page, scratch);
+        return static_cast<uint32_t>(static_cast<uint8_t>(a.upd - upd));
+    };
+
+    // Сведения о плате: кадр на открытие, затем раз в секунду.
+    open(ToolId::BoardInfo);
+    CHECK_EQ(serve(), 1u);
+    CHECK(scr.state() == ToolState::Ready);
+    g_test_time_us += 500000u;
+    CHECK_EQ(serve(), 0u);
+    g_test_time_us += 500000u;
+    CHECK_EQ(serve(), 1u);
+    CHECK_EQ(serve(), 0u);
+    // Забой закрывает экран с этой стороны: Closed и кадр.
+    press(kToolKeyDel);
+    CHECK_EQ(serve(), 1u);
+    CHECK(scr.state() == ToolState::Closed);
+    g_test_time_us += 2000000u;
+    CHECK_EQ(serve(), 0u);
+    // Забой и Enter без открытого экрана не делают ничего.
+    press(kToolKeyDel);
+    press(kToolKeyEnter);
+    CHECK_EQ(serve(), 0u);
+    CHECK(scr.state() == ToolState::Closed);
+
+    // Список USB: обновляется раз в секунду, закрытие от ПЗУ кадра не даёт.
+    open(ToolId::UsbInfo);
+    CHECK_EQ(serve(), 1u);
+    CHECK(scr.state() == ToolState::Ready);
+    g_test_time_us += 1000000u;
+    CHECK_EQ(serve(), 1u);
+    press(kToolKeyClose);
+    CHECK_EQ(serve(), 0u);
+    g_test_time_us += 1000000u;
+    CHECK_EQ(serve(), 0u);
+
+    // Проверка флешки без флешки: кадр отказа, дальше тишина; Enter и ESC
+    // ничего не меняют, экран остаётся открытым.
+    open(ToolId::UsbCheck);
+    CHECK_EQ(serve(), 1u);
+    CHECK(scr.state() == ToolState::Ready);
+    CHECK_EQ(line(0).substr(0, 11), std::string("NO USB DISK"));
+    g_test_time_us += 300000u;
+    CHECK_EQ(serve(), 0u);
+    press(kToolKeyEnter);
+    press(kToolKeyEsc);
+    CHECK_EQ(serve(), 0u);
+    CHECK(scr.state() == ToolState::Ready);
+    press(kToolKeyDel);
+    CHECK_EQ(serve(), 1u);
+    CHECK(scr.state() == ToolState::Closed);
+
+    // USB HID без устройств: кадр на открытие, без новых отчётов - тишина.
+    open(ToolId::UsbHid);
+    CHECK_EQ(serve(), 1u);
+    CHECK_EQ(line(0).substr(0, 18), std::string("NO USB HID DEVICES"));
+    g_test_time_us += 150000u;
+    CHECK_EQ(serve(), 0u);
+    press(kToolKeyClose);
+    CHECK_EQ(serve(), 0u);
+
+    // Экран терминала ведёт Core0: здесь он не обслуживается.
+    open(ToolId::AtTerminal);
+    CHECK_EQ(serve(), 0u);
+    a.tool = static_cast<uint8_t>(ToolId::None);
+    tool_area_reset(page);
+}
+
+void test_page_inc_matches_board() {
+    std::printf("test_page_inc_matches_board\n");
+    FILE* f = std::fopen("frontend/config_rom/page.inc", "r");
+    if (f == nullptr) {
+        std::printf("  SKIP (file not found): frontend/config_rom/page.inc\n");
+        return;
+    }
+    const struct {
+        const char* name;
+        uint32_t value;
+    } want[] = {
+        {"PAGE", 0x2000},
+        {"TM_UPD", offsetof(TermHeader, upd)},
+        {"TM_SHOWN", offsetof(TermHeader, shown)},
+        {"TM_REQ", offsetof(TermHeader, req)},
+        {"TM_ACK", offsetof(TermHeader, ack)},
+        {"TM_COUNT", offsetof(TermHeader, count)},
+        {"TM_KEYS", offsetof(TermHeader, keys)},
+        {"TM_SPANS", sizeof(TermHeader)},
+        {"TM_CHARS", 0x2000u + kTermCharsAt},
+        {"TM_ATTRS", 0x2000u + kTermAttrsAt},
+        {"TM_STARTS", 0x2000u + kTermStartsAt},
+        {"TM_KEY_SLOTS", kTermKeySlots},
+        {"TM_ALL", kTermAll},
+    };
+    char line[160];
+    uint32_t seen = 0;
+    while (std::fgets(line, sizeof(line), f) != nullptr) {
+        char name[48], expr[64];
+        if (std::sscanf(line, " %47[A-Z0-9_] .equ %63[^;\r\n]", name, expr) != 2) continue;
+        // Значение - число или "PAGE + число".
+        const char* plus = std::strchr(expr, '+');
+        const uint32_t v =
+            plus != nullptr ? 0x2000u + static_cast<uint32_t>(std::strtoul(plus + 1, nullptr, 0)) : static_cast<uint32_t>(std::strtoul(expr, nullptr, 0));
+        bool known = false;
+        for (const auto& w : want) {
+            if (std::strcmp(w.name, name) != 0) continue;
+            known = true;
+            if (v != w.value) std::printf("  %s: page.inc %u, board %u\n", name, static_cast<unsigned>(v), static_cast<unsigned>(w.value));
+            CHECK_EQ(v, w.value);
+        }
+        if (!known) std::printf("  %s: no board value in the test\n", name);
+        CHECK(known);
+        ++seen;
+    }
+    std::fclose(f);
+    CHECK_EQ(seen, static_cast<uint32_t>(sizeof(want) / sizeof(want[0])));
+}
+
 void run_config_tests() {
     std::printf("test_config\n");
+    test_wifi_texts();
     test_store_empty_flash();
     test_store_alternates_and_survives_torn_write();
     test_store_rejects_foreign_format();
@@ -640,23 +1033,28 @@ void run_config_tests() {
     test_ini_ignores_spaces_and_junk();
     test_ini_bad_lines_do_not_cancel_the_rest();
     test_ini_render_measures_when_it_does_not_fit();
+    test_ini_beeper_names();
     test_keyboard_off_is_a_layout();
     test_defaults_are_tsconfig();
     test_clamp();
     test_store_reads_shorter_payload();
     test_wire_midi_yields_to_wifi();
     test_usb_host_used_by_every_consumer();
-    test_page_round_trip();
-    test_page_rejects_foreign();
+    test_fields_round_trip();
     test_page_mask_follows_dependencies();
-    test_page_refresh_keeps_descriptors();
-    test_page_saved_snapshot_stays();
     test_store_block_without_records();
     test_store_records_unknown_and_short();
     test_store_records_bad_crc_keeps_fixed_part();
+    test_store_legacy_devices();
     test_ini_joy_keys();
     test_clamp_joy_keys();
-    test_page_joy_key_fields();
+    test_joy_key_fields();
+    test_custom_rom();
+    test_menu_tree();
+    test_tool_screen();
+    test_at_terminal();
+    test_tools_serve();
+    test_page_inc_matches_board();
 
     char text[kIniMaxBytes];
     const uint32_t len = ini_render(Settings{}, text, sizeof(text));

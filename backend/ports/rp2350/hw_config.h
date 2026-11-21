@@ -10,14 +10,18 @@
 //
 // --- Блоки PIO ---
 //
-//   pio0   детектор чтения памяти (SM0), автомат сборки адреса (SM1), трапы
-//          DivMMC (SM2). Пинов не ведут: вход PIO работает и по чужим
-//          пинам.
+//   pio0   DivMMC - детектор чтения памяти (SM0), сборка адреса (SM1),
+//          трапы (SM2); TR-DOS - отдача ПЗУ навигатора и отметка выборки;
+//          своё ПЗУ - отдача и вход в DOS; только порты - сторож сброса.
+//          ROM_BLK_N ведут rom_detect и rom_join (DivMMC) и отдача
+//          навигатора (TR-DOS), при своём ПЗУ - SIO.
 //   pio1   всё, что выставляет байт: пины D0..D7 и BUFF_OE_N привязаны к
 //          блоку, а привязка у PIO блочная. Детектор портов (SM0), захват
 //          записей (SM1), выдача байта (SM2).
-//   pio2   звук, склейщик портов, склейщики трапов (с DivMMC) или выдатчик
-//          DOS_N (с TR-DOS); все автоматы по остатку.
+//   pio2   звук и port_join (с TR-DOS - port_join_hold); DivMMC - trap_join
+//          и trap_route; TR-DOS - trdos_gate и dos_drive (вывод DOS_N);
+//          своё ПЗУ - paging_filter (фильтр 7FFD) и dos_drive. Все автоматы
+//          по остатку.
 //
 // Звуку нужен отдельный блок: i2s_out (GPIO 44-46) требует
 // pio_set_gpio_base(16), настройка блочная, а шинные автоматы читают
@@ -34,12 +38,26 @@
 //
 // --- Каналы DMA ---
 //
-// Всего 16, все по остатку: порты (адресный, указателей, ответчик), в
-// режиме DivMMC ещё чтение ПЗУ (таблица страниц и байт, по паре на
-// уровень) и трапы (семь), звук (ping/pong); с TR-DOS - один канал
-// триггера. Занятость в лог не печатается.
+// Всего 16, все по остатку: порты - три, звук - два (ping/pong); DivMMC -
+// ещё четыре на чтение памяти (таблица страниц и байт, по паре на
+// уровень) и семь на трапы; TR-DOS - два на ПЗУ навигатора; своё ПЗУ -
+// пять; только порты - канал выдачи байта. Занятость в лог не печатается.
 
 #include "hardware/pio.h"
+
+namespace bus {
+// Окно 8 КБ адресов Z80: ПЗУ DivMMC и навигатора на 0x0000-0x1FFF, банк их
+// ОЗУ на 0x2000-0x3FFF.
+inline constexpr uint32_t kZ80BankBytes = 0x2000u;
+} // namespace bus
+
+// ОЗУ DivMMC, 16 банков по 8 КБ: верх SRAM, адрес задаёт скрипт компоновщика.
+// Граница 64 КБ; банки 8-15 при Beta Disk платы заняты его кодом и данными.
+extern "C" uint8_t bus_divmmc_ram[16][bus::kZ80BankBytes];
+// Код Beta Disk - в тех банках: SOUNDSINTH_BDI_CODE (platform/compiler.h).
+// Таблицы шины и ПЗУ DivMMC: массив в своей секции .busmem.<имя>; порядок
+// секций и выравнивание держит скрипт компоновщика.
+#define SOUNDSINTH_BUSMEM(name) __attribute__((section(".busmem." name)))
 
 namespace bus {
 
@@ -56,10 +74,16 @@ inline PIO const PIO_WATCH         = pio1;
 inline PIO const PIO_AUDIO         = pio2;
 inline constexpr uint SM_BUS_WRITE = 1; // PIO1: захват записей в память и в порты
 inline constexpr uint SM_ROM_TRAP  = 2; // PIO0: трапы DivMMC по выборке команды
-// PIO0: решатель триггера TR-DOS. С DivMMC не бывает - там этот номер у
-// детектора чтения. Выдатчик уровня живёт в pio2 и берётся по остатку.
-inline constexpr uint SM_TRDOS_DETECT = 0;
-inline constexpr uint SM_PORT_DETECT  = 0; // PIO1: детектор чтения порта
+// PIO0: TR-DOS с ПЗУ машины - отдача ПЗУ навигатора и отметка выборки. Ни с
+// DivMMC, ни со своим ПЗУ не бывает: блок у них один. Решатель DOS и вывод
+// DOS_N живут в pio2 и берутся по остатку.
+inline constexpr uint SM_TRDOS_NAV   = 0;
+inline constexpr uint SM_TRDOS_FETCH = 1;
+inline constexpr uint SM_PORT_DETECT = 0; // PIO1: детектор чтения порта
+// PIO0: своё ПЗУ Пентагона. Ни с DivMMC, ни с триггером
+// TR-DOS не бывает: блок у них один.
+inline constexpr uint SM_PENTAGON_ROM = 0;
+inline constexpr uint SM_DOS_ENTER    = 1;
 
 // --- Приоритеты прерываний ---
 //
@@ -80,9 +104,10 @@ inline constexpr uint SM_PORT_DETECT  = 0; // PIO1: детектор чтени�
 inline constexpr uint8_t IRQ_PRIO_BUS_WR  = 0x40; // запись в порт
 inline constexpr uint8_t IRQ_PRIO_PORT_RD = 0x60; // чтение порта состоялось
 inline constexpr uint8_t IRQ_PRIO_RELAXED = 0x80; // звук, будильник сна Core1
+inline constexpr uint8_t IRQ_PRIO_BDI     = 0xa0; // поток Beta Disk: ядро ВГ93
 inline constexpr uint8_t IRQ_PRIO_USB     = 0xc0; // контроллер USB-хоста
-static_assert(IRQ_PRIO_BUS_WR < IRQ_PRIO_PORT_RD && IRQ_PRIO_PORT_RD < IRQ_PRIO_RELAXED && IRQ_PRIO_RELAXED < IRQ_PRIO_USB,
-              "the interrupt priority ladder is bus write, port read, audio, USB");
+static_assert(IRQ_PRIO_BUS_WR < IRQ_PRIO_PORT_RD && IRQ_PRIO_PORT_RD < IRQ_PRIO_RELAXED && IRQ_PRIO_RELAXED < IRQ_PRIO_BDI && IRQ_PRIO_BDI < IRQ_PRIO_USB,
+              "the interrupt priority ladder is bus write, port read, audio, Beta Disk, USB");
 
 // --- Линии DMA_IRQ ---
 //

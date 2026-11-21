@@ -31,6 +31,7 @@ enum class VoiceOp : uint8_t {
     FilterOff,         // slot
     SetFilter,         // slot, коэффициенты
     SetRoute,          // slot, flags - в discard, arg - посыл
+    ReleaseSustain,    // slot, x/y - обычная петля, z - цепочка точек Dpcm8, flags - петля есть
     ListClear,
     ListPush,     // arg - сколько номеров слотов в записи, сами номера - в slots
     ListRemoveAt, // arg - номер в списке
@@ -43,6 +44,7 @@ inline constexpr uint8_t kListPerCommand = 12;
 inline constexpr uint8_t kTriggerSounds  = 1u << 0; // нота звучит
 inline constexpr uint8_t kTriggerLoop    = 1u << 1; // петля годная
 inline constexpr uint8_t kTriggerHermite = 1u << 2; // эрмитова интерполяция
+inline constexpr uint8_t kTriggerSteps   = 1u << 3; // лесенка Paula
 
 struct VoiceCommand {
     VoiceOp op    = VoiceOp::Stop;

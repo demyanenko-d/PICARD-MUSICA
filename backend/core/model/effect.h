@@ -57,8 +57,14 @@ enum class Effect : uint8_t {
     PatternBreak, // MOD,XM Dxx / S3M,IT Cxx
 
     // --- MIDI-макросы (IT, расширение OpenMPT) ---
-    SetMidiMacro,    // S3M,XM,IT Zxx
-    SmoothMidiMacro, // IT \xx (расширение OpenMPT поверх Zxx)
+    // Zxx и \xx с параметром < 0x80: исполняется выбранный SFx-макрос
+    // (Song::sfx_macro, выбор - SetActiveMidiMacro), param - значение 0..127.
+    // Сглаживание \xx по тикам не реализовано, исполняется как Zxx.
+    SetMidiMacro, // S3M,XM,IT Zxx / IT \xx
+    // Zxx >= 0x80 с фиксированным фильтровым макросом: загрузчик IT уже
+    // разобрал текст макроса, param - значение 0..127.
+    SetFilterCutoff,
+    SetFilterResonance,
 
     // --- Расширенная семья: MOD/XM Exx, S3M/IT Sxx. Набор подкоманд один по
     // смыслу, опкоды у форматов разные ---

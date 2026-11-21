@@ -1,27 +1,13 @@
 /*
- * ui.h - экран приложения.
+ * ui.h - экран приложения, плеер 0.5.
  *
- * Раскладка на 32x24 знакоместа:
+ * Сверху дека (знакоместа 0..8): статус, формат, часы, CPU и CH, VU,
+ * прогресс, строка чипов, спектр, строка инфо, строка типа, кнопки. Под
+ * ней нижняя панель (строки 9..22) - файловый браузер шрифтом 6x8:
+ * строка 9 - путь, 10..22 - список.
  *
- *   0   ugly player              <плата>
- *   1   file: <имя>
- *   2   State: <статус>          time: <мм:сс / мм:сс>
- *   3   samp :N    patt :N    inst :N
- *   4   load :N    queue:N    total:N
- *   5   voice:N    cpu  :N%
- *   6
- *   7   <текущий каталог>
- *   8   каталог, шестнадцать строк
- *   ..
- *   23
- *
- * Строки 3-5 - три колонки одной ширины, числа стоят друг под другом.
- * Подписи дополнены пробелами перед двоеточием до шести знаков, по самой
- * длинной (queue/total/voice): одной ширины колонок мало, числа идут
- * сразу за подписью.
- *
- * Цвета те же, что в плагине: жёлтый - загрузка, зелёный - играет,
- * голубой - кончилось, красный - беда.
+ * Статичная часть деки - пререндер (res/deck.scr), динамика дорисовывается
+ * поверх.
  */
 
 #ifndef UI_H
@@ -29,59 +15,45 @@
 
 #include "fw.h"
 
-#define UI_ROW_TITLE   0
-#define UI_ROW_FILE    1
-#define UI_ROW_STATE   2
-#define UI_ROW_COUNTS  3
-#define UI_ROW_LOAD    4
-#define UI_ROW_VOICES  5
-#define UI_ROW_ERROR   6   /* последний отказ открытия; телеметрия её не трогает */
-#define UI_ROW_PATH    7
-#define UI_ROW_LIST    8
-#define UI_LIST_ROWS   16
-
-/** Колонки строк 3-5. Ширина 10 плюс пробел - три штуки ровно на 32. */
-#define UI_COL1        0
-#define UI_COL2        11
-#define UI_COL3        22
-
-/* Цвета - чернила по чёрной бумаге. */
-#define UI_ATTR_TITLE  (FW_INK(FW_WHITE) | FW_BRIGHT)
-#define UI_ATTR_PLAIN  FW_INK(FW_WHITE)
-#define UI_ATTR_LOAD   FW_INK(FW_YELLOW)
-#define UI_ATTR_PLAY   (FW_INK(FW_GREEN) | FW_BRIGHT)
-#define UI_ATTR_DONE   (FW_INK(FW_CYAN) | FW_BRIGHT)
-#define UI_ATTR_ALARM  (FW_INK(FW_RED) | FW_BRIGHT)
-
-/* Каталог: чёрным по серому, выбранная строка наоборот. */
-#define UI_ATTR_LIST   (FW_INK(FW_BLACK) | FW_PAPER(FW_WHITE))
-#define UI_ATTR_CURSOR (FW_INK(FW_WHITE) | FW_PAPER(FW_BLACK) | FW_BRIGHT)
-/* Играющая запись: жёлтая строка. Под курсором бумага чёрная, и жёлтыми
-   становятся буквы - иначе курсор прятал бы признак. */
-#define UI_ATTR_LIST_PLAY   (FW_INK(FW_BLACK) | FW_PAPER(FW_YELLOW))
-#define UI_ATTR_CURSOR_PLAY (FW_INK(FW_YELLOW) | FW_PAPER(FW_BLACK) | FW_BRIGHT)
+#define UI_LIST_ROWS   13
+#define UI_PATH_CHARS  40   /* символов 6x8 в строке браузера */
 
 void ui_init(void);
 
-/** Написать строку с колонок, добив пробелами до конца поля. */
-void ui_field(u8 x, u8 y, u8 width, const char *text, u8 attr);
-
-/** То же, но значением служит число. */
-void ui_field_num(u8 x, u8 y, u8 width, const char *label, u16 value, u8 attr);
-/* То же плюс до marks восклицательных знаков после числа: столько
-   уровней сброса голосов из-за перегрузки. */
-void ui_field_num_marks(u8 x, u8 y, u8 width, const char *label, u16 value, u8 marks, u8 attr);
-
-/** Перерисовать всё, что приехало с платы. */
+/** Перерисовать то, что приехало с платы; не чаще раза в кадр. */
 void ui_update(void);
 
-/** Строка с текущим каталогом. */
-void ui_draw_path(const char *path);
+/** Строка с текущим каталогом, len - длина path; длинный - хвостом. */
+void ui_draw_path(const char *path, u8 len);
+
+/* Цвет строки списка, mark: биты курсора и играющего. */
+#define UI_MARK_CURSOR  1
+#define UI_MARK_PLAYING 2
 
 /** Одна строка списка: i - номер строки на экране, 0..UI_LIST_ROWS-1. */
-void ui_draw_entry(u8 i, const char *name, u8 is_dir, u8 selected, u8 playing);
+void ui_draw_entry(u8 i, const char *name, u8 is_dir, u8 mark);
 
-/** Сообщение о беде вместо времени. */
+/** Только цвет строки i, текст не трогается. */
+void ui_entry_attr(u8 i, u8 mark);
+
+/** Сдвинуть список на строку: down - строки 1..12 на место 0..11, иначе
+    0..11 на 1..12. Освободившуюся строку рисует вызывающий. */
+void ui_scroll_list(bool_t down);
+
+/** Запущен файл: формат по расширению, имя и размер - в строку инфо.
+    name должен жить, пока файл играет. */
+void ui_set_file(const char *name, u32 size);
+
+/** Режим повтора 0..3: всё, один, шафл, один раз - значок на деке. */
+void ui_set_repeat(u8 mode);
+
+/** Кнопка горит 0.14 с: NEXT - >> зелёным (смена трека), FORWARD - >>
+    жёлтым (F), REPEAT - режим зелёным (M). */
+enum { UI_FLASH_NEXT, UI_FLASH_FORWARD, UI_FLASH_REPEAT };
+void ui_flash(u8 what);
+
+/** Сообщение о беде: ERROR в строке типа, текст в строке инфо; до
+    следующего файла. text должен жить до тех пор. */
 void ui_alarm(const char *text);
 
 #endif /* UI_H */

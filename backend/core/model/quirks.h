@@ -197,6 +197,20 @@ enum QuirkBit : QuirkFlags {
     kQuirkGxxSharesPortaMemory = 1ull << 43, // IT
     // TonePorta колонки громкости: скорость по таблице IT (param 0..9), а не param*16, как у XM.
     kQuirkItVolColumnPortaTable = 1ull << 44, // IT
+    // Без интерполяции, лесенкой, как Paula Амиги: родной отсчёт держится до
+    // следующего. Только Raw8. Не из файла: ставит движок у MOD при
+    // MOD_INTERPOLATION=0.
+    kQuirkPaulaSteps = 1ull << 45, // MOD по настройке
+    // Note-Trigger: инструмент без своего среза/резонанса (бит 0x80) не
+    // сбрасывает канальные значения - их мог поставить Zxx; как OpenMPT
+    // (InstrumentChange ставит только при IsCutoffEnabled). У прочих
+    // форматов и .mid - сброс в открытый срез и нулевой резонанс.
+    kQuirkItFilterRetain = 1ull << 46, // IT
+    // Модуль карты General Sound: звучит как у карты - каналы 0 и 1 слева,
+    // 2 и 3 справа, без сужения MOD_PANNING, без интерполяции (лесенкой, как
+    // её эффекты). Не из файла: ставит мост GS после разбора; загрузчик
+    // задаёт quirks заново на каждой загрузке.
+    kQuirkGsModule = 1ull << 47, // модуль GS
 };
 
 // Отдельный набор под Pattern Loop/Break/Jump: не бит на трекер, а

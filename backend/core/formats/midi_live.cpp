@@ -293,7 +293,7 @@ uint16_t LiveMidi::alloc_sample(void* self, uint16_t bank_sample) {
     return rec;
 }
 
-void LiveMidi::retire_records() {
+void LiveMidi::retire_records(bool one_more) {
     Converter& cv = *cv_;
     ++retire_calls_;
     // Записи, на которые ссылаются keymap живых инструментов.
@@ -309,7 +309,7 @@ void LiveMidi::retire_records() {
             if (r < kLiveMaxSamples) referenced[r / 32u] |= 1u << (r % 32u);
         }
     }
-    while (records_free_ + records_leaving_ < 2u * kLiveRecordReserve) {
+    for (; one_more || records_free_ + records_leaving_ < 2u * kLiveRecordReserve; one_more = false) {
         uint16_t oldest        = 0xffff;
         retire_record_visits_ += kLiveMaxSamples;
         for (uint16_t r = 0; r < kLiveMaxSamples; ++r) {
@@ -332,6 +332,16 @@ void LiveMidi::retire_records() {
             record_retired(oldest);
         }
     }
+}
+
+void LiveMidi::free_pcm() {
+    const uint32_t before = records_retired_;
+    retire_records(true);
+    if (records_retired_ != before) return;
+    const uint16_t victim = pick_victim(0xffff);
+    if (victim == 0xffff) return;
+    evict(victim);
+    retire_records(true);
 }
 
 void LiveMidi::record_retired(uint16_t song_sample) {

@@ -16,6 +16,10 @@ void player::hal::audio_out_set_silent(bool silent) {
     rp2350::audio::i2s_sink_set_silent(silent);
 }
 
+uint64_t player::hal::audio_out_rate_mhz() {
+    return rp2350::audio::i2s_sink_rate_mhz();
+}
+
 uint32_t player::hal::audio_out_underruns() {
     return rp2350::audio::i2s_sink_underrun_count();
 }

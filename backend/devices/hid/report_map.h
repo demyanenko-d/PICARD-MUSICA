@@ -70,9 +70,32 @@ struct ReportMap {
 
     bool has_axes() const;
 
-    Field& field(Axis a) { return axis[static_cast<uint8_t>(a)]; }
-    const Field& field(Axis a) const { return axis[static_cast<uint8_t>(a)]; }
+    constexpr Field& field(Axis a) { return axis[static_cast<uint8_t>(a)]; }
+    constexpr const Field& field(Axis a) const { return axis[static_cast<uint8_t>(a)]; }
 };
+
+// Карта загрузочной мыши: кнопки разрядами 0..2, затем X, Y и колесо по
+// байту со знаком. Раскладка задана спецификацией и одинакова у всех;
+// колеса в отчёте из трёх байт просто нет.
+constexpr ReportMap boot_mouse_map() {
+    ReportMap m{};
+    m.button_count = 3;
+    for (uint8_t i = 0; i < 3; ++i) {
+        m.button[i].bit_offset = i;
+    }
+    Field x{};
+    x.bit_size                      = 8;
+    x.bit_offset                    = 8;
+    x.logical_min                   = -127;
+    x.logical_max                   = 127;
+    m.field(Axis::X)                = x;
+    m.field(Axis::Y)                = x;
+    m.field(Axis::Y).bit_offset     = 16;
+    m.field(Axis::Wheel)            = x;
+    m.field(Axis::Wheel).bit_offset = 24;
+    return m;
+}
+inline constexpr ReportMap kBootMouseMap = boot_mouse_map();
 
 // Разобрать дескриптор. false - пригодных полей не нашлось или разборщик
 // отказал. Не из прерывания: проход по дескриптору это микросекунды, но
@@ -84,10 +107,28 @@ bool report_map_build(const uint8_t* desc, uint16_t len, ReportMap& out);
 // отчёта лечится иначе, чем незнакомая страница назначений.
 uint8_t report_map_last_error();
 
-// Карта загрузочной мыши: кнопки разрядами 0..2, затем X и Y по байту со
-// знаком. Нужна, когда дескриптор не разобрался, - раскладка задана
-// спецификацией и одинакова у всех.
-void report_map_boot_mouse(ReportMap& out);
+// Длина отчёта в байтах, которой хватает на все поля карты, с номером
+// отчёта. По ней видно, что устройство шлёт загрузочный отчёт, а не по
+// дескриптору: загрузочный короче. Ноль - полей нет.
+uint16_t report_map_bytes(const ReportMap& map);
+
+// Номер отчёта указателя: по оси X, без неё - по первой кнопке. Решает
+// номер, а не прочитанная ось: ось короткого отчёта не читается, а кнопки
+// в нём есть.
+inline uint8_t pointer_report_id(const ReportMap& m) {
+    const Field& x = m.field(Axis::X);
+    return x.present() ? x.report_id : (m.button_count != 0 ? m.button[0].report_id : 0);
+}
+
+// Отчёт этого номера (у карты без номеров - любой).
+inline bool report_id_matches(uint8_t report_id, const uint8_t* report, uint16_t len) {
+    return report != nullptr && (report_id == 0 || (len != 0 && report[0] == report_id));
+}
+
+// Страница и назначение верхней коллекции дескриптора: мышь (1, 2),
+// джойстик (1, 4), геймпад (1, 5), клавиатура (1, 6). false - коллекции
+// нет или дескриптор оборван.
+bool report_top_usage(const uint8_t* desc, uint16_t len, uint16_t& page, uint16_t& usage);
 
 // Достать поле из сырого отчёта. false - отчёт не того номера, короче
 // нужного или поля нет. Знак расширяется по ширине поля.

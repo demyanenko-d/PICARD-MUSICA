@@ -10,6 +10,7 @@
 #include <cstdint>
 
 #include "platform/compiler.h"
+
 #include "core/bank/bank_codec.h"
 #include "core/bank/bank_format.h"
 #include "core/memory/psram_store.h"

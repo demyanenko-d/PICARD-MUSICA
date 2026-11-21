@@ -59,6 +59,7 @@ public:
 
     uint32_t tell() const { return pos_; }
     uint32_t size() const { return src_.size(src_.self); }
+    const ByteSource& source() const { return src_; }
 
     // Липкий флаг: становится false при первом недочтении или неудачном
     // seek и больше не сбрасывается. Загрузчику достаточно одной проверки

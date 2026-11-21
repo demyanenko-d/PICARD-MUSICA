@@ -3,8 +3,8 @@
 
 // Эмуляция General Sound на уровне регистров и системы команд.
 //
-// Здесь только протокол, без звука. Музыку делает трекер: модуль уходит
-// платформе. Эффекты (#38/#3E) не поддержаны.
+// Здесь только протокол, без звука: модуль уходит платформе и играет
+// трекером, эффекты автомат отдаёт заявками (Event::FxPlay и соседние).
 //
 // --- Четыре регистра, два адреса ---
 //
@@ -18,11 +18,14 @@
 //
 // --- Бит команды ---
 //
-// Простые команды его не взводят: ответ готов сразу, софт ждёт нуля в D0 (без
-// карты чтение даёт 0xFF, бит стоит всегда). Долгие команды держат бит, пока
-// платформа не отпустит. Срок у обработчика есть: ответ ложится в таблицу до
-// GD - около 33 тактов Z80 после OUT (2.4 мкс на 14 МГц), удержание - до
-// первого чтения состояния, около 11 тактов. Поэтому методы - в SRAM.
+// Автомат простыми командами его не взводит: ответ готов по возврате из
+// write_command, софт ждёт нуля в D0 (без карты чтение даёт 0xFF, бит стоит
+// всегда). Долгие команды держат бит, пока платформа не отпустит.
+//
+// Команды и аргументы разбирает основной поток, из флеша. Бит на время
+// разбора держит платформа: взводит на записи в порт, до первого чтения
+// состояния - около 11 тактов Z80 после OUT (0.8 мкс на 14 МГц). В SRAM
+// только то, что зовёт обработчик порта: чтение ответа и байт потока.
 //
 // --- Ответ длиной больше байта ---
 //
@@ -45,10 +48,6 @@ inline constexpr uint8_t kDataBit    = 0x80u;
 // молчит" (0x00).
 inline constexpr uint8_t kStatusIdle = 0x7eu;
 inline constexpr uint8_t kStatusData = 0xfeu;
-
-// Слотов под эффекты: у оригинала 32, у Unreal 64. Пока не используется:
-// эффекты не поддержаны.
-inline constexpr uint8_t kMaxFxSlots = 64;
 
 // Потолок громкости проигрывания модуля по руководству: #00..#40.
 inline constexpr uint8_t kModuleVolumeMax = 0x40u;
@@ -123,9 +122,9 @@ enum class Stream : uint8_t {
 
 // --- Проигрыватель MIDI, залитый плеером ---
 //
-// Карта только разбирает файл и расписывает его по кадрам, байты Спектрум
-// выдаёт битбангом в порт A AY, как линией MIDI OUT. Их играет живой MIDI
-// с порта AY.
+// Эмуляция карты разбирает .mid и отдаёт очередную порцию байт MIDI по
+// запросу; Спектрум выдаёт их битбангом в порт A AY, как линией MIDI OUT.
+// Их играет живой MIDI с порта AY.
 //
 // Команды блоба перекрывают обычные #00-#04, поэтому разбираются, только
 // пока он жив; любой другой код его кончает - так же устроен и сам блоб
@@ -260,15 +259,31 @@ public:
 
     // Сброс в состояние "карта только что включена".
     void reset();
+    // Сброс машины без остановки музыки (STOP_MUSIC_ON_RESET=0): обмен
+    // обрывается, как у карты по сбросу, - поток, хвост команды, ответ
+    // блоба, резидент, проигрыватель MIDI. Таблица эффектов и громкости
+    // остаются: музыка играет дальше.
+    void abort_exchange();
 
-    // --- Шинные обращения, все четыре из обработчика прерывания ---
+    // --- Шинные обращения ---
+    //
+    // Записи разбирает основной поток, по порядку прихода. Из обработчика
+    // порта - только stream_byte, read_status, read_data и peek_data, и
+    // только пока основной поток не внутри write_command или write_data.
 
     // OUT (0xBB).
     Event write_command(uint8_t value);
     // OUT (0xB3). true - байт потока: платформа кладёт его в свой приёмный
-    // буфер. Вызывается из обработчика прерывания, поэтому байт не
-    // копируется здесь никуда.
+    // буфер, здесь байт не копируется никуда.
     bool write_data(uint8_t value);
+    // OUT (0xB3) при открытом потоке, мимо разбора: true - байт принят как
+    // байт потока, false - писать через write_data.
+    bool stream_byte(uint8_t value) {
+        if (ex_.tail_left > 0 || stream_ == Stream::None) return false;
+        last_data_ = value;
+        ++stream_bytes_;
+        return true;
+    }
     // IN (0xBB). Удержание платформы добавляется к биту команды поверх
     // status_: ответ команды и чтение байта ответа его не стирают.
     uint8_t read_status() const { return (hold_reserve_ || hold_parse_) ? static_cast<uint8_t>(status_ | kCommandBit) : status_; }
@@ -301,16 +316,16 @@ public:
     // ноты". levels: громкость 0..64, автомат переводит её в отклонение от
     // средней точки #80, как делает карта.
     //
-    // Зовётся из потока, не с пути шины: блок ложится в запасной буфер, а
-    // обработчик берёт его при выдаче блока состояния.
+    // Блок ложится в запасной буфер, выдача блока состояния (#EE/#EF)
+    // берёт его копией.
     void set_telemetry(uint8_t order, uint8_t row, const uint8_t notes[kModuleChannels], const uint8_t levels[kModuleChannels], uint8_t speed, bool playing);
 
     // Принятый модуль: из него залитая плеером программа отдаёт паттерн по
     // номеру позиции. Указатель живёт, пока жив приёмный буфер; платформа
     // снимает его сбросом или новым потоком, передав nullptr.
     void set_module_image(const uint8_t* image, uint32_t length) {
-        module_image_ = image;
-        module_len_   = length;
+        resident_.module_image = image;
+        resident_.module_len   = length;
     }
 
     // --- Проигрыватель MIDI ---
@@ -323,40 +338,36 @@ public:
         midi_info_  = info;
     }
     // Порция байт очередного кадра, последним байтом #FF. Платформа готовит
-    // её заранее: плеер спрашивает раз в кадр и читает сразу, считать в
-    // прерывании нечего.
-    //
-    // Писатель (основной поток) и читатель (обработчик порта) на одном ядре:
-    // длина - признак "порция готова", и пишется после указателя с
-    // барьером компилятора, иначе обработчик увидел бы новую длину при
-    // прежнем указателе и отдал прошлую порцию второй раз.
+    // её заранее: плеер спрашивает раз в кадр и читает сразу. Ненулевая
+    // длина - порция готова. Пишет и читает разбор команд, один поток.
     void set_midi_frame(const uint8_t* bytes, uint16_t len) {
-        midi_frame_ = bytes;
-        std::atomic_signal_fence(std::memory_order_release);
-        midi_frame_len_ = len;
+        midi_.frame     = bytes;
+        midi_.frame_len = len;
     }
     // Готовая порция ещё не забрана: следующую собирать некуда - слотов
     // два, и второй отдаётся, пока собирается первый.
-    bool midi_frame_pending() const { return midi_frame_len_ != 0; }
-    // Блок состояния на 135 байт (#01) живёт здесь, в SRAM, а не в области
-    // GS: первые пятнадцать байт собираются по аргументу команды, то есть
-    // в прерывании, а писать в PSRAM оттуда нельзя. Остальное наполняет
+    bool midi_frame_pending() const { return midi_.frame_len != 0; }
+    // Блок состояния на 135 байт (#01) живёт в автомате: первые пятнадцать
+    // байт он собирает сам по аргументу команды, остальное наполняет
     // платформа прямо в этот буфер.
     uint8_t* midi_state_buffer() { return midi_state_; }
     // Признаки "дорожка только что играла" - по одному на дорожку. Из них
     // автомат собирает строки видимого окна списка.
     void set_midi_tracks(const uint8_t* flags, uint8_t count) {
-        midi_tracks_      = flags;
-        midi_track_count_ = count;
+        midi_.tracks      = flags;
+        midi_.track_count = count;
     }
     // Файл разобран - можно отвечать на пробу #02 нулём.
-    void set_midi_ready(bool ready) { midi_ready_ = ready; }
-    bool midi_active() const { return midi_active_; }
-    const MidiFileFacts& midi_facts() const { return midi_facts_; }
-    // Кадр забран, платформе готовить следующий. Читает и гасит основной
-    // поток, одним обменом: иначе просьба между чтением и гашением теряется.
-    bool take_midi_frame_request() { return midi_frame_wanted_.exchange(false, std::memory_order_acquire); }
-    bool midi_frame_wanted() const { return midi_frame_wanted_.load(std::memory_order_relaxed); }
+    void set_midi_ready(bool ready) { midi_.ready = ready; }
+    bool midi_active() const { return midi_.active; }
+    const MidiFileFacts& midi_facts() const { return blob_.facts; }
+    // Кадр забран, платформе готовить следующий. Чтение просьбу гасит.
+    bool take_midi_frame_request() {
+        const bool wanted  = midi_.frame_wanted;
+        midi_.frame_wanted = false;
+        return wanted;
+    }
+    bool midi_frame_wanted() const { return midi_.frame_wanted; }
     uint32_t midi_frames_served() const { return midi_frames_served_; }
     // Сколько раз плеер получил пустую порцию: следующая не успела.
     uint32_t midi_frames_empty() const { return midi_frames_empty_; }
@@ -365,10 +376,6 @@ public:
     uint16_t last_blob_len() const { return last_blob_len_; }
     uint32_t last_blob_crc() const { return last_blob_crc_; }
 
-    // Сколько места у платформы под сэмплы эффектов. Байты складывает она,
-    // автомат держит только таблицу: заливка идёт тем же потоком, что и
-    // модуль, и писать в PSRAM с горячего пути нельзя.
-    void set_fx_capacity(uint32_t bytes) { fx_capacity_ = bytes; }
     // Байты сэмплов ушли (область вернули треку): таблица забывается так
     // же, как по сбросу карты. Иначе #39 со старым номером запустил бы
     // голос по прежнему смещению - в то, что теперь лежит в области.
@@ -407,7 +414,6 @@ public:
     // Маска занятых без учёта доигравших - для тестов: занять каналы, не
     // запуская их.
     void set_fx_active(uint8_t mask) { fx_active_ = static_cast<uint8_t>(mask & kFxChannelMask); }
-    uint8_t fx_active() const { return fx_busy(); }
     // Разбор события: что запускать и что глушить.
     const FxStart& fx_start() const { return fx_start_; }
     uint8_t fx_stop_mask() const { return fx_stop_mask_; }
@@ -458,11 +464,11 @@ public:
     uint32_t pattern_served() const { return pattern_served_; }
     uint8_t last_pattern_pos() const { return last_pattern_pos_; }
     uint8_t last_pattern_num() const { return last_pattern_num_; }
-    uint32_t module_len() const { return module_len_; }
+    uint32_t module_len() const { return resident_.module_len; }
     // Байт блока состояния как он уйдёт в карту: журнал должен показывать
     // отданное, а не то, из чего оно получено.
     uint8_t telemetry_byte(uint8_t i) const { return i < sizeof(telemetry_) ? telemetry_[i] : 0u; }
-    bool resident_active() const { return resident_active_; }
+    bool resident_active() const { return resident_.active; }
 
     // Долгая работа держит бит команды, иначе плеер пойдёт дальше с
     // недогруженным треком. Флаг свой у резерва под приём (#30) и у разбора
@@ -484,9 +490,13 @@ private:
     void apply_status_link(uint8_t port);
     // Бросить ответ, хвост и блок прошлой команды.
     void drop_pending_exchange();
-    // Команды памяти карты #13..#1D.
+    // Части write_command: резидент (true - обслужил), эффекты (false -
+    // код не их), память карты #13..#1D и остальная прошивка.
+    bool resident_command(uint8_t value);
+    bool fx_command(uint8_t value, Event& event);
     Event card_memory_command(uint8_t value);
-    void arm_blob_answer(uint16_t addr);
+    Event firmware_command(uint8_t value);
+    void arm_blob_answer();
     void arm_pattern(uint8_t position);
     void take_tail(uint8_t value);
     void inner_write(uint8_t port, uint8_t value);
@@ -505,6 +515,8 @@ private:
     Event direct_play(uint8_t value);
     Event midi_command(uint8_t value);
     bool blob_is_midi() const;
+    // Начать узнавание заливки с нуля.
+    void blob_restart();
 
     // Ноль, а не kStatusIdle: ненулевой инициализатор кладёт весь объект в
     // .data. Рабочее значение ставит reset() до первого обращения с шины.
@@ -520,40 +532,51 @@ private:
     // прибавило бы 256 байт самому крупному объекту устройств.
     uint8_t cmd_hist_[256] = {};
 
-    // Аргумент команды - первый байт GSDAT до её подачи; 0, если его не было.
-    uint8_t arg_  = 0;
-    bool has_arg_ = false;
-    // В регистр данных записали, и никто ещё не забрал: бит данных взведён.
-    // Главный цикл прошивки регистр не читает, поэтому снимает его только
-    // команда. На этом Z-Player 5.1 опознаёт карту.
-    bool data_pending_ = false;
+    // Группы полей по сроку жизни сбрасываются присваиванием пустой
+    // структуры. Начальные значения всех полей нулевые: ненулевое увело бы
+    // объект в .data, рабочие ставит reset().
 
-    // --- Хвост команды ---
-    //
-    // Часть команд берёт байты и после кода (SC ... WC ... SD): #10 значение
-    // для порта, #6B старший байт длины, #13-#1C адреса и данные. Пока хвост
-    // не собран, запись в регистр данных - его байт, а не аргумент будущей
-    // команды. Новая команда недособранный хвост бросает: иначе её аргумент
-    // ушёл бы в чужой хвост, а сама она получила бы пустоту.
-    uint8_t tail_left_  = 0; // сколько байт хвоста ещё придёт; чей - last_cmd_
-    uint16_t tail_word_ = 0; // собранное: порт у #10, LEN у #14/#15, ADR.L у #17
-    // Регистр DE процессора карты для #18-#1B: плееры читают через него
-    // переменные ПЗУ карты (mem_peek).
-    uint16_t de_ = 0;
-    // Блок памяти карты после хвоста #14/#15, LEN байт. ОЗУ карты нет:
-    // принятые байты глотаются, отдаваемые - нули.
-    uint16_t sink_left_  = 0; // #14: сколько байт блока ещё проглотить
-    uint16_t zeros_left_ = 0; // #15: сколько нулей ещё отдать
+    // Обмен с машиной: аргумент, хвост, ответ.
+    struct Exchange {
+        // Аргумент команды - первый байт GSDAT до её подачи; 0, если его не было.
+        uint8_t arg  = 0;
+        bool has_arg = false;
+        // В регистр данных записали, и никто ещё не забрал: бит данных
+        // взведён. Главный цикл прошивки регистр не читает, поэтому снимает
+        // его только команда. На этом Z-Player 5.1 опознаёт карту.
+        bool data_pending = false;
 
-    // Регистр вывода - байт, который читается из GSDAT, когда отдавать
-    // больше нечего. ПЗУ карты при старте кладёт туда ноль (адрес #014B:
-    // XOR A / OUT (3),A), по нему софт после #F3 ждёт готовности карты.
-    uint8_t out_reg_ = 0;
+        // Хвост команды. Часть команд берёт байты и после кода (SC ... WC
+        // ... SD): #10 значение для порта, #6B старший байт длины, #13-#1C
+        // адреса и данные. Пока хвост не собран, запись в регистр данных -
+        // его байт, а не аргумент будущей команды. Новая команда
+        // недособранный хвост бросает: иначе её аргумент ушёл бы в чужой
+        // хвост, а сама она получила бы пустоту.
+        uint8_t tail_left  = 0; // сколько байт хвоста ещё придёт; чей - last_cmd_
+        uint16_t tail_word = 0; // собранное: порт у #10, LEN у #14/#15, ADR.L у #17
+        // Регистр DE процессора карты для #18-#1B: плееры читают через него
+        // переменные ПЗУ карты (mem_peek).
+        uint16_t de = 0;
+        // Блок памяти карты после хвоста #14/#15, LEN байт. ОЗУ карты нет:
+        // принятые байты глотаются, отдаваемые - нули.
+        uint16_t sink_left  = 0; // #14: сколько байт блока ещё проглотить
+        uint16_t zeros_left = 0; // #15: сколько нулей ещё отдать
 
-    // Ответ: байты и сколько ещё не отдано.
-    uint8_t resp_[16] = {};
-    uint8_t resp_n_   = 0;
-    uint8_t resp_pos_ = 0;
+        // Регистр вывода - байт, который читается из GSDAT, когда отдавать
+        // больше нечего. ПЗУ карты при старте кладёт туда ноль (адрес #014B:
+        // XOR A / OUT (3),A), по нему софт после #F3 ждёт готовности карты.
+        uint8_t out_reg = 0;
+
+        // Ответ: байты и сколько ещё не отдано.
+        uint8_t resp[16] = {};
+        uint8_t resp_n   = 0;
+        uint8_t resp_pos = 0;
+        // Кусок памяти без копии: паттерн принятого модуля, блоки
+        // проигрывателя MIDI.
+        const uint8_t* block_ptr = nullptr;
+        uint16_t block_left      = 0;
+    };
+    Exchange ex_ = {};
 
     Stream stream_         = Stream::None;
     uint32_t stream_bytes_ = 0;
@@ -592,13 +615,11 @@ private:
     uint8_t fx_count_           = 0;
     uint32_t fx_refused_        = 0; // #38 без места в таблице
     uint8_t fx_loading_         = kFxNone;
-    uint32_t fx_capacity_       = 0;
     // Приоритет того, что играет в канале: по нему #39 решает, можно ли
     // отнять канал.
     uint8_t fx_ch_priority_[kFxChannels] = {};
-    // Каналы, занятые запуском и не освобождённые #3A или сбросом. Пишет
-    // только обработчик шины.
-    volatile uint8_t fx_active_ = 0;
+    // Каналы, занятые запуском и не освобождённые #3A или сбросом.
+    uint8_t fx_active_ = 0;
     // Номер последнего запуска по каналу и номера доигравших от звука.
     uint16_t fx_seq_[kFxChannels]          = {};
     const std::atomic<uint16_t>* fx_ended_ = nullptr;
@@ -606,77 +627,85 @@ private:
     uint8_t fx_stop_mask_                  = 0;
     uint8_t fx_pending_handle_             = 0; // номер сэмпла, пока идёт хвост #88-#9B
     Event pending_event_                   = Event::None;
-    // Начальные значения ставит reset(): ненулевой инициализатор увёл бы
-    // объект в .data.
-    uint8_t module_volume_    = 0; // #2A и #35
-    uint8_t fx_master_volume_ = 0; // #2B
-    uint8_t fx_volume_        = 0; // #3D
-    uint8_t fx_volume_eff_    = 0; // та из двух, что записана последней
+    uint8_t module_volume_                 = 0; // #2A и #35
+    uint8_t fx_master_volume_              = 0; // #2B
+    uint8_t fx_volume_                     = 0; // #3D
+    uint8_t fx_volume_eff_                 = 0; // та из двух, что записана последней
 
-    // Узнавание заливаемой программы: три последних байта и признак того,
-    // что среди них попался вызов приёмника потока из ПЗУ карты.
-    uint32_t blob_window_ = 0;
-    bool blob_is_loader_  = false;
-    // Сумма и длина заливаемой программы - по ним она и опознаётся, а
-    // дальше вместо неё отдаётся готовый ответ.
-    uint32_t blob_crc_       = 0;
-    uint16_t blob_len_       = 0;
-    uint8_t blob_answer_[2]  = {};
-    uint8_t blob_answer_len_ = 0;
-    // Места, которые плеер правит под конкретный файл, идут в сумму нулём:
-    // иначе проигрыватель MIDI не опознать, на проводе он каждый раз свой.
-    uint8_t blob_skip_at_ = 0; // сколько таких мест уже пройдено
-    // Залит проигрыватель MIDI. Подмены у него нет, и признак нужен ровно
-    // затем, чтобы на пробу #02 ответить не нулём.
-    bool midi_blob_loaded_ = false;
-    // Блоб запущен и обслуживает свои команды.
-    bool midi_active_ = false;
-    bool midi_ready_  = false;
-    // Аргумент #01 приходит ВТОРЫМ байтом в порт команд, а не в порт
-    // данных: следующий код - это он, а не команда.
-    bool midi_await_state_arg_           = false;
-    MidiFileFacts midi_facts_            = {};
+    // Заливаемая программа: от #18 (адрес заливки) до следующего #18 или
+    // сброса.
+    struct Blob {
+        // Три последних байта и признак того, что среди них попался вызов
+        // приёмника потока из ПЗУ карты.
+        uint32_t window = 0;
+        // Сумма и длина - по ним программа и опознаётся, а дальше вместо неё
+        // отдаётся готовый ответ.
+        uint32_t crc       = 0;
+        uint16_t len       = 0;
+        uint8_t answer[2]  = {};
+        uint8_t answer_len = 0;
+        // Места, которые плеер правит под конкретный файл, идут в сумму
+        // нулём: иначе проигрыватель MIDI не опознать, на проводе он каждый
+        // раз свой.
+        uint8_t skip_at = 0; // сколько таких мест уже пройдено
+        bool is_loader  = false;
+        // Залит проигрыватель MIDI. Подмены у него нет, и признак нужен
+        // ровно затем, чтобы на пробу #02 ответить не нулём.
+        bool midi_loaded = false;
+        // Что плеер подставил в проигрыватель MIDI о файле.
+        MidiFileFacts facts = {};
+    };
+    Blob blob_ = {};
+
+    // Запущенный проигрыватель MIDI: до чужой команды или сброса.
+    struct Midi {
+        bool active = false; // обслуживает свои команды
+        bool ready  = false;
+        // Аргумент #01 приходит ВТОРЫМ байтом в порт команд, а не в порт
+        // данных: следующий код - это он, а не команда.
+        bool await_state_arg  = false;
+        const uint8_t* tracks = nullptr;
+        uint8_t track_count   = 0;
+        const uint8_t* frame  = nullptr;
+        uint16_t frame_len    = 0;
+        bool frame_wanted     = false;
+    };
+    Midi midi_ = {};
+    // Таблицы ставит платформа по разбору файла, сброс их не трогает.
     const uint8_t* midi_names_           = nullptr;
     const uint8_t* midi_info_            = nullptr;
     uint8_t midi_state_[kMidiStateBytes] = {};
-    const uint8_t* midi_tracks_          = nullptr;
-    uint8_t midi_track_count_            = 0;
-    const uint8_t* midi_frame_           = nullptr;
-    volatile uint16_t midi_frame_len_    = 0;
-    std::atomic<bool> midi_frame_wanted_{false};
-    uint32_t midi_frames_empty_  = 0;
-    uint16_t last_blob_len_      = 0;
-    uint32_t last_blob_crc_      = 0;
-    uint32_t midi_frames_served_ = 0;
+    uint32_t midi_frames_empty_          = 0;
+    uint16_t last_blob_len_              = 0;
+    uint32_t last_blob_crc_              = 0;
+    uint32_t midi_frames_served_         = 0;
 
-    // Залит резидент плеера: он отвечает на свои команды #ED/#EE/#EF и
+    // Залитый резидент плеера: отвечает на свои команды #ED/#EE/#EF и
     // живёт, пока не придёт чужая - тогда настоящий возвращается в прошивку,
     // и плеер заливает его заново.
-    bool resident_active_ = false;
+    struct Resident {
+        bool active = false;
+        // После блока состояния резидент ждёт ещё одну команду: #FF -
+        // больше ничего не надо, иначе это номер позиции и нужен паттерн.
+        bool await_pattern = false;
+        // Нота, отданная плееру в прошлый раз: по совпадению взводится бит
+        // "не менялось". 0xFF - не отдавали ещё ни разу.
+        uint8_t served_note[kModuleChannels] = {};
+        // Принятый модуль: паттерн длиннее буфера ответа, поэтому отдаётся
+        // прямо из приёмного буфера, без копии.
+        const uint8_t* module_image = nullptr;
+        uint32_t module_len         = 0;
+    };
+    Resident resident_ = {};
     // Счётчики поддиалога паттерна - только для журнала.
     uint32_t pattern_asks_    = 0;
     uint32_t pattern_served_  = 0;
     uint8_t last_pattern_pos_ = 0;
     uint8_t last_pattern_num_ = 0;
-    // После блока состояния резидент ждёт ещё одну команду: #FF - больше
-    // ничего не надо, иначе это номер позиции и нужен паттерн.
-    bool resident_await_pattern_ = false;
-    // Нота, отданная плееру в прошлый раз: по совпадению взводится бит
-    // "не менялось". 0xFF - не отдавали ещё ни разу.
-    uint8_t served_note_[kModuleChannels] = {};
     // Готовый блок состояния в порядке выдачи (смещения kTelemetry*).
     uint8_t telemetry_[kTelemetryBytes] = {};
-    // Блок, собранный потоком, и счётчик его записи: нечётный - запись идёт
-    // (обработчик вытеснил поток посреди неё), выдаётся прошлый блок.
+    // Блок, собранный set_telemetry; выдача #EE/#EF берёт его копией.
     uint8_t telemetry_staged_[kTelemetryBytes] = {};
-    volatile uint32_t telemetry_seq_           = 0;
-
-    // Принятый модуль и выдача куска из него: паттерн длиннее буфера
-    // ответа, поэтому отдаётся прямо из приёмного буфера, без копии.
-    const uint8_t* module_image_ = nullptr;
-    uint32_t module_len_         = 0;
-    const uint8_t* block_ptr_    = nullptr;
-    uint16_t block_left_         = 0;
 };
 
 } // namespace devices::gs

@@ -39,6 +39,7 @@ int s_reset_requests  = 0;
 int s_nmi_requests    = 0;
 int s_hard_requests   = 0;
 int s_config_requests = 0;
+int s_music_stops     = 0;
 } // namespace
 
 void devices::hal::host_reset_request() {
@@ -55,6 +56,10 @@ void devices::hal::host_hard_reset_request() {
 
 void devices::hal::host_configurator_request() {
     ++s_config_requests;
+}
+
+void devices::hal::host_music_stop_request() {
+    ++s_music_stops;
 }
 
 namespace {
@@ -338,7 +343,7 @@ void mouse_boot_tests() {
     // Загрузочная мышь приходит такой же картой, как разобранная, - жёстких
     // раскладок в переводе не осталось ни одной.
     ReportMap map;
-    report_map_boot_mouse(map);
+    map = kBootMouseMap;
     CHECK_EQ(static_cast<int>(map.button_count), 3);
     CHECK(map.axis[static_cast<uint8_t>(Axis::X)].present());
 
@@ -355,7 +360,7 @@ void mouse_boot_tests() {
 // вместо упора в предел счётчика.
 void mouse_tuning_tests() {
     ReportMap map;
-    report_map_boot_mouse(map);
+    map = kBootMouseMap;
 
     // Вдвое быстрее: приращение удваивается.
     usb_map_set_mouse(MouseTuning{8, false});
@@ -416,7 +421,7 @@ void mouse_tuning_tests() {
 // проверяется ровно срок и ровно кнопки.
 void mouse_autoswap_tests() {
     ReportMap map;
-    report_map_boot_mouse(map);
+    map                   = kBootMouseMap;
     const uint8_t both[4] = {0x03, 0, 0, 0};
     const uint8_t none[4] = {0x00, 0, 0, 0};
     const uint8_t left[4] = {0x01, 0, 0, 0};
@@ -505,6 +510,77 @@ void mouse_report_id_tests() {
     CHECK_EQ(mouse_page()[kMouseHiX], 5);
     CHECK_EQ(mouse_page()[kMouseHiY], 3);
     CHECK_EQ(mouse_page()[kMouseHiButtons], static_cast<uint8_t>(0xFF & ~kMouseButtonRight));
+}
+
+// clang-format off
+
+// Мышь с осями по 16 разрядов без номеров отчёта (многие игровые). Хост
+// переводит её в загрузочный протокол, и принявшая шлёт короткий отчёт.
+const uint8_t kMouse16[] = {
+    0x05, 0x01, 0x09, 0x02, 0xA1, 0x01, 0x09, 0x01, 0xA1, 0x00,
+    0x05, 0x09, 0x19, 0x01, 0x29, 0x03, 0x15, 0x00, 0x25, 0x01,
+    0x95, 0x03, 0x75, 0x01, 0x81, 0x02,
+    0x95, 0x01, 0x75, 0x05, 0x81, 0x01,
+    0x05, 0x01, 0x09, 0x30, 0x09, 0x31,
+    0x16, 0x01, 0x80, 0x26, 0xFF, 0x7F, 0x75, 0x10, 0x95, 0x02, 0x81, 0x06,
+    0xC0, 0xC0
+};
+
+// Пульт, у которого назначений кнопок четыре, а разрядов восемь: хвост -
+// поля Data со страницей Button без назначения. В покое они единицы.
+const uint8_t kPadButtonTail[] = {
+    0x05, 0x01, 0x09, 0x04, 0xA1, 0x01,
+    0x09, 0x30, 0x09, 0x31, 0x15, 0x00, 0x26, 0xFF, 0x00, 0x75, 0x08, 0x95, 0x02, 0x81, 0x02,
+    0x05, 0x09, 0x19, 0x01, 0x29, 0x04, 0x15, 0x00, 0x25, 0x01, 0x75, 0x01, 0x95, 0x08, 0x81, 0x02,
+    0xC0
+};
+// clang-format on
+
+void boot_protocol_tests() {
+    // Длина по дескриптору: номер, байт кнопок, X, Y. Загрузочный отчёт
+    // короче - по нему хост и выбирает загрузочную раскладку.
+    ReportMap with_id;
+    CHECK(report_map_build(kMouseWithId, sizeof(kMouseWithId), with_id));
+    CHECK_EQ(static_cast<int>(report_map_bytes(with_id)), 4);
+    ReportMap wide;
+    CHECK(report_map_build(kMouse16, sizeof(kMouse16), wide));
+    CHECK_EQ(static_cast<int>(report_map_bytes(wide)), 5);
+
+    // Загрузочная раскладка: кнопки, dx, dy, колесо.
+    const ReportMap& boot = kBootMouseMap;
+    mouse_reset();
+    const uint8_t r[4] = {0x01, 0x05, 0xFE, 0x00};
+    usb_map_mouse(boot, r, sizeof(r));
+    CHECK_EQ(mouse_page()[kMouseHiX], 5);
+    CHECK_EQ(mouse_page()[kMouseHiY], 2);
+    CHECK_EQ(mouse_page()[kMouseHiButtons], static_cast<uint8_t>(0xFF & ~kMouseButtonLeft));
+
+    // Короткий отчёт под картой дескриптора: оси не читаются, а кнопки
+    // обязаны дойти - "отчёт мой" решает номер, а не прочитанная ось.
+    mouse_reset();
+    const uint8_t only_buttons[1] = {0x02};
+    usb_map_mouse(wide, only_buttons, sizeof(only_buttons));
+    CHECK_EQ(mouse_page()[kMouseHiButtons], static_cast<uint8_t>(0xFF & ~kMouseButtonRight));
+
+    // Верхняя коллекция: по ней берётся роль интерфейса без протокола.
+    uint16_t page  = 0;
+    uint16_t usage = 0;
+    CHECK(report_top_usage(kMouseWithId, sizeof(kMouseWithId), page, usage));
+    CHECK_EQ(static_cast<int>(page), 1);
+    CHECK_EQ(static_cast<int>(usage), 2);
+    CHECK(report_top_usage(kGamepad, sizeof(kGamepad), page, usage));
+    CHECK_EQ(static_cast<int>(usage), 5);
+    CHECK(report_top_usage(kPadButtonTail, sizeof(kPadButtonTail), page, usage));
+    CHECK_EQ(static_cast<int>(usage), 4);
+
+    // Хвост кнопок без назначения не кнопки: иначе FIRE зажат в покое.
+    ReportMap pad;
+    CHECK(report_map_build(kPadButtonTail, sizeof(kPadButtonTail), pad));
+    CHECK_EQ(static_cast<int>(pad.button_count), 4);
+    joystick_reset();
+    const uint8_t idle[3] = {0x80, 0x80, 0xF0};
+    usb_map_gamepad(pad, idle, sizeof(idle));
+    CHECK_EQ(joystick_state(), 0);
 }
 
 void gamepad_tests() {
@@ -633,6 +709,72 @@ void keyboard_descriptor_tests() {
     const uint8_t rollover[8] = {0x02, 0x00, 0x00, 0x01, 0x01, 0x01, 0x01, 0x01};
     usb_map_keyboard(map, rollover, sizeof(rollover));
     CHECK_EQ(keyboard_page()[0x00], 0xFF);
+}
+
+// Загрузочный отчёт короче восьми байт отвергается целиком: матрица и
+// сигналы прежние, даже если коды в нём прочитать можно.
+void keyboard_boot_short_tests() {
+    keyboard_reset();
+    usb_map_keyboard_release_all();
+    kbd_report(0);
+    const ReportMap none;
+
+    kbd_report(0, 0x04); // A
+    CHECK_EQ(kbd_read(0xFD), 0xFE);
+    // Семь байт без клавиш: отпускания нет.
+    const uint8_t up7[7] = {0, 0, 0, 0, 0, 0, 0};
+    usb_map_keyboard(none, up7, sizeof(up7));
+    CHECK_EQ(kbd_read(0xFD), 0xFE);
+    kbd_report(0);
+
+    // Три байта с кодом B: нажатия нет.
+    const uint8_t b3[3] = {0, 0, 0x05};
+    usb_map_keyboard(none, b3, sizeof(b3));
+    CHECK_EQ(kbd_read(0x7F), 0xFF);
+
+    // F11 в коротком отчёте сигнала не подаёт.
+    const int nmi0       = s_nmi_requests;
+    const uint8_t f11[7] = {0, 0, 0x44, 0, 0, 0, 0};
+    usb_map_keyboard(none, f11, sizeof(f11));
+    CHECK_EQ(s_nmi_requests - nmi0, 0);
+    kbd_report(0, 0x44);
+    CHECK_EQ(s_nmi_requests - nmi0, 1);
+    kbd_report(0);
+
+    // Отчёт с номером под картой дескриптора разбирается и короче восьми
+    // байт: правило длины - только у загрузочной раскладки.
+    ReportMap map;
+    CHECK(report_map_build(kKeyboardWithId, sizeof(kKeyboardWithId), map));
+    const uint8_t r4[4] = {0x02, 0x00, 0x00, 0x05}; // номер, модификаторы, запас, B
+    usb_map_keyboard(map, r4, sizeof(r4));
+    CHECK_EQ(kbd_read(0x7F), 0xEF);
+    kbd_report(0);
+}
+
+// Разбор по дескриптору и загрузочная раскладка дают одну матрицу: тот же
+// отчёт, с номером и без, при любом байте модификаторов.
+void keyboard_map_matches_boot_tests() {
+    ReportMap map;
+    CHECK(report_map_build(kKeyboardWithId, sizeof(kKeyboardWithId), map));
+    const uint8_t codes[] = {0x04, 0x1e, 0x2d, 0x38, 0x4c, 0x50, 0x28, 0x3a};
+    uint32_t differ       = 0;
+    for (const uint8_t code : codes) {
+        for (uint32_t mods = 0; mods < 256; ++mods) {
+            usb_map_keyboard_release_all();
+            const uint8_t boot[8] = {static_cast<uint8_t>(mods), 0, code, 0x05, 0, 0, 0, 0};
+            const ReportMap none;
+            usb_map_keyboard(none, boot, sizeof(boot));
+            uint8_t want[256];
+            std::memcpy(want, keyboard_page(), sizeof(want));
+            usb_map_keyboard_release_all();
+            const uint8_t with_id[9] = {0x02, static_cast<uint8_t>(mods), 0, code, 0x05, 0, 0, 0, 0};
+            usb_map_keyboard(map, with_id, sizeof(with_id));
+            if (std::memcmp(want, keyboard_page(), sizeof(want)) != 0) ++differ;
+        }
+    }
+    CHECK_EQ(differ, 0u);
+    usb_map_keyboard_release_all();
+    usb_map_set_key_mode(KeyMode::Normal);
 }
 
 // Левый Shift выбирает верхний знак клавиши, остальные модификаторы
@@ -920,6 +1062,92 @@ void signal_key_tests() {
     CHECK_EQ(s_reset_requests - reset1, 1);
     CHECK_EQ(s_config_requests - config0, 2);
     kbd_report(0);
+
+    // F10 - остановка музыки: по нажатию, без повтора; с Win - тоже.
+    const int stop0 = s_music_stops;
+    kbd_report(0, 0x43);
+    CHECK_EQ(s_music_stops - stop0, 1);
+    kbd_report(0, 0x43);
+    CHECK_EQ(s_music_stops - stop0, 1);
+    kbd_report(0);
+    kbd_report(0x08, 0x43);
+    CHECK_EQ(s_music_stops - stop0, 2);
+    kbd_report(0);
+}
+
+// Фронты сигналов при перехвате клавиш: сочетание ловится фронтом всего
+// сочетания, F12 без Win - фронтом самой F12.
+void signal_edge_tests() {
+    keyboard_reset();
+    usb_map_keyboard_release_all();
+    usb_map_set_key_mode(KeyMode::Normal);
+    kbd_report(0);
+    const int reset0  = s_reset_requests;
+    const int config0 = s_config_requests;
+    const int hard0   = s_hard_requests;
+
+    // Win+F12, затем Win отпустили, F12 держится: сброса нет.
+    kbd_report(0x08, 0x45);
+    kbd_report(0, 0x45);
+    CHECK_EQ(s_config_requests - config0, 1);
+    CHECK_EQ(s_reset_requests - reset0, 0);
+    kbd_report(0);
+
+    // F12, затем к ней Win: сброс по F12, затем вход в конфигуратор.
+    kbd_report(0, 0x45);
+    kbd_report(0x08, 0x45);
+    CHECK_EQ(s_reset_requests - reset0, 1);
+    CHECK_EQ(s_config_requests - config0, 2);
+    kbd_report(0);
+
+    // Тройку держат, Alt отпустили и нажали снова: полный сброс второй раз.
+    kbd_report(0x05, 0x4C);
+    kbd_report(0x01, 0x4C);
+    kbd_report(0x05, 0x4C);
+    CHECK_EQ(s_hard_requests - hard0, 2);
+    kbd_report(0);
+
+    // Тройка зажата к подключению: сигнала нет; отпустили Delete - взведено,
+    // нажали снова - сброс.
+    usb_map_keyboard_release_all();
+    kbd_report(0x05, 0x4C);
+    CHECK_EQ(s_hard_requests - hard0, 2);
+    kbd_report(0x05);
+    kbd_report(0x05, 0x4C);
+    CHECK_EQ(s_hard_requests - hard0, 3);
+    kbd_report(0);
+
+    // Win+F2 зажаты к подключению: режим прежний, сочетание сработает со
+    // следующего нажатия.
+    usb_map_keyboard_release_all();
+    kbd_report(0x08, 0x3B);
+    CHECK(usb_map_key_mode() == KeyMode::Normal);
+    kbd_report(0x08, 0x3B);
+    CHECK(usb_map_key_mode() == KeyMode::Normal);
+    kbd_report(0x08);
+    kbd_report(0x08, 0x3B);
+    CHECK(usb_map_key_mode() == KeyMode::KempstonArrows);
+    // F2, к которой потом добавили Win: тоже фронт сочетания.
+    kbd_report(0);
+    kbd_report(0, 0x3A);
+    kbd_report(0x80, 0x3A);
+    CHECK(usb_map_key_mode() == KeyMode::Normal);
+    kbd_report(0);
+
+    // Зажатая F11 к подключению не взводит сигналы, F2 с Win - взводит
+    // только то, что не NMI и не сброс.
+    usb_map_keyboard_release_all();
+    const int nmi0 = s_nmi_requests;
+    kbd_report(0, 0x44);
+    kbd_report(0x08, 0x3B, 0x44);
+    CHECK_EQ(s_nmi_requests - nmi0, 0);
+    CHECK(usb_map_key_mode() == KeyMode::Normal);
+    kbd_report(0);
+    kbd_report(0, 0x44);
+    CHECK_EQ(s_nmi_requests - nmi0, 1);
+    kbd_report(0);
+    usb_map_set_key_mode(KeyMode::Normal);
+    joystick_reset();
 }
 
 // Отказные дескрипторы. До сих пор проверялись только заведомо годные, а
@@ -1101,7 +1329,11 @@ void run_hid_tests() {
     mouse_tuning_tests();
     mouse_autoswap_tests();
     mouse_report_id_tests();
+    boot_protocol_tests();
     gamepad_tests();
     keyboard_descriptor_tests();
+    keyboard_boot_short_tests();
+    keyboard_map_matches_boot_tests();
+    signal_edge_tests();
     report_map_error_tests();
 }

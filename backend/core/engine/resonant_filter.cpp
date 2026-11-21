@@ -5,6 +5,7 @@
 
 #include "platform/compiler.h"
 #include "platform/hot_path.h"
+
 #include "core/engine/engine_defs.h"
 #include "core/audio/saturate.h"
 

@@ -4,11 +4,8 @@
 #include "player/bank_sd.h"
 
 #include <cinttypes>
+#include <cmath> // до ff.h: на ПК он определяет isnan и isinf макросами
 #include <cstdio>
-
-// До ff.h: на ПК он определяет isnan и isinf макросами, и <cmath> из
-// shared_state.h после него не собирается.
-#include "player/shared_state.h"
 
 #include "ff.h"
 
@@ -19,6 +16,10 @@
 #include "core/memory/psram_store.h"
 
 #include "devices/storage/storage.h"
+#include "devices/storage/volumes.h"
+#include "devices/zcontroller/zcontroller.h"
+
+#include "player/shared_state.h"
 
 namespace player {
 namespace {
@@ -35,6 +36,10 @@ uint32_t s_pcm_base = 0; // смещение зоны PCM от начала фа
 // total_bytes, законного короткого чтения нет.
 uint32_t pcm_read(void*, uint32_t offset, uint8_t* dst, uint32_t bytes) {
     if (!s_open) return 0;
+    // Сэмпл читается страницами, а с карты это 140 КБ/с и меньше: большой
+    // сэмпл идёт секунды, и без витка клавиатура их теряет.
+    platform::usb_host_task_in_wait();
+    devices::zcontroller::zcontroller_tick();
     const FSIZE_t want = static_cast<FSIZE_t>(s_pcm_base) + offset;
     if (f_tell(&s_file) != want && f_lseek(&s_file, want) != FR_OK) return 0;
     UINT got = 0;
@@ -50,16 +55,16 @@ bool bank_sd_open(soundsinth::bank::Bank& out) {
 
     if (!devices::storage::storage_present()) return false;
 
-    // Том монтируется сразу (второй аргумент 1): отложенное монтирование
+    // Том монтируется сразу: отложенное монтирование
     // перенесло бы отказ в первое чтение, а решение "флеш или карта"
     // нужно здесь.
-    if (f_mount(&s_fs, "", 1) != FR_OK) {
+    if (!devices::storage::volume_attach(devices::storage::kVolumeCard, &s_fs)) {
         debug_logf("boot: bank from card - filesystem not mounted (FAT16/32?)\n");
         return false;
     }
     if (f_open(&s_file, SOUNDSINTH_BANK_SD_PATH, FA_READ) != FR_OK) {
         debug_logf("boot: no bank on the card (%s) - taking the one in flash\n", SOUNDSINTH_BANK_SD_PATH);
-        f_mount(nullptr, "", 0);
+        devices::storage::volume_detach(devices::storage::kVolumeCard);
         return false;
     }
     s_open = true;
@@ -67,7 +72,7 @@ bool bank_sd_open(soundsinth::bank::Bank& out) {
     auto give_up = [&](const char* why) {
         debug_logf("boot: bank from card not taken: %s\n", why);
         f_close(&s_file);
-        f_mount(nullptr, "", 0);
+        devices::storage::volume_detach(devices::storage::kVolumeCard);
         s_open = false;
         return false;
     };
@@ -95,8 +100,8 @@ bool bank_sd_open(soundsinth::bank::Bank& out) {
     if (f_size(&s_file) < head.total_bytes) return give_up("file is shorter than the header says");
 
     // Таблицы - в конце чипа (kBankTableOffset); хранилище трека на них
-    // ужимается при старте (psram_set_track_bytes), буфер GS режется уже
-    // ниже, пересечения нет.
+    // ужимается при старте (psram_set_track_bytes), буфер GS - блок
+    // распределителя ниже границы, пересечения нет.
     uint8_t* tables = shared::g_track_memory.psram.base + memory::kBankTableOffset;
     if (f_lseek(&s_file, 0) != FR_OK) return give_up("seek to the start failed");
     uint32_t done = 0;
@@ -111,6 +116,7 @@ bool bank_sd_open(soundsinth::bank::Bank& out) {
         // Между кусками: перечисление USB двигается витком стека, и без
         // этого клавиатура ждала бы все таблицы.
         platform::usb_host_task();
+        devices::zcontroller::zcontroller_tick();
     }
     // Таблицы легли в кэшируемое окно; bank_open и движок читают тем же
     // кэшем, сброс не нужен.
